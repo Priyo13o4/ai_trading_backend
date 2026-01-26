@@ -13,6 +13,17 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql
+      # Init scripts run only on FIRST init of an empty PGDATA.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/continuous_aggregates.sql:/docker-entrypoint-initdb.d/02_continuous_aggregates.sql:ro
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 4g
+    #       cpus: '4.0'
+    #     reservations:
+    #       memory: 2g
+    #       cpus: '2.0'
 
   redis:
     image: redis:latest
@@ -117,6 +128,8 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${TRADING_BOT_DB}
+      # Use Timescale continuous aggregates for higher TFs (no Python re-aggregation).
+      USE_TIMESCALE_CAGGS: "true"
       SESSION_REDIS_HOST: redis-sessions
       SESSION_REDIS_PORT: 6379
       SESSION_REDIS_DB: 0
@@ -130,15 +143,15 @@ services:
       - "9001:9001"
     volumes:
       - ./scripts:/app/scripts
-      - /Volumes/My Drive/Priyodip/college notes and stuff/Coding stuff (Vs code)/Docker Projects/MT5_stuff/Tick_Data:/app/Tick_Data:ro
-    deploy:
-      resources:
-        limits:
-          memory: 4g
-          cpus: '4.0'
-        reservations:
-          memory: 2g
-          cpus: '2.0'
+      # - /Volumes/My Drive/Priyodip/college notes and stuff/Coding stuff (Vs code)/Docker Projects/MT5_stuff/tick_data:/app/Tick_Data:ro  # To mount tick data as read-only
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2g
+    #       cpus: '4.0'
+    #     reservations:
+    #       memory: 2g
+    #       cpus: '2.0'
 
   scraper:
     build: ./scraper

@@ -8,7 +8,12 @@ Prepares database for clean historical data reimport:
 3. Truncates candlesticks, technical_indicators, market_structure tables
 4. Clears related cache/metadata
 
-Usage: python scripts/pre_import_cleanup.py
+**IMPORTANT NOTE (v2.0):**
+- After cleanup, D1/W1/MN1 candles must be fetched from MT5 broker (not aggregated)
+- Tick import script will only create M1-H4 timeframes
+- Connect MT5 EA after import to backfill D1/W1/MN1 historical data
+
+Usage: python scripts/utils/pre_import_cleanup.py
 """
 
 import psycopg
@@ -149,7 +154,11 @@ def main():
         logger.info("\nDatabase is now ready for historical data import.")
         logger.info("Compression policy has been removed and will be re-added after import.")
         logger.info(f"\nDeleted {total_rows:,} total rows from candlesticks")
-        logger.info("\nNext step: Run the CSV import script")
+        logger.info("\nNext steps:")
+        logger.info("  1. Run tick import script (creates M1-H4 only)")
+        logger.info("  2. Connect MT5 EA to backfill D1/W1/MN1 from broker")
+        logger.info("  3. Run indicator calculation script")
+        logger.info("\n⚠ IMPORTANT: D1/W1/MN1 are sourced from broker only (DST-aware)")
         
     except Exception as e:
         logger.error(f"\n❌ ERROR during cleanup: {e}")

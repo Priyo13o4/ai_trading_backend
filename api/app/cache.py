@@ -10,6 +10,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import logging
 
+from .timeframes import DERIVED_CAGG_TIMEFRAMES, normalize_timeframe
+
 logger = logging.getLogger(__name__)
 
 # Redis connection
@@ -55,6 +57,95 @@ def strategies_key(symbol: str = "all") -> str:
 def performance_key(symbol: str) -> str:
     """Generate Redis key for performance data"""
     return f"performance:{symbol}"
+
+
+def last_candle_key(symbol: str, timeframe: str, *, is_forming: bool) -> str:
+    suffix = "forming" if is_forming else "closed"
+    return f"candles:last:{suffix}:{symbol}:{timeframe}"
+
+
+def invalidate_historical_cache(symbol: str, timeframe: str) -> None:
+    """Invalidate request-shaped historical response caches.
+
+    Keys are shaped like:
+      historical:{symbol}:{timeframe}:{start_date}:{end_date}:{before}:{limit}:{include_indicators}:{include_forming}
+
+    Invalidation is intentionally broad: any cache entry for a symbol+TF is deleted.
+    For M1 closes, derived TF caches are also invalidated because their truth source
+    (Timescale CAGGs) depends on M1.
+
+        Why M1 invalidates derived TF caches:
+        - M5–H4 candles are *derived* from M1 via Timescale continuous aggregates.
+        - When a new *closed* M1 candle lands, it can change the most recent derived bucket(s)
+            after refresh/materialization, so any cached derived history may become stale.
+
+        Why only closed candles invalidate:
+        - Forming candles are ephemeral and are not written to Postgres.
+        - Invalidating on every forming update would thrash caches and create load spikes.
+        - Closed candles are the only events that definitively change persisted history.
+    """
+
+    try:
+        sym = str(symbol or "").upper()
+        tf = normalize_timeframe(timeframe)
+        if not sym or not tf:
+            return
+
+        patterns: list[str] = [f"historical:{sym}:{tf}:*"]
+        if tf == "M1":
+            for derived in sorted(DERIVED_CAGG_TIMEFRAMES):
+                patterns.append(f"historical:{sym}:{derived}:*")
+
+        for pattern in patterns:
+            for key in redis_client.scan_iter(match=pattern):
+                redis_client.delete(key)
+    except Exception:
+        # Invalidation should never break the main publish path.
+        return
+
+
+def _last_candle_ttl_seconds(is_forming: bool) -> int:
+    if is_forming:
+        return int(os.getenv("FORMING_LAST_CANDLE_TTL_SECONDS", "300"))
+    return int(os.getenv("CLOSED_LAST_CANDLE_TTL_SECONDS", "86400"))
+
+
+def set_last_candle_update(message: Dict[str, Any]) -> None:
+    """Persist the latest candle_update message for fast replay on SSE connect."""
+    try:
+        if message.get("type") != "candle_update":
+            return
+        symbol = str(message.get("symbol") or "").upper()
+        timeframe = str(message.get("timeframe") or "").upper()
+        if not symbol or not timeframe:
+            return
+        is_forming = bool(message.get("is_forming"))
+        key = last_candle_key(symbol, timeframe, is_forming=is_forming)
+        redis_client.setex(key, _last_candle_ttl_seconds(is_forming), json.dumps(message))
+    except Exception:
+        # Snapshot caching should never break publish.
+        return
+
+
+def get_last_candle_update(symbol: str, timeframe: str, *, prefer_forming: bool = True) -> Optional[Dict[str, Any]]:
+    try:
+        symbol = str(symbol or "").upper()
+        timeframe = str(timeframe or "").upper()
+        if not symbol or not timeframe:
+            return None
+
+        keys: list[str] = []
+        if prefer_forming:
+            keys.append(last_candle_key(symbol, timeframe, is_forming=True))
+        keys.append(last_candle_key(symbol, timeframe, is_forming=False))
+
+        for key in keys:
+            raw = redis_client.get(key)
+            if raw:
+                return json.loads(raw)
+    except Exception:
+        return None
+    return None
 
 
 class CandleCache:
@@ -143,8 +234,12 @@ class CandleCache:
                 # Invalidate all candles
                 for key in redis_client.scan_iter(match="candles:*"):
                     redis_client.delete(key)
-            
-            logger.info(f"Invalidated cache: {symbol or 'all'} {timeframe or 'all'}")
+
+            # Per-minute invalidations (e.g., M1 closes) can be very noisy; keep global wipes visible.
+            if symbol is None and timeframe is None:
+                logger.info("Invalidated cache: all")
+            else:
+                logger.debug(f"Invalidated cache: {symbol or 'all'} {timeframe or 'all'}")
             return True
         except Exception as e:
             logger.error(f"Cache invalidate error: {e}")
@@ -275,28 +370,112 @@ class PubSubManager:
         'news': 'updates:news',
         'strategies': 'updates:strategies',
     }
+
+    # Reduce log noise: aggregate successful publish counts and emit periodically.
+    _candle_pub_window_started_at: Optional[datetime] = None
+    _candle_pub_last_log_at: Optional[datetime] = None
+    _candle_pub_counts: Dict[str, int] = {}
+    _candle_pub_symbols: Dict[str, int] = {}
+    _candle_pub_total: int = 0
+    _candle_pub_forming_total: int = 0
+    _candle_pub_fail_counts: Dict[str, int] = {}
+    _candle_pub_fail_symbols: Dict[str, int] = {}
+    _candle_pub_fail_total: int = 0
+    _candle_pub_fail_last_err: Optional[str] = None
+    _CANDLE_PUB_LOG_EVERY = timedelta(minutes=5)
     
     @staticmethod
-    def publish_candle_update(symbol: str, timeframe: str, candle: Dict):
+    def publish_candle_update(symbol: str, timeframe: str, candle: Dict, is_forming: bool = False):
         """Publish new candle update"""
         try:
+            # Only invalidate response caches on closed candles.
+            # Forming candles are ephemeral (Redis/SSE only) and not persisted.
+            if not bool(is_forming):
+                invalidate_historical_cache(symbol, timeframe)
+
             message = {
                 'type': 'candle_update',
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'candle': candle,
+                'is_forming': bool(is_forming),
                 'timestamp': datetime.now().isoformat()
             }
+
+            # Cache the latest message for instant replay to new SSE clients.
+            set_last_candle_update(message)
             
             redis_client.publish(
                 PubSubManager.CHANNELS['candles'],
                 json.dumps(message)
             )
-            
-            logger.info(f"Published candle update: {symbol} {timeframe}")
+
+            # Success logging (throttled)
+            now = datetime.utcnow()
+            if PubSubManager._candle_pub_window_started_at is None:
+                PubSubManager._candle_pub_window_started_at = now
+                PubSubManager._candle_pub_last_log_at = now
+
+            tf_key = normalize_timeframe(timeframe)
+            PubSubManager._candle_pub_counts[tf_key] = PubSubManager._candle_pub_counts.get(tf_key, 0) + 1
+            sym_key = (symbol or "").strip().upper()
+            if sym_key:
+                PubSubManager._candle_pub_symbols[sym_key] = PubSubManager._candle_pub_symbols.get(sym_key, 0) + 1
+            PubSubManager._candle_pub_total += 1
+            if bool(is_forming):
+                PubSubManager._candle_pub_forming_total += 1
+
+            last_log = PubSubManager._candle_pub_last_log_at or now
+            if (now - last_log) >= PubSubManager._CANDLE_PUB_LOG_EVERY:
+                # Requested compact format: Success/Failed with symbols + TFs.
+                symbols = list(sorted(PubSubManager._candle_pub_symbols.keys()))
+                tfs = list(sorted(PubSubManager._candle_pub_counts.keys()))
+                logger.info(
+                    "Redis candle publish Success: symbols=%s tfs=%s total=%d forming=%d",
+                    symbols,
+                    tfs,
+                    PubSubManager._candle_pub_total,
+                    PubSubManager._candle_pub_forming_total,
+                )
+
+                fail_symbols = list(sorted(PubSubManager._candle_pub_fail_symbols.keys()))
+                fail_tfs = list(sorted(PubSubManager._candle_pub_fail_counts.keys()))
+                logger.info(
+                    "Redis candle publish Failed: symbols=%s tfs=%s total=%d last_err=%s",
+                    fail_symbols,
+                    fail_tfs,
+                    PubSubManager._candle_pub_fail_total,
+                    PubSubManager._candle_pub_fail_last_err,
+                )
+
+                PubSubManager._candle_pub_last_log_at = now
+                PubSubManager._candle_pub_window_started_at = now
+                PubSubManager._candle_pub_counts = {}
+                PubSubManager._candle_pub_symbols = {}
+                PubSubManager._candle_pub_total = 0
+                PubSubManager._candle_pub_forming_total = 0
+                PubSubManager._candle_pub_fail_counts = {}
+                PubSubManager._candle_pub_fail_symbols = {}
+                PubSubManager._candle_pub_fail_total = 0
+                PubSubManager._candle_pub_fail_last_err = None
             return True
         except Exception as e:
-            logger.error(f"Publish error: {e}")
+            # Track failures for the next throttled summary line.
+            tf_key = normalize_timeframe(timeframe)
+            PubSubManager._candle_pub_fail_counts[tf_key] = PubSubManager._candle_pub_fail_counts.get(tf_key, 0) + 1
+            sym_key = (symbol or "").strip().upper()
+            if sym_key:
+                PubSubManager._candle_pub_fail_symbols[sym_key] = PubSubManager._candle_pub_fail_symbols.get(sym_key, 0) + 1
+            PubSubManager._candle_pub_fail_total += 1
+            PubSubManager._candle_pub_fail_last_err = str(e)
+
+            # Requested compact format; keep the exception for debugging.
+            logger.error(
+                "Redis candle publish Failed: symbols=%s tfs=%s err=%s",
+                [(symbol or "").strip().upper()],
+                [normalize_timeframe(timeframe)],
+                str(e),
+            )
             return False
     
     @staticmethod

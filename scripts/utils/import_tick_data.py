@@ -4,9 +4,16 @@ Tick Data Importer and Aggregator
 ----------------------------------
 Imports raw tick data and aggregates into OHLC candlesticks at multiple timeframes.
 
+**IMPORTANT CHANGE (v2.0):**
+- D1, W1, MN1 are NO LONGER aggregated from ticks
+- These timeframes are sourced directly from broker via MT5 EA
+- Rationale: Forex session boundaries (DST, Sunday 22:00 UTC open) cannot be 
+  expressed in fixed UTC aggregation without systematic drift
+
 Features:
 - Processes massive tick CSV files efficiently (streaming chunks)
-- Aggregates ticks to: M1, M5, M15, M30, H1, H4, D1, W1
+- Aggregates ticks to: M1 ONLY
+- Derived TFs (M5, M15, M30, H1, H4) are provided by Timescale continuous aggregates
 - Direct database insertion (TimescaleDB)
 - Uses UTC timestamps (no DST conversion needed)
 - Handles natural market gaps (weekends, holidays)
@@ -59,22 +66,18 @@ if not DATABASE_URL:
     DATABASE_URL = f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 # Timeframe configurations (in minutes)
+# Hybrid truth model:
+# - Store only M1 in candlesticks when importing from ticks
+# - Derived TFs (M5–H4) must be served from Timescale continuous aggregates
 TIMEFRAMES = {
     'M1': 1,
-    'M5': 5,
-    'M15': 15,
-    'M30': 30,
-    'H1': 60,
-    'H4': 240,
-    'D1': 1440,
-    'W1': 10080,  # 7 days
 }
 
 # Batch size for database inserts (optimized for speed)
-BATCH_SIZE = 200000
+BATCH_SIZE = 500000
 
 # Chunk size for reading CSV (number of ticks) - large for maximum speed
-CHUNK_SIZE = 2000000
+CHUNK_SIZE = 5000000
 
 
 class CandleBuilder:
@@ -87,19 +90,13 @@ class CandleBuilder:
         self.finished_candles = []
     
     def get_candle_start_time(self, tick_time):
-        """Calculate the candle start time for a given tick timestamp."""
-        if self.timeframe_minutes == TIMEFRAMES['W1']:
-            # Weekly: Start of week (Monday 00:00)
-            days_from_monday = tick_time.weekday()
-            week_start = tick_time.date() - timedelta(days=days_from_monday)
-            return datetime.combine(week_start, datetime.min.time())
+        """Calculate the candle start time for a given tick timestamp.
         
-        elif self.timeframe_minutes == TIMEFRAMES['D1']:
-            # Daily: Start of day (00:00)
-            return tick_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        elif self.timeframe_minutes >= 60:
-            # Hourly timeframes
+        Note: D1/W1/MN1 removed - these are sourced from broker (DST-aware).
+        Only fixed-duration timeframes (M1-H4) are aggregated from ticks.
+        """
+        if self.timeframe_minutes >= 60:
+            # Hourly timeframes (H1, H4)
             if self.timeframe_minutes == TIMEFRAMES['H4']:
                 hour = (tick_time.hour // 4) * 4
             else:  # H1

@@ -2,8 +2,8 @@
 """
 Data Updater Scheduler
 ======================
-Runs gap filler ONCE on startup, 
-then switches to realtime updater every 5 minutes
+MT5 Mode: Runs indicator calculator every 5 minutes (broker pushes data via TCP)
+TwelveData Mode: DEPRECATED - use MT5 broker integration instead
 
 FIX 5 COMPLIANCE:
 - Scheduler contains ZERO market logic
@@ -20,97 +20,21 @@ import subprocess
 from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-GAP_FILLER_SCRIPT = os.path.join(SCRIPT_DIR, "fill_data_gaps.py")
-REALTIME_UPDATER_SCRIPT = os.path.join(SCRIPT_DIR, "realtime_updater.py")
-CANDLE_AGGREGATOR_SCRIPT = os.path.join(SCRIPT_DIR, "candle_aggregator.py")
-INDICATOR_SCRIPT = os.path.join(SCRIPT_DIR, "calculate_recent_indicators.py")
+INDICATOR_SCRIPT = os.path.join(SCRIPT_DIR, "calculate_recent_indicators_v2.py")  # v2.0 - DST-safe with HTF checks
 UPDATE_INTERVAL = 300  # 5 minutes in seconds
-GAP_FILLER_INTERVAL_CYCLES = 12  # every 60 minutes
+
+
+def _use_timescale_caggs() -> bool:
+    return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
 
 def log(message):
     """Print timestamped log message"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {message}", flush=True)
 
-def run_gap_filler(priority_mode=False):
-    """Execute the gap filler script
-    
-    Args:
-        priority_mode: If True, only fills EURUSD/XAUUSD and returns immediately
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    log("="*80)
-    if priority_mode:
-        log("Starting gap filler (PRIORITY: EURUSD/XAUUSD only)...")
-    else:
-        log("Starting gap filler (fills historical gaps)...")
-    log("="*80)
-    
-    try:
-        # Note: gap filler has built-in wait for 5-min boundary
-        result = subprocess.run(
-            [sys.executable, GAP_FILLER_SCRIPT],
-            capture_output=False,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            log("✓ Gap filler completed successfully")
-        else:
-            log(f"✗ Gap filler failed with exit code {result.returncode}")
-        
-        return result.returncode == 0
-    
-    except Exception as e:
-        log(f"✗ Error running gap filler: {e}")
-        return False
-
-def run_realtime_updater():
-    """Execute the realtime updater script (runs every 5 minutes)"""
-    log("="*80)
-    log("Starting realtime updater (fetches latest candles)...")
-    log("="*80)
-    
-    try:
-        result = subprocess.run(
-            [sys.executable, REALTIME_UPDATER_SCRIPT],
-            capture_output=False,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            log("✓ Realtime updater completed successfully")
-        else:
-            log(f"✗ Realtime updater failed with exit code {result.returncode}")
-        
-        return result.returncode == 0
-    
-    except Exception as e:
-        log(f"✗ Error running realtime updater: {e}")
-        return False
-
-
-def run_candle_aggregator():
-    """Aggregate M1 into higher timeframes"""
-    log("="*80)
-    log("Starting candle aggregator (M1 -> higher TF)...")
-    log("="*80)
-    try:
-        result = subprocess.run(
-            [sys.executable, CANDLE_AGGREGATOR_SCRIPT],
-            capture_output=False,
-            text=True
-        )
-        if result.returncode == 0:
-            log("✓ Candle aggregator completed successfully")
-        else:
-            log(f"✗ Candle aggregator failed with exit code {result.returncode}")
-        return result.returncode == 0
-    except Exception as e:
-        log(f"✗ Error running candle aggregator: {e}")
-        return False
+def log_mode_banner():
+    if _use_timescale_caggs():
+        log("🧱 Timescale CAGG mode enabled: higher TF candles computed in DB")
 
 
 def run_indicator_updater():
@@ -226,53 +150,33 @@ def wait_for_mt5_ready():
         time.sleep(poll_s)
 
 def main():
-    """Main scheduler loop
+    """Main scheduler loop - MT5 MODE ONLY
     
-    SIMPLIFIED: No WebSocket, pure REST API for all symbols
-    - Runs gap filler on startup
-    - Runs realtime updater every 5 minutes
-    - Runs candle aggregator after each update
+    MT5 Mode: Broker pushes data via TCP → Just run indicator calculator every 5 minutes
+    TwelveData Mode: DEPRECATED (use MT5 broker integration)
     """
-    data_source = (os.getenv("DATA_SOURCE") or "TWELVEDATA").strip().upper()
+    data_source = (os.getenv("DATA_SOURCE") or "MT5").strip().upper()
     mt5_mode = data_source in {"MT5", "MT5_ONLY", "BROKER"}
 
     log("="*80)
-    if mt5_mode:
-        log("DATA UPDATER SCHEDULER STARTED (MT5 PUSH-FIRST)")
-    else:
-        log("DATA UPDATER SCHEDULER STARTED (REST API ONLY)")
+    log("DATA UPDATER SCHEDULER STARTED (MT5 BROKER MODE)")
     log("="*80)
     log(f"Update interval: {UPDATE_INTERVAL}s ({UPDATE_INTERVAL/60:.1f} minutes)")
-    log(f"Gap filler script: {GAP_FILLER_SCRIPT}")
-    log(f"Realtime updater script: {REALTIME_UPDATER_SCRIPT}")
-    log(f"Candle aggregator script: {CANDLE_AGGREGATOR_SCRIPT}")
     log(f"Indicator script: {INDICATOR_SCRIPT}")
     log("="*80)
+
+    log_mode_banner()
     
     # ============================================================================
-    # STEP 1: Startup actions
+    # STEP 1: Startup - Wait for MT5 ready, compute initial indicators
     # ============================================================================
-    if mt5_mode:
-        wait_for_mt5_ready()
-        log("\n🚀 STARTUP: MT5 mode - skipping TwelveData gap filler")
-        log("🧮 STARTUP: Aggregating candles + computing indicators...")
-        run_candle_aggregator()
-        run_indicator_updater()
-    else:
-        log("\n🚀 STARTUP: Running gap filler...")
-        log("(Gap filler has built-in 5-min boundary wait)")
-        gap_fill_success = run_gap_filler()
-
-        if not gap_fill_success:
-            log("⚠️  Gap filler had issues, but continuing...")
-
-        # Aggregate and compute indicators once on startup so regime data isn't stale
-        log("\n🧮 STARTUP: Aggregating candles + computing indicators...")
-        run_candle_aggregator()
-        run_indicator_updater()
+    wait_for_mt5_ready()
+    log("\n🚀 STARTUP: MT5 mode - Broker pushes data via TCP")
+    log("🧮 STARTUP: Computing indicators...")
+    run_indicator_updater()
     
     # ============================================================================
-    # STEP 2: Switch to realtime updater for continuous updates
+    # STEP 2: Continuous 5-minute indicator updates
     # ============================================================================
     log(f"\n⏰ Starting processing loop (every {UPDATE_INTERVAL/60:.1f} minutes)...")
     log("Waiting for next 5-minute mark before first cycle...")
@@ -282,27 +186,13 @@ def main():
     while True:
         try:
             # Wait for next 5-minute candle close FIRST (before processing)
-            # This ensures timing is consistent regardless of processing duration
             wait_for_next_5min_mark()
             
             run_count += 1
             log(f"\n🔄 SCHEDULED UPDATE #{run_count}")
 
-            if not mt5_mode:
-                # TwelveData mode: fetch latest candles
-                run_realtime_updater()
-
-            # MT5 mode: candles are pushed into DB continuously; we only process
-            run_candle_aggregator()
+            # MT5 mode: Broker pushes candles continuously → Just compute indicators
             run_indicator_updater()
-
-            # Hourly safety net gap fill
-            if run_count % GAP_FILLER_INTERVAL_CYCLES == 0:
-                if mt5_mode:
-                    log("\n🛠  Hourly safety net: MT5 mode (gap healing via HISTORY_FETCH not yet wired)")
-                else:
-                    log("\n🛠  Hourly safety net: running gap filler")
-                    run_gap_filler()
             
         except KeyboardInterrupt:
             log("\n\n⚠️  Received interrupt signal, shutting down...")

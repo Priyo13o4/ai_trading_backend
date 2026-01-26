@@ -8,6 +8,41 @@ logger = logging.getLogger(__name__)
 _db_name = os.getenv('TRADING_BOT_DB') or os.getenv('POSTGRES_DB')
 POSTGRES_DSN = f"host={os.getenv('POSTGRES_HOST')} port={os.getenv('POSTGRES_PORT')} dbname={_db_name} user={os.getenv('POSTGRES_USER')} password={os.getenv('POSTGRES_PASSWORD')}"
 
+
+def _use_timescale_caggs() -> bool:
+    return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _ohlcv_relation_for_timeframe(timeframe: str) -> str:
+    # LOCKED ARCHITECTURE:
+    # - Broker provides: M1, D1, W1, MN1  (always queried from candlesticks)
+    # - CAGGs provide: M5, M15, M30, H1, H4 (optional, gated by USE_TIMESCALE_CAGGS)
+    from .timeframes import (
+        normalize_timeframe,
+        is_derived_cagg_timeframe,
+        cagg_relation_for_timeframe,
+        assert_timeframe_policy,
+        TimeframePolicyError,
+    )
+
+    tf = normalize_timeframe(timeframe)
+
+    # Broker-provided TFs always come from the base candlesticks table.
+    if tf in {"M1", "D1", "W1", "MN1"}:
+        assert_timeframe_policy(tf, "broker_raw")
+        return "candlesticks"
+
+    # Derived TFs must come from Timescale CAGGs (no raw fallback).
+    if is_derived_cagg_timeframe(tf):
+        assert_timeframe_policy(tf, "cagg")
+        if not _use_timescale_caggs():
+            raise TimeframePolicyError(
+                f"Derived timeframe {tf} requires Timescale CAGGs (USE_TIMESCALE_CAGGS=true)"
+            )
+        return cagg_relation_for_timeframe(tf)
+
+    raise ValueError(f"Unsupported timeframe: {tf}")
+
 # ============================================================================
 # STRATEGY & SIGNAL QUERIES (NEW SCHEMA v2.0)
 # ============================================================================
@@ -187,12 +222,15 @@ def get_regime_market_data_from_db():
                 timeframes = [row["timeframe"] for row in cur.fetchall()]
 
             if not timeframes:
-                # Fallback if indicators table is empty: use available OHLC timeframes (skip M1)
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe <> 'M1' ORDER BY timeframe"
-                    )
-                    timeframes = [row["timeframe"] for row in cur.fetchall()]
+                # Fallback if indicators table is empty.
+                if _use_timescale_caggs():
+                    timeframes = ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe <> 'M1' ORDER BY timeframe"
+                        )
+                        timeframes = [row["timeframe"] for row in cur.fetchall()]
 
             if not symbols or not timeframes:
                 logger.warning("[DB] No symbols/timeframes available for regime market data")
@@ -225,15 +263,27 @@ def get_regime_market_data_from_db():
                             logger.warning(f"[DB] No indicators for {symbol}/{timeframe}")
                             continue
                         
-                        # Get recent bars for market structure analysis
+                        # Get recent bars for market structure analysis (USE TIMESCALE CAGGs)
+                        rel = _ohlcv_relation_for_timeframe(timeframe)
                         with conn.cursor() as cur:
-                            cur.execute("""
-                                SELECT time, open, high, low, close, volume
-                                FROM candlesticks
-                                WHERE symbol = %s AND timeframe = %s
-                                ORDER BY time DESC
-                                LIMIT 100
-                            """, (symbol, timeframe))
+                            if rel == "candlesticks":
+                                # M1 or non-CAGG mode
+                                cur.execute("""
+                                    SELECT time, open, high, low, close, volume
+                                    FROM candlesticks
+                                    WHERE symbol = %s AND timeframe = %s
+                                    ORDER BY time DESC
+                                    LIMIT 100
+                                """, (symbol, timeframe))
+                            else:
+                                # Use TimescaleDB continuous aggregate for higher timeframes
+                                cur.execute(f"""
+                                    SELECT time, open, high, low, close, volume
+                                    FROM {rel}
+                                    WHERE symbol = %s
+                                    ORDER BY time DESC
+                                    LIMIT 100
+                                """, (symbol,))
                             candles = cur.fetchall()
                         
                         if not candles:
@@ -314,29 +364,29 @@ def get_regime_market_data_from_db():
                             },
                             "technical_indicators": {
                                 "emas": {
-                                    "EMA_9": round(float(indicators['ema_9']), 5) if indicators['ema_9'] else None,
-                                    "EMA_21": round(float(indicators['ema_21']), 5) if indicators['ema_21'] else None,
-                                    "EMA_50": round(float(indicators['ema_50']), 5) if indicators['ema_50'] else None,
-                                    "EMA_100": round(float(indicators['ema_100']), 5) if indicators['ema_100'] else None,
-                                    "EMA_200": round(float(indicators['ema_200']), 5) if indicators['ema_200'] else None
+                                    "EMA_9": round(float(indicators['ema_9']), 5) if indicators['ema_9'] is not None else None,
+                                    "EMA_21": round(float(indicators['ema_21']), 5) if indicators['ema_21'] is not None else None,
+                                    "EMA_50": round(float(indicators['ema_50']), 5) if indicators['ema_50'] is not None else None,
+                                    "EMA_100": round(float(indicators['ema_100']), 5) if indicators['ema_100'] is not None else None,
+                                    "EMA_200": round(float(indicators['ema_200']), 5) if indicators['ema_200'] is not None else None
                                 },
-                                "rsi": round(float(indicators['rsi']), 2) if indicators['rsi'] else None,
-                                "macd_main": round(float(indicators['macd_main']), 5) if indicators['macd_main'] else None,
-                                "macd_signal": round(float(indicators['macd_signal']), 5) if indicators['macd_signal'] else None,
-                                "macd_histogram": round(float(indicators['macd_histogram']), 5) if indicators['macd_histogram'] else None,
-                                "atr": round(float(indicators['atr']), 5) if indicators['atr'] else None,
-                                "atr_percentile": round(float(indicators['atr_percentile']), 1) if indicators['atr_percentile'] else None,
-                                "bb_upper": round(float(indicators['bb_upper']), 5) if indicators['bb_upper'] else None,
-                                "bb_middle": round(float(indicators['bb_middle']), 5) if indicators['bb_middle'] else None,
-                                "bb_lower": round(float(indicators['bb_lower']), 5) if indicators['bb_lower'] else None,
-                                "bb_squeeze_ratio": round(float(indicators['bb_squeeze_ratio']), 5) if indicators['bb_squeeze_ratio'] else None,
-                                "bb_width_percentile": round(float(indicators['bb_width_percentile']), 1) if indicators['bb_width_percentile'] else None,
-                                "roc_percent": round(float(indicators['roc_percent']), 5) if indicators['roc_percent'] else None,
-                                "ema_momentum_slope": round(float(indicators['ema_momentum_slope']), 5) if indicators['ema_momentum_slope'] else None,
-                                "adx": round(float(indicators['adx']), 2) if indicators['adx'] else None,
-                                "dmp": round(float(indicators['dmp']), 2) if indicators['dmp'] else None,
-                                "dmn": round(float(indicators['dmn']), 2) if indicators['dmn'] else None,
-                                "obv_slope": round(float(indicators['obv_slope']), 5) if indicators['obv_slope'] else None
+                                "rsi": round(float(indicators['rsi']), 2) if indicators['rsi'] is not None else None,
+                                "macd_main": round(float(indicators['macd_main']), 5) if indicators['macd_main'] is not None else None,
+                                "macd_signal": round(float(indicators['macd_signal']), 5) if indicators['macd_signal'] is not None else None,
+                                "macd_histogram": round(float(indicators['macd_histogram']), 5) if indicators['macd_histogram'] is not None else None,
+                                "atr": round(float(indicators['atr']), 5) if indicators['atr'] is not None else None,
+                                "atr_percentile": round(float(indicators['atr_percentile']), 1) if indicators['atr_percentile'] is not None else None,
+                                "bb_upper": round(float(indicators['bb_upper']), 5) if indicators['bb_upper'] is not None else None,
+                                "bb_middle": round(float(indicators['bb_middle']), 5) if indicators['bb_middle'] is not None else None,
+                                "bb_lower": round(float(indicators['bb_lower']), 5) if indicators['bb_lower'] is not None else None,
+                                "bb_squeeze_ratio": round(float(indicators['bb_squeeze_ratio']), 5) if indicators['bb_squeeze_ratio'] is not None else None,
+                                "bb_width_percentile": round(float(indicators['bb_width_percentile']), 1) if indicators['bb_width_percentile'] is not None else None,
+                                "roc_percent": round(float(indicators['roc_percent']), 5) if indicators['roc_percent'] is not None else None,
+                                "ema_momentum_slope": round(float(indicators['ema_momentum_slope']), 5) if indicators['ema_momentum_slope'] is not None else None,
+                                "adx": round(float(indicators['adx']), 2) if indicators['adx'] is not None else None,
+                                "dmp": round(float(indicators['dmp']), 2) if indicators['dmp'] is not None else None,
+                                "dmn": round(float(indicators['dmn']), 2) if indicators['dmn'] is not None else None,
+                                "obv_slope": round(float(indicators['obv_slope']), 5) if indicators['obv_slope'] is not None else None
                             },
                             "market_structure": {
                                 "recent_high": round(recent_high, 5),

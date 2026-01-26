@@ -177,12 +177,12 @@ def main():
             
             # Step 5: Recalculate technical indicators
             logger.info("\n[STEP 5/6] Recalculating technical indicators...")
-            logger.info("  This will run the calculate_recent_indicators.py script...")
+            logger.info("  This will run the calculate_recent_indicators_v2.py script (v2.0 - DST-safe)...")
             
             try:
                 # Run indicator calculation script
                 result = subprocess.run(
-                    ['python', '/app/scripts/calculate_recent_indicators.py'],
+                    ['python', '/app/scripts/calculate_recent_indicators_v2.py'],
                     capture_output=True,
                     text=True,
                     timeout=600  # 10 minute timeout
@@ -204,7 +204,7 @@ def main():
                 logger.warning("⚠ Indicator calculation timed out after 10 minutes")
                 logger.warning("  This is non-critical - indicators can be recalculated later")
             except FileNotFoundError:
-                logger.warning("⚠ calculate_recent_indicators.py not found")
+                logger.warning("⚠ calculate_recent_indicators_v2.py not found")
                 logger.warning("  Skipping indicator calculation - run manually if needed")
             
             # Step 6: Final verification

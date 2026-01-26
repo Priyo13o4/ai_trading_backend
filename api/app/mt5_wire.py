@@ -39,12 +39,34 @@ MSG_SUBSCRIBE = 10          # Backend/bridge -> EA
 MSG_HISTORY_FETCH = 11      # Backend/bridge -> EA
 
 MSG_LIVE_BAR = 20           # EA -> backend (via bridge)
+MSG_FORMING_BAR = 24        # EA -> backend (forming M1 snapshot, ephemeral)
 MSG_HIST_BEGIN = 21         # EA -> backend
 MSG_HIST_CHUNK = 22         # EA -> backend
 MSG_HIST_END = 23           # EA -> backend
 
-# Timeframe codes
+# Timeframe codes (must match MT5 EA)
 TF_M1 = 1
+TF_M5 = 2
+TF_M15 = 3
+TF_M30 = 4
+TF_H1 = 5
+TF_H4 = 6
+TF_D1 = 7   # Broker-provided only (DST-aware)
+TF_W1 = 8   # Broker-provided only (session-aligned)
+TF_MN1 = 9  # Broker-provided only (month-aligned)
+
+# Map timeframe codes to database names
+TF_TO_NAME = {
+    TF_M1: "M1",
+    TF_M5: "M5",
+    TF_M15: "M15",
+    TF_M30: "M30",
+    TF_H1: "H1",
+    TF_H4: "H4",
+    TF_D1: "D1",
+    TF_W1: "W1",
+    TF_MN1: "MN1",
+}
 
 # Sources
 SRC_MT5 = 1
@@ -221,6 +243,37 @@ def unpack_live_bar(payload: bytes) -> dict:
         "close": c,
         "volume": vol,
     }
+
+
+def pack_forming_bar(
+    *,
+    symbol: str,
+    ts_open: int,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: int,
+    tf: int = TF_M1,
+    source: int = SRC_MT5,
+) -> bytes:
+    # Same payload layout as LIVE_BAR.
+    return pack_live_bar(
+        symbol=symbol,
+        ts_open=ts_open,
+        open_=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        tf=tf,
+        source=source,
+    )
+
+
+def unpack_forming_bar(payload: bytes) -> dict:
+    # Same payload layout as LIVE_BAR.
+    return unpack_live_bar(payload)
 
 
 # History chunk header + repeated candle rows

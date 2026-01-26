@@ -10,15 +10,76 @@ from typing import Optional, List, Dict
 import psycopg
 from psycopg.rows import dict_row
 import os
-import redis
 import json
+import asyncio
+import logging
+import uuid
+
+from ..cache import redis_client
+from ..timeframes import (
+    normalize_timeframe,
+    is_broker_timeframe,
+    is_derived_cagg_timeframe,
+    cagg_relation_for_timeframe,
+    timeframe_minutes,
+    assert_timeframe_policy,
+    TimeframePolicyError,
+)
+
+from ..mt5_ingest import mt5_ingest_server
+from ..mt5_wire import TF_D1, TF_M1, TF_MN1, TF_W1
 
 router = APIRouter(prefix="/api/historical", tags=["historical"])
 
-# Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:your_password@localhost:5432/trading_db")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+logger = logging.getLogger(__name__)
+
+# Configuration - Build DATABASE_URL from components (matches scripts/calculate_recent_indicators.py pattern)
+_db_host = os.getenv("POSTGRES_HOST", "postgres")
+_db_port = os.getenv("POSTGRES_PORT", "5432")
+_db_name = os.getenv("POSTGRES_DB") or os.getenv("TRADING_BOT_DB", "ai_trading_bot_data")
+_db_user = os.getenv("POSTGRES_USER", "postgres")
+_db_password = os.getenv("POSTGRES_PASSWORD", "")
+
 CACHE_TTL = 300  # 5 minutes
+
+DATABASE_URL = os.getenv("DATABASE_URL") or f"postgresql://{_db_user}:{_db_password}@{_db_host}:{_db_port}/{_db_name}"
+
+
+def _floor_utc_bucket(dt: datetime, timeframe_minutes: int) -> datetime:
+    """Floor a UTC datetime to the bucket start.
+
+    Must match the MT5 ingest forming-bucket alignment so historical can append the
+    current *forming* candle for higher TFs.
+    """
+    dt = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+
+    if timeframe_minutes >= 43200:  # MN1
+        return dt.replace(day=1, hour=0, minute=0)
+
+    if timeframe_minutes >= 10080:  # W1
+        # Forex trading week alignment: Sunday 22:00 UTC.
+        # Python weekday(): Mon=0 ... Sun=6
+        days_since_sunday = (dt.weekday() + 1) % 7
+        sunday = dt - timedelta(days=days_since_sunday)
+        bucket = sunday.replace(hour=22, minute=0)
+        if dt < bucket:
+            bucket -= timedelta(days=7)
+        return bucket
+
+    if timeframe_minutes >= 1440:  # D1
+        return dt.replace(hour=0, minute=0)
+
+    total_minutes = dt.hour * 60 + dt.minute
+    period_minute = (total_minutes // timeframe_minutes) * timeframe_minutes
+    return dt.replace(hour=period_minute // 60, minute=period_minute % 60)
+
+
+def _forming_state_key(symbol: str, timeframe: str, bucket_start: datetime) -> str:
+    return f"forming:bucket:{str(symbol).upper()}:{str(timeframe).upper()}:{int(bucket_start.timestamp())}"
+
+
+def _use_timescale_caggs() -> bool:
+    return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def get_db_connection():
@@ -26,12 +87,37 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 
-def get_redis_client():
-    """Get Redis client"""
+def _cagg_refresh_lock_key(*, relation: str, start: datetime, end: datetime) -> str:
+    # Lock granularity is per (relation, exact range) for correctness.
+    # This prevents refresh storms when multiple clients request the same missing window.
+    return f"cagg_refresh_lock:{relation}:{int(start.timestamp())}:{int(end.timestamp())}"
+
+
+def _release_redis_lock_best_effort(key: str, token: str) -> None:
+    # Atomic compare-and-del.
     try:
-        return redis.from_url(REDIS_URL, decode_responses=True)
-    except:
-        return None
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+          return redis.call('del', KEYS[1])
+        end
+        return 0
+        """
+        redis_client.eval(script, 1, key, token)
+    except Exception:
+        return
+
+
+def _mt5_tf_code_for_broker_timeframe(tf: str) -> int:
+    tf = normalize_timeframe(tf)
+    if tf == "M1":
+        return TF_M1
+    if tf == "D1":
+        return TF_D1
+    if tf == "W1":
+        return TF_W1
+    if tf == "MN1":
+        return TF_MN1
+    raise ValueError(f"Not a broker timeframe: {tf}")
 
 
 @router.get("/{symbol}/{timeframe}")
@@ -41,8 +127,9 @@ async def get_historical_data(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     before: Optional[int] = Query(None, description="Fetch data before this Unix timestamp (for lazy loading)"),
-    limit: int = Query(1000, ge=1, le=5000, description="Max bars to return"),
-    include_indicators: bool = Query(True, description="Include technical indicators")
+    limit: int = Query(1000, ge=1, le=10000, description="Max bars to return"),
+    include_indicators: bool = Query(True, description="Include technical indicators"),
+    include_forming: bool = Query(True, description="Append current forming candle for higher timeframes (best-effort)")
 ):
     """
     Get historical OHLCV data with optional indicators
@@ -54,18 +141,19 @@ async def get_historical_data(
     - /api/historical/XAUUSD/H1?before=1640995200&limit=1000  (lazy loading)
     """
     
-    # Generate cache key
-    cache_key = f"historical:{symbol}:{timeframe}:{start_date}:{end_date}:{before}:{limit}:{include_indicators}"
+    # Generate cache key (request-shaped, but normalized for systematic invalidation)
+    sym = str(symbol or "").upper()
+    tf = normalize_timeframe(timeframe)
+    cache_key = f"historical:{sym}:{tf}:{start_date}:{end_date}:{before}:{limit}:{include_indicators}:{include_forming}"
     
     # Try Redis cache first
-    redis_client = get_redis_client()
-    if redis_client:
-        try:
-            cached = redis_client.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except:
-            pass
+    try:
+        cached = redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        # Redis is required globally; however cache lookups must not break API responses.
+        cached = None
     
     # Query database
     try:
@@ -87,23 +175,65 @@ async def get_historical_data(
                     ti.adx, ti.dmp, ti.dmn, ti.obv_slope
                 """
             
-            query += """
-                FROM candlesticks c
-            """
-            
-            if include_indicators:
+            tf = normalize_timeframe(timeframe)
+            # LOCKED ARCHITECTURE:
+            # - Only derived TFs (M5..H4) may use CAGGs
+            # - D1/W1/MN1 must NEVER be queried from CAGGs
+            use_caggs = _use_timescale_caggs() and is_derived_cagg_timeframe(tf)
+
+            # No raw fallback for derived TFs.
+            if is_derived_cagg_timeframe(tf) and not use_caggs:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Derived timeframe history requires Timescale CAGGs (USE_TIMESCALE_CAGGS=true).",
+                )
+
+            # Fail-fast invariants (prevents silent regressions).
+            try:
+                if use_caggs:
+                    assert_timeframe_policy(tf, "cagg")
+                elif is_broker_timeframe(tf):
+                    assert_timeframe_policy(tf, "broker_raw")
+            except TimeframePolicyError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            rel: Optional[str] = None
+            if use_caggs:
+                rel = cagg_relation_for_timeframe(tf)
+                query += f"\n                FROM {rel} c\n            "
+            else:
                 query += """
-                    LEFT JOIN technical_indicators ti 
-                    ON c.symbol = ti.symbol 
-                    AND c.timeframe = ti.timeframe 
-                    AND c.time = ti.time
+                    FROM candlesticks c
                 """
             
-            query += """
-                WHERE c.symbol = %s AND c.timeframe = %s
-            """
+            if include_indicators:
+                if use_caggs:
+                    query += """
+                        LEFT JOIN technical_indicators ti
+                        ON c.symbol = ti.symbol
+                        AND ti.timeframe = %s
+                        AND c.time = ti.time
+                    """
+                else:
+                    query += """
+                        LEFT JOIN technical_indicators ti 
+                        ON c.symbol = ti.symbol 
+                        AND c.timeframe = ti.timeframe 
+                        AND c.time = ti.time
+                    """
             
-            params = [symbol, timeframe]
+            if use_caggs:
+                query += """
+                    WHERE c.symbol = %s
+                """
+                params = []
+                if include_indicators:
+                    params.append(tf)
+                params.append(symbol)
+            else:
+                query += """
+                    WHERE c.symbol = %s AND c.timeframe = %s
+                """
+                params = [symbol, tf]
             
             if start_date:
                 query += " AND c.time >= %s"
@@ -125,10 +255,226 @@ async def get_historical_data(
             
             cur.execute(query, params)
             rows = cur.fetchall()
+
+            # Per-request bootstrap for broker timeframes (M1/D1/W1/MN1):
+            # if DB has no rows for the requested window and the MT5 bridge is connected,
+            # ask MT5 for history for this specific symbol+TF and retry.
+            if (not use_caggs) and (not rows) and is_broker_timeframe(tf) and mt5_ingest_server.session_count > 0:
+                try:
+                    tf_code = _mt5_tf_code_for_broker_timeframe(tf)
+
+                    req_end: Optional[datetime] = None
+                    req_start: Optional[datetime] = None
+
+                    if end_date:
+                        req_end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+                    elif before:
+                        req_end = datetime.fromtimestamp(before, tz=timezone.utc)
+
+                    if start_date:
+                        req_start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+                    elif req_end is not None:
+                        req_start = req_end - timedelta(minutes=int(timeframe_minutes(tf)) * int(limit))
+
+                    if req_start is not None and req_end is not None and req_start < req_end:
+                        await mt5_ingest_server.broadcast_history_fetch(
+                            symbol=str(symbol).upper(),
+                            from_ts=int(req_start.timestamp()),
+                            to_ts=int(req_end.timestamp()),
+                            tf=int(tf_code),
+                            max_bars=int(os.getenv("MT5_ONDEMAND_HISTORY_MAX_BARS", "2000")),
+                            chunk_bars=int(os.getenv("MT5_ONDEMAND_HISTORY_CHUNK_BARS", "1000")),
+                            job_id=0,
+                        )
+
+                        wait_s = float(os.getenv("MT5_ONDEMAND_HISTORY_WAIT_SECONDS", "4"))
+                        deadline = asyncio.get_event_loop().time() + max(0.0, wait_s)
+                        while asyncio.get_event_loop().time() < deadline:
+                            await asyncio.sleep(0.5)
+                            cur.execute(query, params)
+                            rows = cur.fetchall()
+                            if rows:
+                                break
+                except Exception:
+                    # On-demand history should never take the endpoint down.
+                    pass
+
+            # "Scroll forever" semantics for derived TFs:
+            # If CAGG query returns empty but raw M1 exists for the requested window,
+            # refresh the CAGG on-demand for that time range and retry.
+            raw_has_data_for_window = False
+            if use_caggs and not rows and rel is not None:
+                try:
+                    tf_minutes = timeframe_minutes(tf)
+                    refresh_end: Optional[datetime] = None
+                    refresh_start: Optional[datetime] = None
+
+                    if end_date:
+                        refresh_end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+                    elif before:
+                        refresh_end = datetime.fromtimestamp(before, tz=timezone.utc)
+
+                    if start_date:
+                        refresh_start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+                    elif refresh_end is not None and tf_minutes is not None:
+                        refresh_start = refresh_end - timedelta(minutes=int(tf_minutes) * int(limit))
+
+                    if refresh_start is not None and refresh_end is not None and refresh_start < refresh_end:
+                        cur.execute(
+                            """
+                            SELECT 1
+                            FROM candlesticks
+                            WHERE symbol=%s AND timeframe='M1'
+                              AND time >= %s AND time <= %s
+                            LIMIT 1
+                            """,
+                            (symbol, refresh_start, refresh_end),
+                        )
+                        raw_has_data_for_window = cur.fetchone() is not None
+
+                        if raw_has_data_for_window:
+                            lock_ttl = int(os.getenv("CAGG_REFRESH_LOCK_TTL_SECONDS", "90"))
+                            lock_key = _cagg_refresh_lock_key(relation=rel, start=refresh_start, end=refresh_end)
+                            token = uuid.uuid4().hex
+                            acquired = False
+                            started = asyncio.get_event_loop().time()
+
+                            try:
+                                acquired = bool(redis_client.set(lock_key, token, nx=True, ex=lock_ttl))
+                            except Exception:
+                                acquired = False
+
+                            if acquired:
+                                logger.info(
+                                    "cagg_refresh_triggered",
+                                    extra={
+                                        "event": "cagg_refresh_triggered",
+                                        "symbol": str(symbol).upper(),
+                                        "timeframe": tf,
+                                        "relation": rel,
+                                        "range_start": refresh_start.isoformat(),
+                                        "range_end": refresh_end.isoformat(),
+                                    },
+                                )
+
+                                try:
+                                    for attempt in range(3):
+                                        cur.execute(
+                                            "CALL refresh_continuous_aggregate(%s::regclass, %s, %s)",
+                                            (rel, refresh_start, refresh_end),
+                                        )
+                                        conn.commit()
+
+                                        cur.execute(query, params)
+                                        rows = cur.fetchall()
+                                        if rows:
+                                            break
+
+                                        await asyncio.sleep(0.25 * (attempt + 1))
+                                finally:
+                                    _release_redis_lock_best_effort(lock_key, token)
+
+                                duration_ms = int((asyncio.get_event_loop().time() - started) * 1000)
+                                if rows:
+                                    logger.info(
+                                        "cagg_refresh_completed",
+                                        extra={
+                                            "event": "cagg_refresh_completed",
+                                            "symbol": str(symbol).upper(),
+                                            "timeframe": tf,
+                                            "relation": rel,
+                                            "range_start": refresh_start.isoformat(),
+                                            "range_end": refresh_end.isoformat(),
+                                            "duration_ms": duration_ms,
+                                        },
+                                    )
+                                else:
+                                    logger.warning(
+                                        "cagg_refresh_timeout",
+                                        extra={
+                                            "event": "cagg_refresh_timeout",
+                                            "symbol": str(symbol).upper(),
+                                            "timeframe": tf,
+                                            "relation": rel,
+                                            "range_start": refresh_start.isoformat(),
+                                            "range_end": refresh_end.isoformat(),
+                                            "duration_ms": duration_ms,
+                                        },
+                                    )
+                            else:
+                                # Another request is refreshing this same window.
+                                logger.info(
+                                    "cagg_refresh_in_progress",
+                                    extra={
+                                        "event": "cagg_refresh_in_progress",
+                                        "symbol": str(symbol).upper(),
+                                        "timeframe": tf,
+                                        "relation": rel,
+                                        "range_start": refresh_start.isoformat(),
+                                        "range_end": refresh_end.isoformat(),
+                                    },
+                                )
+                                # Wait briefly for the other refresher to finish.
+                                for _ in range(6):
+                                    await asyncio.sleep(0.25)
+                                    cur.execute(query, params)
+                                    rows = cur.fetchall()
+                                    if rows:
+                                        break
+                except Exception:
+                    # Do not fail the request if refresh fails; downstream logic will raise 404 if still empty.
+                    pass
+
+            # Best-effort append the current forming candle (for UI freshness) for derived TFs.
+            # This uses Redis state maintained by mt5_ingest and does NOT write to DB.
+            forming_row: Optional[dict] = None
+            if include_forming and use_caggs:
+                try:
+                    minutes = timeframe_minutes(tf)
+                    if minutes is not None:
+                        # Use latest M1 timestamp as the anchor (not wall-clock), so closed markets don't jump buckets.
+                        cur.execute(
+                            """
+                            SELECT MAX(time) AS latest
+                            FROM candlesticks
+                            WHERE symbol=%s AND timeframe='M1'
+                            """,
+                            (symbol,),
+                        )
+                        latest = cur.fetchone()
+                        latest_dt = (latest or {}).get("latest")
+                        if latest_dt:
+                            bucket_start = _floor_utc_bucket(latest_dt, int(minutes))
+                            key = _forming_state_key(symbol, tf, bucket_start)
+                            state = redis_client.hgetall(key) or {}
+                            if state and state.get("open") and state.get("high") and state.get("low") and state.get("close"):
+                                forming_row = {
+                                    "datetime": bucket_start,
+                                    "open": float(state["open"]),
+                                    "high": float(state["high"]),
+                                    "low": float(state["low"]),
+                                    "close": float(state["close"]),
+                                    "volume": float(state.get("volume") or 0),
+                                    "_is_forming": True,
+                                }
+                except Exception:
+                    forming_row = None
         
         conn.close()
         
         if not rows:
+            # For derived TFs, never "silently empty" if raw M1 exists; surface a retryable error.
+            if use_caggs and raw_has_data_for_window:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Derived timeframe data is being materialized (Timescale CAGG refresh). Please retry.",
+                )
+            # For broker timeframes, an empty DB usually means the MT5 history for this TF isn't populated yet.
+            if is_broker_timeframe(tf):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Broker timeframe history is not available yet. Ensure MT5 bridge is connected and retry.",
+                )
             raise HTTPException(status_code=404, detail="No data found")
         
         # Convert to response format - data is always DESC from DB (newest first)
@@ -167,6 +513,25 @@ async def get_historical_data(
                 }
             
             data.append(item)
+
+        if forming_row is not None:
+            forming_item = {
+                "time": forming_row["datetime"].isoformat(),
+                "datetime": forming_row["datetime"].isoformat(),
+                "open": float(forming_row["open"]),
+                "high": float(forming_row["high"]),
+                "low": float(forming_row["low"]),
+                "close": float(forming_row["close"]),
+                "volume": float(forming_row.get("volume") or 0),
+                "is_forming": True,
+            }
+
+            # If DB already returned the current bucket (possible with different CAGG policies),
+            # overwrite it so the frontend always sees the freshest values + is_forming flag.
+            if data and data[0].get("datetime") == forming_item["datetime"]:
+                data[0].update(forming_item)
+            else:
+                data.insert(0, forming_item)
         
         response = {
             "symbol": symbol,
@@ -181,11 +546,10 @@ async def get_historical_data(
         }
         
         # Cache response
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, CACHE_TTL, json.dumps(response))
-            except:
-                pass
+        try:
+            redis_client.setex(cache_key, CACHE_TTL, json.dumps(response))
+        except Exception:
+            pass
         
         return response
         

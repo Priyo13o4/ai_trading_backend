@@ -9,14 +9,20 @@ import logging
 from typing import AsyncGenerator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from .cache import redis_client, PubSubManager
+from .cache import redis_client, PubSubManager, get_last_candle_update
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stream", tags=["streaming"])
 
 
-async def event_generator(channel: str, request: Request) -> AsyncGenerator[str, None]:
+async def event_generator(
+    channel: str,
+    request: Request,
+    *,
+    initial_payloads: list[dict] | None = None,
+    send_connected: bool = True,
+) -> AsyncGenerator[str, None]:
     """
     Generate SSE events from Redis pub/sub channel
     
@@ -35,7 +41,12 @@ async def event_generator(channel: str, request: Request) -> AsyncGenerator[str,
         logger.info(f"Client subscribed to {channel}")
         
         # Send initial connection message
-        yield f"data: {json.dumps({'type': 'connected', 'channel': channel})}\n\n"
+        if send_connected:
+            yield f"data: {json.dumps({'type': 'connected', 'channel': channel})}\n\n"
+
+        if initial_payloads:
+            for payload in initial_payloads:
+                yield f"data: {json.dumps(payload)}\n\n"
         
         # Listen for messages
         while True:
@@ -83,10 +94,21 @@ async def stream_candles(symbol: str, timeframe: str, request: Request):
     timeframe = timeframe.upper()
     
     logger.info(f"Starting candle stream for {symbol} {timeframe}")
+
+    # Replay the latest cached candle so the UI can render immediately on page load.
+    # Prefer forming (ephemeral) if present, otherwise fall back to last closed candle.
+    snapshot = get_last_candle_update(symbol, timeframe, prefer_forming=True)
+    if snapshot is not None:
+        snapshot = dict(snapshot)
+        snapshot["is_snapshot"] = True
     
     # Create filtered event generator
     async def filtered_generator():
-        async for event in event_generator(PubSubManager.CHANNELS['candles'], request):
+        async for event in event_generator(
+            PubSubManager.CHANNELS['candles'],
+            request,
+            initial_payloads=[snapshot] if snapshot else None,
+        ):
             # Filter by symbol and timeframe
             if 'data: ' in event and event.strip() != 'data:':
                 try:
