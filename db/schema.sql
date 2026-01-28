@@ -278,9 +278,9 @@ SELECT add_continuous_aggregate_policy('daily_candlesticks',
 -- ============================================================================
 -- MAINTENANCE NOTES
 -- ============================================================================
--- 1. Indicators are calculated post-backfill by scripts/calculate_recent_indicators_v2.py
+-- 1. Indicators are calculated post-backfill by api-worker/scripts/calculate_recent_indicators_v2.py
 -- 2. Compression runs automatically (TimescaleDB background jobs)
--- 3. Use scripts/validate_htf_migration.py to verify D1/W1/MN1 broker data
+-- 3. Use api-worker/scripts/validate_htf_migration.py to verify D1/W1/MN1 broker data
 -- 4. CAGGs were removed in v2.0 (DST fix) - D1/W1/MN1 now from broker via MT5 EA
 -- 5. Removed unused tables: market_structure, data_metadata, api_cache_log (Jan 2026)
 

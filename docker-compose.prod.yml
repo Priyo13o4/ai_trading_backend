@@ -1,0 +1,73 @@
+services:
+  postgres:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: '4.0'
+        reservations:
+          memory: 2g
+          cpus: '2.0'
+
+  redis:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+        reservations:
+          memory: 256m
+          cpus: '0.25'
+
+  redis-sessions:
+    restart: unless-stopped
+
+  n8n:
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+        reservations:
+          memory: 1g
+          cpus: '1.0'
+
+  n8n-worker:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+        reservations:
+          memory: 1g
+          cpus: '1.0'
+
+  api-web:
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+        reservations:
+          memory: 512m
+          cpus: '0.5'
+
+  api-worker:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+        reservations:
+          memory: 512m
+          cpus: '0.5'

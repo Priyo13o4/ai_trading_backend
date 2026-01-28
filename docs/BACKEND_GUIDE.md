@@ -63,7 +63,7 @@ CORS_ORIGINS=http://localhost:3000,https://pipfactor.com
 
 ## Part 2: Authentication System (`auth.py`)
 
-**CURRENT IMPLEMENTATION:** The authentication is handled by `ai_trading_bot/api/app/auth.py` using an `auth_context` dependency.
+**CURRENT IMPLEMENTATION:** The authentication is handled by `ai_trading_bot/api-web/app/auth.py` using an `auth_context` dependency.
 
 ### Key Components:
 

@@ -50,9 +50,9 @@ VITE_SUPABASE_ANON_KEY=your-anon-key-here
 VITE_GA_TRACKING_ID=G-XXXXXXXXXX
 ```
 
-### Backend Environment (`.env.production`)
+### Backend Environment (`.env`)
 
-Create in `ai_trading_bot/api/`:
+Create in `ai_trading_bot/`:
 
 ```bash
 # Supabase

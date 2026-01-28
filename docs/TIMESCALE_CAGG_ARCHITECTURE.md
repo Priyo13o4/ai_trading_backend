@@ -180,7 +180,7 @@ We ran full refreshes once after migration. After that, policies keep views up-t
 ### Code Location
 - `api/app/routes/historical.py` (historical candle endpoint)
 - `api/app/db.py` (regime data queries)
-- `scripts/calculate_recent_indicators.py` (indicator calculation)
+- `api-worker/scripts/calculate_recent_indicators_v2.py` (indicator calculation)
 
 ### Query Pattern (ALREADY IMPLEMENTED ✅)
 
@@ -295,7 +295,7 @@ On forming M1 tick:
 - Still has `timeframe` column (unchanged)
 
 ### Calculation
-Script: `scripts/calculate_recent_indicators.py`
+Script: `api-worker/scripts/calculate_recent_indicators_v2.py`
 
 **Already updated** to:
 1. Query correct relation for candles:
@@ -557,7 +557,7 @@ We ran full refreshes once after migration. After that, policies keep views up-t
 ### Code Location
 - `api/app/routes/historical.py` (historical candle endpoint)
 - `api/app/db.py` (regime data queries)
-- `scripts/calculate_recent_indicators.py` (indicator calculation)
+- `api-worker/scripts/calculate_recent_indicators_v2.py` (indicator calculation)
 
 ### Query Pattern (ALREADY IMPLEMENTED ✅)
 
@@ -672,7 +672,7 @@ On forming M1 tick:
 - Still has `timeframe` column (unchanged)
 
 ### Calculation
-Script: `scripts/calculate_recent_indicators.py`
+Script: `api-worker/scripts/calculate_recent_indicators_v2.py`
 
 **Already updated** to:
 1. Query correct relation for candles:
@@ -704,7 +704,7 @@ WHERE ti.timeframe = 'W1'
 
 ### 2. Recompute All Indicators
 ```bash
-docker exec tradingbot-api python /app/scripts/calculate_recent_indicators.py
+docker exec tradingbot-api-worker python /app/scripts/calculate_recent_indicators_v2.py
 # This will:
 # - Read from correct cagg views
 # - Upsert indicators aligned to new bucket timestamps

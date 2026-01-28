@@ -66,42 +66,18 @@ docker exec -it n8n-postgres psql -U postgres -d trading_db
 \q
 ```
 
-### 3. Run Historical Backfill (~48 minutes)
-```bash
-cd scripts
+### 3. Historical Backfill (MT5 mode)
 
-# Test mode first (1 API call only)
-python backfill_historical_data.py --test
-
-# If successful, run full backfill
-python backfill_historical_data.py
-
-# Or run in background
-nohup python backfill_historical_data.py &
-
-# Monitor progress
-tail -f nohup.out
-```
-
-**What It Does:**
-- Fetches 3 years of OHLCV data for 6 symbols × 5 timeframes
-- Total: 384 API calls (64 per symbol)
-- Rate limiting: 7.5s between calls (Free tier = 8 calls/min)
-- Stores data in TimescaleDB with UPSERT (no duplicates)
-- Updates metadata after each symbol/timeframe
-
-**Resume After Interruption:**
-```bash
-python backfill_historical_data.py --resume
-```
+Historical backfill is handled by MT5 bootstrap + broker-provided history. The legacy
+`backfill_historical_data.py` workflow is no longer used.
 
 ### 4. Calculate Recent Indicators (~5-10 minutes)
 ```bash
 # After backfill completes, calculate indicators for last 1000 bars
-python calculate_recent_indicators.py
+python calculate_recent_indicators_v2.py
 
 # Or for specific symbol/timeframe
-python calculate_recent_indicators.py --symbol XAUUSD --timeframe H1
+python calculate_recent_indicators_v2.py --symbol XAUUSD --timeframe H1
 ```
 
 **What It Does:**
@@ -112,24 +88,9 @@ python calculate_recent_indicators.py --symbol XAUUSD --timeframe H1
 
 ### 5. Setup Real-Time Updater (Every 5 minutes)
 
-**Option A: n8n Workflow** (Recommended)
-```
-1. Open n8n: http://localhost:5678
-2. Create new workflow:
-   - Schedule Trigger (every 5 minutes)
-   - Execute Command node: python /app/scripts/realtime_updater.py
-   - Optional: Notification on failure
-3. Activate workflow
-```
+**Status (MT5 mode)**
 
-**Option B: Cron Job** (Alternative)
-```bash
-# Edit crontab
-crontab -e
-
-# Add this line (runs every 5 minutes)
-*/5 * * * * cd /path/to/ai_trading_bot/scripts && python realtime_updater.py >> /tmp/realtime_updater.log 2>&1
-```
+Real-time updates are driven by MT5 ingest + the `api-worker` scheduler. No separate cron/n8n job is required.
 
 **What It Does:**
 - Fetches latest 2 candles per symbol/timeframe (current + previous for confirmation)
@@ -278,7 +239,7 @@ python backfill_historical_data.py --symbol XAUUSD --timeframe H1
 
 ### Re-Calculate Indicators
 ```bash
-python calculate_recent_indicators.py --symbol XAUUSD --timeframe H1
+python calculate_recent_indicators_v2.py --symbol XAUUSD --timeframe H1
 ```
 
 ## 📈 Storage & Performance
@@ -329,7 +290,7 @@ python realtime_updater.py
 ### Issue: Missing Indicators
 ```bash
 # Re-run indicator calculation
-python calculate_recent_indicators.py
+python calculate_recent_indicators_v2.py
 ```
 
 ### Issue: Database Connection Failed
@@ -394,10 +355,10 @@ Currently skipped per user request. Add later:
 ## 📝 Files Created
 
 1. `/ai_trading_bot/db/schema.sql` - Complete TimescaleDB schema
-2. `/ai_trading_bot/scripts/backfill_historical_data.py` - Historical data download
-3. `/ai_trading_bot/scripts/calculate_recent_indicators.py` - Indicator calculation
-4. `/ai_trading_bot/scripts/realtime_updater.py` - Real-time 5-min updates
-5. `/ai_trading_bot/api/app/routes/historical.py` - Historical API endpoints
+2. `/ai_trading_bot/api-worker/scripts/backfill_historical_data.py` - Historical data download (legacy)
+3. `/ai_trading_bot/api-worker/scripts/calculate_recent_indicators_v2.py` - Indicator calculation
+4. `/ai_trading_bot/api-worker/scripts/realtime_updater.py` - Real-time 5-min updates (legacy)
+5. `/ai_trading_bot/api-web/app/routes/historical.py` - Historical API endpoints
 6. `/ai_trading_bot/docker-compose.yml` - Updated with TimescaleDB
 
 ## 🎉 Summary

@@ -6,9 +6,9 @@ Automated data updates run on server startup and every 5 minutes to keep market 
 ## How It Works
 
 ### Architecture
-- **Startup Script**: `/app/start.sh` runs when container starts
+- **Worker Startup Script**: `/app/worker_start.sh` runs in `api-worker`
 - **Scheduler**: `data_updater_scheduler.py` manages update timing
-- **Gap Filler**: `fill_data_gaps.py` fetches missing data from Twelve Data API
+- **Indicator Runner**: `calculate_recent_indicators_v2.py` updates recent technical indicators
 
 ### Update Cycle
 1. **On Startup**: Runs immediately when container starts
@@ -61,12 +61,12 @@ EURUSD D1:  2025-12-22 00:00:00+00:00  ✓
 
 ### Check Scheduler Status
 ```bash
-docker logs tradingbot-api 2>&1 | grep -E "(SCHEDULER|💤|GAP FILLING)" | tail -20
+docker logs tradingbot-api-worker 2>&1 | grep -E "(SCHEDULER|💤|GAP FILLING)" | tail -20
 ```
 
 ### Check Latest Update Time
 ```bash
-docker exec tradingbot-api python -c "
+docker exec tradingbot-api-worker python -c "
 import psycopg
 from datetime import datetime, timezone
 conn = psycopg.connect('postgresql://Priyo13o4:priyodip13o4@n8n-postgres:5432/ai_trading_bot_data')
@@ -81,19 +81,21 @@ conn.close()
 
 ### Manual Update (if needed)
 ```bash
-docker exec tradingbot-api python /app/scripts/fill_data_gaps.py
+docker exec tradingbot-api-worker python /app/scripts/calculate_recent_indicators_v2.py
 ```
 
 ## Files Modified
 
 ### Created
-- `/scripts/data_updater_scheduler.py` - 5-minute update scheduler
-- `/api/start.sh` - Container startup script
+- `/api-worker/scripts/worker/data_updater_scheduler.py` - 5-minute update scheduler (worker)
+- `/api-worker/scripts/data_updater_scheduler.py` - Compatibility shim
+- `/api-worker/worker_start.sh` - Worker startup script
 
 ### Updated
-- `/scripts/fill_data_gaps.py` - Fixed D1 parsing + timezone conversion
-- `/api/Dockerfile` - Added start.sh execution
-- `/docker-compose.yml` - Added scripts volume mount
+- `/api-worker/scripts/calculate_recent_indicators_v2.py` - Indicator calculation (v2)
+- `/api-web/Dockerfile` - Web container build
+- `/api-worker/Dockerfile` - Worker container build
+- `/docker-compose.yml` - Split web/worker services
 
 ## Technical Details
 
@@ -112,7 +114,7 @@ docker exec tradingbot-api python /app/scripts/fill_data_gaps.py
 ### Next Update
 Check logs to see when next update will run:
 ```bash
-docker logs tradingbot-api 2>&1 | grep "💤" | tail -1
+docker logs tradingbot-api-worker 2>&1 | grep "💤" | tail -1
 ```
 
 ## Troubleshooting
@@ -120,16 +122,16 @@ docker logs tradingbot-api 2>&1 | grep "💤" | tail -1
 ### Scheduler Not Running
 ```bash
 # Check if process is running
-docker exec tradingbot-api ps aux | grep data_updater
+docker exec tradingbot-api-worker ps aux | grep data_updater
 
 # Restart container
-docker-compose restart api
+docker compose restart api-worker
 ```
 
 ### Wrong Timestamps
 ```bash
 # Delete incorrect data (if needed)
-docker exec tradingbot-api python -c "
+docker exec tradingbot-api-worker python -c "
 import psycopg
 conn = psycopg.connect('postgresql://Priyo13o4:priyodip13o4@n8n-postgres:5432/ai_trading_bot_data')
 cur = conn.cursor()
@@ -139,8 +141,8 @@ print(f'Deleted {cur.rowcount} future rows')
 conn.close()
 "
 
-# Run gap filler
-docker exec tradingbot-api python /app/scripts/fill_data_gaps.py
+# Recalculate indicators
+docker exec tradingbot-api-worker python /app/scripts/calculate_recent_indicators_v2.py
 ```
 
 ### API Rate Limit Hit

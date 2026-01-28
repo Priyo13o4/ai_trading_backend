@@ -177,7 +177,7 @@ VITE_API_BASE_URL=https://api.pipfactor.com
 
 ### Step 9: Configure Backend Environment
 
-Create/update `ai_trading_bot/api/.env`:
+Create/update `ai_trading_bot/.env`:
 
 ```bash
 # Supabase Configuration (NEVER commit service_role key!)

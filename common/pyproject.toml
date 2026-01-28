@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-common"
+version = "1.0.0"
+description = "Shared utilities for AI Trading Bot"
+requires-python = ">=3.11"
+dependencies = [
+    "redis>=7.1.0",
+    "psycopg[binary]>=3.3.2",
+    "python-dotenv>=1.2.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["trading_common*"]
