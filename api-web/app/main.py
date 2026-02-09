@@ -348,12 +348,12 @@ async def get_regime_market_data_markdown(request: Request):
     logger.info("[API] GET /api/regime/market-data - n8n workflow request (authenticated)")
     
     try:
-        key = "regime:market-data:json"
+        key = "regime:market-data:markdown"
         
         # Try cache (5 min TTL for fresh data)
         cached = await REDIS.get(key)
         if cached:
-            logger.info("[API] Cache HIT for regime market data")
+            logger.info("[API] Cache HIT for regime market data (markdown)")
             import json
             return JSONResponse(content=json.loads(cached))
         
@@ -521,7 +521,6 @@ async def get_regime_market_data_markdown(request: Request):
         # Build response
         response_data = {
             "analysis_timestamp": analysis_timestamp,
-            "trigger_source": "schedule",
             "collection_info": {
                 **collection_info,
                 "format": "markdown",
@@ -568,7 +567,7 @@ async def get_regime_market_data_json(request: Request):
     logger.info("[API] GET /api/regime/market-data/json - authenticated request")
     
     try:
-        key = "regime:market-data"
+        key = "regime:market-data:json"
         
         # Try cache (5 min TTL for fresh data)
         cached = await REDIS.get(key)

@@ -60,7 +60,7 @@ def get_latest_signal_from_db(pair: str):
                   SELECT 
                     strategy_id,
                     strategy_name,
-                    trading_pair as pair,
+                                        symbol as pair,
                     direction,
                     confidence,
                     take_profit,
@@ -73,10 +73,9 @@ def get_latest_signal_from_db(pair: str):
                     entry_signal,
                     status
                   FROM strategies
-                  WHERE trading_pair = %s
+                                    WHERE symbol = %s
                   AND status = 'active'
                   AND expiry_time > NOW()
-                  AND archived = false
                   ORDER BY confidence DESC, timestamp DESC
                   LIMIT 1
                 """, (pair.upper(),))
@@ -103,7 +102,7 @@ def get_old_signal_from_db(pair: str):
                   SELECT 
                     strategy_id,
                     strategy_name,
-                    trading_pair as pair,
+                                        symbol as pair,
                     direction,
                     confidence,
                     take_profit,
@@ -115,8 +114,7 @@ def get_old_signal_from_db(pair: str):
                     entry_signal,
                     status
                   FROM strategies
-                  WHERE trading_pair = %s
-                  AND archived = false
+                                    WHERE symbol = %s
                   ORDER BY timestamp DESC
                   LIMIT 1 OFFSET 1
                 """, (pair.upper(),))
@@ -154,7 +152,6 @@ def get_latest_regime_from_db():
                     batch_id,
                     created_at
                   FROM regime_data
-                  WHERE archived = false
                   ORDER BY trading_pair, analysis_timestamp DESC
                 """)
                 results = cur.fetchall()
@@ -184,7 +181,6 @@ def get_regime_for_pair(pair: str):
                     created_at
                   FROM regime_data
                   WHERE trading_pair = %s
-                  AND archived = false
                   ORDER BY analysis_timestamp DESC
                   LIMIT 1
                 """, (pair.upper(),))
@@ -669,7 +665,6 @@ def get_active_strategies(pair: str = None):
                       SELECT * FROM strategies
                       WHERE status = 'active'
                       AND expiry_time > NOW()
-                      AND archived = false
                       ORDER BY confidence DESC
                     """)
                 results = cur.fetchall()
