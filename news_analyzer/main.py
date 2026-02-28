@@ -18,11 +18,15 @@ from scraper_client import ScraperClient, CloudflareChallengeUnsolvedError
 from analyzer import GeminiAnalyzer, RateLimitError
 
 # Configure logging
+log_file_path = os.getenv('LOG_FILE_PATH', 'news_analyzer.log')
+# Create parent directories if they don't exist
+os.makedirs(os.path.dirname(log_file_path) or '.', exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('news_analyzer.log'),
+        logging.FileHandler(log_file_path),
         logging.StreamHandler(sys.stdout)
     ]
 )

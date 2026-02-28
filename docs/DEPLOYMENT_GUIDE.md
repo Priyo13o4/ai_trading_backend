@@ -234,7 +234,14 @@ SELECT cleanup_old_indicators();
 
 ### Re-Backfill Single Symbol/Timeframe
 ```bash
-python backfill_historical_data.py --symbol XAUUSD --timeframe H1
+# Internal-only backfill command (runs inside api-worker container)
+# Example: request M1 history and force UPSERT for a specific UTC range
+docker exec tradingbot-api-worker python /app/scripts/mt5_history_fetch.py \
+  --symbol XAUUSD \
+  --timeframe M1 \
+  --from-ts 1756080000 \
+  --to-ts 1767308640 \
+  --upsert
 ```
 
 ### Re-Calculate Indicators
@@ -272,19 +279,23 @@ python calculate_recent_indicators_v2.py --symbol XAUUSD --timeframe H1
 docker exec -i n8n-postgres psql -U postgres -d trading_db < db/schema.sql
 ```
 
-### Issue: Backfill API Rate Limit Exceeded
+### Issue: Backfill Request Accepted But Data Doesn't Fill
 ```bash
-# Increase delay between calls (edit backfill_historical_data.py)
-RATE_LIMIT_DELAY = 10  # Change from 7.5 to 10 seconds
+# 1) Confirm MT5 ingest is subscribed/ready
+docker logs tradingbot-api-worker --since 10m | grep -E "MT5|ready|subscribed"
+
+# 2) Re-issue targeted backfill window (smaller range)
+docker exec tradingbot-api-worker python /app/scripts/mt5_history_fetch.py \
+  --symbol XAUUSD --timeframe M1 --from-ts <from_ts> --to-ts <to_ts> --upsert
 ```
 
-### Issue: Real-Time Updater Not Running
+### Issue: Real-Time Ingest Not Running
 ```bash
 # Check logs
-tail -f /tmp/realtime_updater.log
+docker logs -f tradingbot-api-worker
 
-# Test manually
-python realtime_updater.py
+# Restart worker if needed
+docker compose restart api-worker
 ```
 
 ### Issue: Missing Indicators
@@ -355,9 +366,9 @@ Currently skipped per user request. Add later:
 ## 📝 Files Created
 
 1. `/ai_trading_bot/db/schema.sql` - Complete TimescaleDB schema
-2. `/ai_trading_bot/api-worker/scripts/backfill_historical_data.py` - Historical data download (legacy)
+2. `/ai_trading_bot/api-worker/scripts/mt5_history_fetch.py` - Internal MT5 history fetch trigger
 3. `/ai_trading_bot/api-worker/scripts/calculate_recent_indicators_v2.py` - Indicator calculation
-4. `/ai_trading_bot/api-worker/scripts/realtime_updater.py` - Real-time 5-min updates (legacy)
+4. `/ai_trading_bot/api-worker/scripts/mt5_ingest_server.py` - MT5 ingest + internal control socket
 5. `/ai_trading_bot/api-web/app/routes/historical.py` - Historical API endpoints
 6. `/ai_trading_bot/docker-compose.yml` - Updated with TimescaleDB
 

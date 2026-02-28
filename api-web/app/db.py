@@ -438,7 +438,7 @@ def get_regime_market_data_from_db():
             session = "Session Gap"
         
         result = {
-            "analysis_timestamp": now.isoformat() + 'Z',
+            "analysis_timestamp": now.isoformat(),
             "collection_info": {
                 "analysis_bars": {tf: 250 for tf in timeframes},
                 "recent_bars_detail": 10,

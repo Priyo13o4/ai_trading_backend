@@ -34,7 +34,15 @@ from trading_common.symbols import get_active_symbols
 from .routes.historical import router as historical_router
 
 # Import cache and SSE
-from .cache import CandleCache, NewsCache, StrategyCache, check_redis_connection
+from .cache import (
+    CandleCache,
+    NewsCache,
+    StrategyCache,
+    check_redis_connection,
+    publish_news_snapshot,
+    publish_strategy_update,
+    publish_strategies_snapshot,
+)
 from .sse import router as sse_router
 
 # Configure logging with UTC
@@ -280,11 +288,45 @@ async def get_all_active_strategies(pair: str = None, ctx=Depends(auth_context))
     try:
         strategies = await asyncio.to_thread(get_active_strategies, pair)
         logger.info(f"[API] Found {len(strategies)} active strategies")
+        StrategyCache.set(strategies, pair or "all")
+        publish_strategies_snapshot(strategies)
         serialized = json_dumps({"strategies": strategies})
         return JSONResponse(content=json.loads(serialized))
     except Exception as e:
         logger.error(f"[API ERROR] /api/strategies: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
+
+
+@app.post("/api/strategies/publish")
+async def publish_strategy_update_endpoint(request: Request):
+    """Publish a strategy update from external automation (n8n)."""
+    api_key = request.headers.get("X-API-Key")
+    expected_key = os.getenv("N8N_STRATEGY_PUBLISH_KEY") or os.getenv("N8N_MARKET_DATA_KEY")
+
+    if not expected_key or api_key != expected_key:
+        raise HTTPException(401, "Unauthorized")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON payload")
+
+    if isinstance(payload, dict) and "strategy" in payload:
+        payload = payload.get("strategy")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected strategy object payload")
+
+    publish_strategy_update(payload)
+
+    pair = payload.get("trading_pair") or payload.get("symbol") or payload.get("pair")
+    try:
+        strategies = await asyncio.to_thread(get_active_strategies, pair)
+        StrategyCache.set(strategies, pair or "all")
+    except Exception as exc:
+        logger.warning("Failed to refresh strategies cache after publish: %s", exc)
+
+    return {"status": "ok"}
 
 # ============================================================================
 # REGIME ANALYSIS ENDPOINTS
@@ -546,10 +588,17 @@ async def get_regime_market_data_markdown(request: Request):
 
 
 @app.get("/api/regime/market-data/json")
-async def get_regime_market_data_json(request: Request):
+async def get_regime_market_data_json(
+    request: Request,
+    symbol: Optional[str] = Query(None, description="Single symbol filter, e.g. XAUUSD"),
+    symbols: Optional[str] = Query(None, description="Comma-separated symbols filter, e.g. XAUUSD,EURUSD")
+):
     """
     Get comprehensive market data for regime analysis (JSON format)
     Returns MT5-compatible JSON format with indicators, structure, and recent bars
+    Optional query filters:
+    - symbol=XAUUSD
+    - symbols=XAUUSD,EURUSD
     Requires X-API-Key header for authentication
     """
     # API Key authentication for n8n workflow
@@ -564,7 +613,46 @@ async def get_regime_market_data_json(request: Request):
         logger.warning(f"[API] Invalid API key attempt for /api/regime/market-data/json from {request.client.host}")
         raise HTTPException(401, "Invalid or missing API key")
     
-    logger.info("[API] GET /api/regime/market-data/json - authenticated request")
+    requested_symbols = []
+    if symbol:
+        requested_symbols.append(str(symbol).strip().upper())
+    if symbols:
+        requested_symbols.extend(
+            [s.strip().upper() for s in str(symbols).split(",") if s and s.strip()]
+        )
+    requested_symbols = sorted(set([s for s in requested_symbols if s]))
+
+    def _apply_symbol_filter(full_payload: dict) -> dict:
+        if not requested_symbols:
+            return full_payload
+
+        market_data = full_payload.get("market_data", {})
+        filtered_market_data = {
+            sym: market_data[sym]
+            for sym in requested_symbols
+            if sym in market_data
+        }
+
+        if not filtered_market_data:
+            logger.warning(f"[API] No market data found for requested symbols: {requested_symbols}")
+            raise HTTPException(404, f"No market data found for requested symbols: {', '.join(requested_symbols)}")
+
+        collection_info = full_payload.get("collection_info", {})
+        return {
+            **full_payload,
+            "collection_info": {
+                **collection_info,
+                "requested_symbols": requested_symbols,
+                "symbols": list(filtered_market_data.keys()),
+                "symbols_count": len(filtered_market_data),
+            },
+            "market_data": filtered_market_data,
+        }
+
+    logger.info(
+        f"[API] GET /api/regime/market-data/json - authenticated request"
+        f" (symbols={requested_symbols if requested_symbols else 'ALL'})"
+    )
     
     try:
         key = "regime:market-data:json"
@@ -573,7 +661,7 @@ async def get_regime_market_data_json(request: Request):
         cached = await REDIS.get(key)
         if cached:
             logger.info("[API] Cache HIT for JSON market data")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=_apply_symbol_filter(json.loads(cached)))
         
         # Cache miss - fetch from database
         logger.info("[API] Cache MISS for JSON market data, querying database")
@@ -589,7 +677,7 @@ async def get_regime_market_data_json(request: Request):
         await REDIS.setex(key, ttl, serialized)
         logger.info(f"[API] Cached JSON market data for {len(data.get('market_data', {}))} symbols with TTL={ttl}s")
         
-        return JSONResponse(content=json.loads(serialized))
+        return JSONResponse(content=_apply_symbol_filter(json.loads(serialized)))
     
     except HTTPException:
         raise
@@ -656,7 +744,13 @@ async def get_current_news(
         cached = await REDIS.get(key)
         if cached:
             logger.info(f"[API] Cache HIT for current news (offset={offset})")
-            return JSONResponse(content=json.loads(cached))
+            cached_payload = json.loads(cached)
+            if offset == 0 and isinstance(cached_payload, dict):
+                rows = cached_payload.get("news")
+                if isinstance(rows, list):
+                    NewsCache.set(rows, "all")
+                    publish_news_snapshot(rows)
+            return JSONResponse(content=cached_payload)
         
         # Cache miss
         logger.info(f"[API] Cache MISS for current news, querying database (offset={offset})")
@@ -673,6 +767,9 @@ async def get_current_news(
         serialized = json_dumps(result)
         await REDIS.setex(key, ttl, serialized)
         logger.info(f"[API] Cached {len(rows)} current news items with TTL={ttl}s")
+        if offset == 0:
+            NewsCache.set(rows, "all", ttl=ttl)
+            publish_news_snapshot(rows)
         
         return JSONResponse(content=json.loads(serialized))
     

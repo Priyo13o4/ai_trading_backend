@@ -8,6 +8,8 @@ import random
 import shutil
 import threading
 import platform
+import re
+import subprocess
 from typing import Dict, Any, Optional, Tuple
 from bs4 import BeautifulSoup
 import requests
@@ -60,6 +62,40 @@ class WebScraper:
             'Cache-Control': 'max-age=0',
         })
         return session
+
+    def _running_in_docker(self) -> bool:
+        return os.path.exists('/.dockerenv')
+
+    def _resolve_driver_backend(self, minimal_uc_mode: bool) -> str:
+        backend = (getattr(settings, 'DRIVER_BACKEND', 'auto') or 'auto').strip().lower()
+        if backend not in {'auto', 'selenium', 'uc'}:
+            logger.warning("Invalid DRIVER_BACKEND=%r; using 'auto'", backend)
+            backend = 'auto'
+
+        if backend == 'auto':
+            if minimal_uc_mode:
+                return 'uc'
+            if bool(getattr(settings, 'USE_UNDETECTED_CHROME', False)):
+                return 'uc'
+            return 'selenium'
+        return backend
+
+    def _cleanup_chrome_profile_locks(self, chrome_user_data_dir: str) -> None:
+        if not chrome_user_data_dir:
+            return
+        lock_files = [
+            'SingletonLock',
+            'SingletonCookie',
+            'SingletonSocket',
+            'lockfile',
+        ]
+        for name in lock_files:
+            path = os.path.join(chrome_user_data_dir, name)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as exc:
+                logger.debug("Could not remove Chrome profile lock file %s: %s", path, exc)
     
     def _get_selenium_driver(self) -> webdriver.Chrome:
         """
@@ -81,6 +117,7 @@ class WebScraper:
             # Persist session/cookies when running locally (helps with FF login + challenges)
             chrome_user_data_dir = (getattr(settings, 'CHROME_USER_DATA_DIR', '') or '').strip()
             if chrome_user_data_dir:
+                self._cleanup_chrome_profile_locks(chrome_user_data_dir)
                 options.add_argument(f'--user-data-dir={chrome_user_data_dir}')
 
             chrome_profile_dir = (getattr(settings, 'CHROME_PROFILE_DIRECTORY', '') or '').strip()
@@ -119,12 +156,6 @@ class WebScraper:
             }
             options.add_experimental_option('prefs', prefs)
 
-            if not minimal_uc_mode:
-                # Reduce automation fingerprints. This won't always remove Chrome's
-                # automation banner, but it typically helps with bot detection.
-                options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
-                options.add_experimental_option('useAutomationExtension', False)
-
             # Resolve binary and driver paths allowing overrides via env or config
             binary_location = (
                 settings.SELENIUM_BROWSER_BINARY
@@ -154,8 +185,9 @@ class WebScraper:
             else:
                 logger.warning("Chromium binary not found; Selenium may fail to start")
 
-            # If chromedriver isn't installed locally, try downloading it (host-run convenience).
-            if not driver_path:
+            # By default prefer Selenium Manager for local host runs on macOS.
+            # webdriver-manager can occasionally return a binary that exits immediately.
+            if not driver_path and os.getenv("USE_WEBDRIVER_MANAGER", "0") == "1":
                 try:
                     from webdriver_manager.chrome import ChromeDriverManager
 
@@ -168,35 +200,51 @@ class WebScraper:
             service = Service(executable_path=driver_path) if driver_path else None
 
             # Create driver
-            try:
-                options._caps.get('goog:chromeOptions', {}).pop('excludeSwitches', None)  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-
-            use_undetected = bool(getattr(settings, 'USE_UNDETECTED_CHROME', False))
-            # In headful/manual mode, prefer undetected_chromedriver when available.
-            if not settings.HEADLESS:
-                use_undetected = True
-            if minimal_uc_mode:
-                use_undetected = True
+            driver_backend = self._resolve_driver_backend(minimal_uc_mode)
+            use_undetected = driver_backend == 'uc'
             if use_undetected:
                 try:
                     import undetected_chromedriver as uc
                 except Exception as exc:
-                    # Fall back to normal Selenium if uc isn't available.
-                    logger.warning(f"undetected_chromedriver not available; falling back to selenium: {exc}")
-                    use_undetected = False
+                    raise RuntimeError(f"undetected_chromedriver backend requested but unavailable: {exc}") from exc
 
             if use_undetected:
                 # uc.Chrome manages driver patching automatically.
-                # use_subprocess=True tends to be more stable for headful sessions on macOS.
-                driver = uc.Chrome(options=options, use_subprocess=True)
+                # Use deterministic browser major pinning to avoid version drift.
+                uc_kwargs: Dict[str, Any] = {
+                    "options": options,
+                    "use_subprocess": bool(getattr(settings, 'UC_USE_SUBPROCESS', False)),
+                }
+
+                if binary_location:
+                    uc_kwargs["browser_executable_path"] = binary_location
+
+                    major_match = None
+                    uc_version_main = int(getattr(settings, 'UC_VERSION_MAIN', 0) or 0)
+                    try:
+                        version_output = subprocess.check_output(
+                            [binary_location, "--version"],
+                            text=True,
+                            stderr=subprocess.STDOUT,
+                        )
+                        major_match = re.search(r"(\d+)\.\d+\.\d+\.\d+", version_output)
+                    except Exception as exc:
+                        logger.warning(f"Could not determine Chrome version for UC pinning: {exc}")
+
+                    if uc_version_main > 0:
+                        uc_kwargs["version_main"] = uc_version_main
+                    elif major_match:
+                        uc_kwargs["version_main"] = int(major_match.group(1))
+
+                driver = uc.Chrome(**uc_kwargs)
             else:
                 # If service is None, Selenium Manager will attempt to locate/download a driver.
                 if service is not None:
                     driver = webdriver.Chrome(service=service, options=options)
                 else:
                     driver = webdriver.Chrome(options=options)
+
+            logger.info("Driver backend initialized: %s (headless=%s, in_docker=%s)", driver_backend, settings.HEADLESS, self._running_in_docker())
             
             # Execute stealth scripts (skip in minimal mode to keep behavior closer to
             # a real interactive browser session and avoid CDP-related oddities).

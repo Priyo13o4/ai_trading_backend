@@ -6,10 +6,12 @@ import psycopg
 from psycopg.rows import dict_row
 from typing import List, Dict, Optional, Tuple
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from config import Config
+from trading_common.cache import create_redis_client
+from trading_common.utils import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,15 @@ class DatabaseManager:
     
     def __init__(self, database_url: str = None):
         self.database_url = database_url or Config.DATABASE_URL
+        self.redis_client = self._init_redis_client()
         self._ensure_vector_extension()
+
+    def _init_redis_client(self):
+        try:
+            return create_redis_client()
+        except Exception as exc:
+            logger.warning("Redis unavailable; live news updates disabled: %s", exc)
+            return None
     
     def _ensure_vector_extension(self):
         """Ensure pgvector extension is enabled"""
@@ -276,6 +286,7 @@ class DatabaseManager:
                     if result:
                         email_id = result[0]
                         logger.info(f"Successfully upserted analysis for content_id {content_id} (email_id: {email_id})")
+                        self._publish_news_update(email_id)
                         return email_id
                     else:
                         logger.error(f"Upsert returned no email_id for content_id {content_id}")
@@ -295,6 +306,60 @@ class DatabaseManager:
         return (category == 'trade' or 
                 any(kw in summary for kw in trade_keywords) or
                 any('trade' in str(e).lower() for e in entities))
+
+    def _fetch_news_payload(self, email_id: int) -> Optional[Dict]:
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        """
+                        SELECT 
+                          email_id as id,
+                          headline as title,
+                          COALESCE(ai_analysis_summary, original_email_content) as text,
+                          email_received_at as timestamp,
+                          importance_score,
+                          sentiment_score,
+                          forex_instruments,
+                          forexfactory_category,
+                          market_impact_prediction,
+                          volatility_expectation,
+                          forexfactory_urls[1] as forexfactory_url,
+                          human_takeaway,
+                          attention_score,
+                          news_state,
+                          market_pressure,
+                          attention_window,
+                          confidence_label,
+                          expected_followups
+                        FROM email_news_analysis
+                        WHERE email_id = %s
+                        """,
+                        (email_id,)
+                    )
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        except Exception as exc:
+            logger.error("Failed to build news payload for %s: %s", email_id, exc)
+            return None
+
+    def _publish_news_update(self, email_id: int) -> None:
+        if not self.redis_client:
+            return
+
+        payload = self._fetch_news_payload(email_id)
+        if not payload:
+            return
+
+        message = {
+            "type": "news_update",
+            "news": payload,
+            "server_ts": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.redis_client.publish("updates:news", json_dumps(message))
+        except Exception as exc:
+            logger.error("Failed to publish news update: %s", exc)
     
     def _detect_central_bank_related(self, analysis_data: Dict) -> bool:
         """Helper to detect central bank related news"""

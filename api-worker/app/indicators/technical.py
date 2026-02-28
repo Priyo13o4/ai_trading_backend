@@ -12,6 +12,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _calculate_percentile(current_value: float, historical_series: pd.Series) -> Optional[float]:
+    """Calculate percentile rank of current value against historical values (NaN-safe)."""
+    if historical_series is None or historical_series.empty or pd.isna(current_value):
+        return None
+
+    clean_historical = historical_series.dropna()
+    if clean_historical.empty:
+        return None
+
+    rank = (clean_historical < current_value).sum()
+    return round((rank / len(clean_historical)) * 100, 1)
+
+
 def calculate_emas(df: pd.DataFrame, periods: list) -> Dict[str, Optional[float]]:
     """Calculate EMAs for given periods"""
     emas = {}
@@ -45,10 +58,18 @@ def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int
     try:
         macd_data = ta.macd(df['close'], fast=fast, slow=slow, signal=signal)
         if macd_data is not None and not macd_data.empty:
+            macd_main_col = next((c for c in macd_data.columns if c.startswith('MACD_')), None)
+            macd_signal_col = next((c for c in macd_data.columns if c.startswith('MACDs_')), None)
+            macd_hist_col = next((c for c in macd_data.columns if c.startswith('MACDh_')), None)
+
+            macd_main = macd_data[macd_main_col].iloc[-1] if macd_main_col is not None else (macd_data.iloc[-1, 0] if macd_data.shape[1] > 0 else np.nan)
+            macd_signal = macd_data[macd_signal_col].iloc[-1] if macd_signal_col is not None else (macd_data.iloc[-1, 1] if macd_data.shape[1] > 1 else np.nan)
+            macd_hist = macd_data[macd_hist_col].iloc[-1] if macd_hist_col is not None else (macd_data.iloc[-1, 2] if macd_data.shape[1] > 2 else np.nan)
+
             return {
-                'macd_main': round(float(macd_data.iloc[-1, 0]), 5) if not pd.isna(macd_data.iloc[-1, 0]) else None,
-                'macd_signal': round(float(macd_data.iloc[-1, 1]), 5) if not pd.isna(macd_data.iloc[-1, 1]) else None,
-                'macd_histogram': round(float(macd_data.iloc[-1, 2]), 5) if not pd.isna(macd_data.iloc[-1, 2]) else None
+                'macd_main': round(float(macd_main), 5) if not pd.isna(macd_main) else None,
+                'macd_signal': round(float(macd_signal), 5) if not pd.isna(macd_signal) else None,
+                'macd_histogram': round(float(macd_hist), 5) if not pd.isna(macd_hist) else None
             }
         return {'macd_main': None, 'macd_signal': None, 'macd_histogram': None}
     except Exception as e:
@@ -60,18 +81,16 @@ def calculate_atr(df: pd.DataFrame, period: int = 14, volatility_lookback: int =
     """Calculate ATR and ATR percentile"""
     try:
         atr_series = ta.atr(df['high'], df['low'], df['close'], length=period)
-        if atr_series is not None and not atr_series.empty and len(atr_series) > volatility_lookback and not pd.isna(atr_series.iloc[-1]):
+        if atr_series is not None and not atr_series.empty and not pd.isna(atr_series.iloc[-1]):
             current_atr = float(atr_series.iloc[-1])
             atr_value = round(current_atr, 5)
-            
+
             # Calculate percentile
-            historical_atr = atr_series.iloc[-(volatility_lookback + 1):-1]
-            if len(historical_atr) > 0:
-                rank = (historical_atr < current_atr).sum()
-                atr_percentile = round((rank / len(historical_atr)) * 100, 1)
-            else:
-                atr_percentile = None
-            
+            atr_percentile = None
+            if len(atr_series) > volatility_lookback:
+                historical_atr = atr_series.iloc[-(volatility_lookback + 1):-1]
+                atr_percentile = _calculate_percentile(current_atr, historical_atr)
+
             return {'atr': atr_value, 'atr_percentile': atr_percentile}
         return {'atr': None, 'atr_percentile': None}
     except Exception as e:
@@ -89,24 +108,34 @@ def calculate_bollinger_bands(
     try:
         bb_data = ta.bbands(df['close'], length=period, std=std)
         if bb_data is not None and not bb_data.empty:
-            bb_upper = round(float(bb_data.iloc[-1, 0]), 5) if not pd.isna(bb_data.iloc[-1, 0]) else None
-            bb_middle = round(float(bb_data.iloc[-1, 1]), 5) if not pd.isna(bb_data.iloc[-1, 1]) else None
-            bb_lower = round(float(bb_data.iloc[-1, 2]), 5) if not pd.isna(bb_data.iloc[-1, 2]) else None
+            bb_upper_col = next((c for c in bb_data.columns if c.startswith('BBU_')), None)
+            bb_middle_col = next((c for c in bb_data.columns if c.startswith('BBM_')), None)
+            bb_lower_col = next((c for c in bb_data.columns if c.startswith('BBL_')), None)
+
+            bb_upper_raw = bb_data[bb_upper_col].iloc[-1] if bb_upper_col is not None else (bb_data.iloc[-1, 2] if bb_data.shape[1] > 2 else np.nan)
+            bb_middle_raw = bb_data[bb_middle_col].iloc[-1] if bb_middle_col is not None else (bb_data.iloc[-1, 1] if bb_data.shape[1] > 1 else np.nan)
+            bb_lower_raw = bb_data[bb_lower_col].iloc[-1] if bb_lower_col is not None else (bb_data.iloc[-1, 0] if bb_data.shape[1] > 0 else np.nan)
+
+            bb_upper = round(float(bb_upper_raw), 5) if not pd.isna(bb_upper_raw) else None
+            bb_middle = round(float(bb_middle_raw), 5) if not pd.isna(bb_middle_raw) else None
+            bb_lower = round(float(bb_lower_raw), 5) if not pd.isna(bb_lower_raw) else None
             
             # Calculate squeeze ratio
             bb_squeeze_ratio = None
-            if bb_upper and bb_lower and bb_middle and bb_middle > 0:
+            if bb_upper is not None and bb_lower is not None and bb_middle is not None and bb_middle != 0:
                 bb_squeeze_ratio = round((bb_upper - bb_lower) / bb_middle, 5)
             
             # Calculate BB width percentile
             bb_width_percentile = None
-            bbw_series = (bb_data.iloc[:, 0] - bb_data.iloc[:, 2]) / bb_data.iloc[:, 1]
+            bb_upper_series = bb_data[bb_upper_col] if bb_upper_col is not None else (bb_data.iloc[:, 2] if bb_data.shape[1] > 2 else pd.Series(dtype=float))
+            bb_middle_series = bb_data[bb_middle_col] if bb_middle_col is not None else (bb_data.iloc[:, 1] if bb_data.shape[1] > 1 else pd.Series(dtype=float))
+            bb_lower_series = bb_data[bb_lower_col] if bb_lower_col is not None else (bb_data.iloc[:, 0] if bb_data.shape[1] > 0 else pd.Series(dtype=float))
+
+            bbw_series = (bb_upper_series - bb_lower_series).abs() / bb_middle_series.abs().replace(0, np.nan)
             if not bbw_series.empty and len(bbw_series) > volatility_lookback and not pd.isna(bbw_series.iloc[-1]):
                 current_bbw = float(bbw_series.iloc[-1])
                 historical_bbw = bbw_series.iloc[-(volatility_lookback + 1):-1]
-                if len(historical_bbw) > 0:
-                    rank = (historical_bbw < current_bbw).sum()
-                    bb_width_percentile = round((rank / len(historical_bbw)) * 100, 1)
+                bb_width_percentile = _calculate_percentile(current_bbw, historical_bbw)
             
             return {
                 'bb_upper': bb_upper,
@@ -203,9 +232,15 @@ def calculate_all_indicators(
 ) -> Dict[str, any]:
     """Calculate all technical indicators (matching MT5 script)"""
     
-    if df is None or len(df) < volatility_lookback:
-        logger.warning(f"Insufficient data for indicators. Need >{volatility_lookback}, got {len(df) if df is not None else 0}")
+    if df is None or df.empty:
+        logger.warning("Insufficient data for indicators. Empty dataframe provided")
         return {}
+
+    if len(df) < volatility_lookback:
+        logger.warning(
+            f"Data shorter than volatility lookback ({len(df)} < {volatility_lookback}); "
+            "raw indicators will still be computed, percentile fields may be null"
+        )
     
     indicators = {}
     

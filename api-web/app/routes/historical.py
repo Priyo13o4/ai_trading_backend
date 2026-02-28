@@ -216,12 +216,12 @@ async def get_historical_data(
                 params = []
                 if include_indicators:
                     params.append(tf)
-                params.append(symbol)
+                params.append(sym)
             else:
                 query += """
                     WHERE c.symbol = %s AND c.timeframe = %s
                 """
-                params = [symbol, tf]
+                params = [sym, tf]
             
             if start_date:
                 query += " AND c.time >= %s"
@@ -273,7 +273,7 @@ async def get_historical_data(
                               AND time >= %s AND time <= %s
                             LIMIT 1
                             """,
-                            (symbol, refresh_start, refresh_end),
+                            (sym, refresh_start, refresh_end),
                         )
                         raw_has_data_for_window = cur.fetchone() is not None
 
@@ -384,7 +384,7 @@ async def get_historical_data(
                             FROM candlesticks
                             WHERE symbol=%s AND timeframe='M1'
                             """,
-                            (symbol,),
+                            (sym,),
                         )
                         latest = cur.fetchone()
                         latest_dt = (latest or {}).get("latest")
@@ -437,24 +437,24 @@ async def get_historical_data(
             
             if include_indicators:
                 item['indicators'] = {
-                    "ema_9": float(row['ema_9']) if row.get('ema_9') else None,
-                    "ema_21": float(row['ema_21']) if row.get('ema_21') else None,
-                    "ema_50": float(row['ema_50']) if row.get('ema_50') else None,
-                    "ema_100": float(row['ema_100']) if row.get('ema_100') else None,
-                    "ema_200": float(row['ema_200']) if row.get('ema_200') else None,
-                    "rsi": float(row['rsi']) if row.get('rsi') else None,
+                    "ema_9": float(row['ema_9']) if row.get('ema_9') is not None else None,
+                    "ema_21": float(row['ema_21']) if row.get('ema_21') is not None else None,
+                    "ema_50": float(row['ema_50']) if row.get('ema_50') is not None else None,
+                    "ema_100": float(row['ema_100']) if row.get('ema_100') is not None else None,
+                    "ema_200": float(row['ema_200']) if row.get('ema_200') is not None else None,
+                    "rsi": float(row['rsi']) if row.get('rsi') is not None else None,
                     "macd": {
-                        "main": float(row['macd_main']) if row.get('macd_main') else None,
-                        "signal": float(row['macd_signal']) if row.get('macd_signal') else None,
-                        "histogram": float(row['macd_histogram']) if row.get('macd_histogram') else None
+                        "main": float(row['macd_main']) if row.get('macd_main') is not None else None,
+                        "signal": float(row['macd_signal']) if row.get('macd_signal') is not None else None,
+                        "histogram": float(row['macd_histogram']) if row.get('macd_histogram') is not None else None
                     },
-                    "atr": float(row['atr']) if row.get('atr') else None,
+                    "atr": float(row['atr']) if row.get('atr') is not None else None,
                     "bollinger_bands": {
-                        "upper": float(row['bb_upper']) if row.get('bb_upper') else None,
-                        "middle": float(row['bb_middle']) if row.get('bb_middle') else None,
-                        "lower": float(row['bb_lower']) if row.get('bb_lower') else None
+                        "upper": float(row['bb_upper']) if row.get('bb_upper') is not None else None,
+                        "middle": float(row['bb_middle']) if row.get('bb_middle') is not None else None,
+                        "lower": float(row['bb_lower']) if row.get('bb_lower') is not None else None
                     },
-                    "adx": float(row['adx']) if row.get('adx') else None
+                    "adx": float(row['adx']) if row.get('adx') is not None else None
                 }
             
             data.append(item)
@@ -479,8 +479,8 @@ async def get_historical_data(
                 data.insert(0, forming_item)
         
         response = {
-            "symbol": symbol,
-            "timeframe": timeframe,
+            "symbol": sym,
+            "timeframe": tf,
             "bars": len(data),
             "candles": data,  # Frontend expects 'candles' key
             "data": data,     # Keep for backward compatibility

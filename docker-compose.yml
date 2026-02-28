@@ -222,7 +222,9 @@ services:
           cpus: '0.25'
 
   news-analyzer:
-    build: ./news_analyzer
+    build:
+      context: .
+      dockerfile: news_analyzer/Dockerfile
     container_name: tradingbot-news-analyzer
     restart: unless-stopped
     depends_on:
@@ -236,6 +238,9 @@ services:
       - SCRAPER_BASE_URL=${SCRAPER_BASE_URL:-http://tradingbot-scraper:8000}
       - SCRAPER_TIMEOUT=${SCRAPER_TIMEOUT:-300}
       - GEMINI_MODEL=gemini-3-flash-preview
+      - LOG_FILE_PATH=/app/logs/news_analyzer.log
+    volumes:
+      - ./news_analyzer/logs:/app/logs
     command: tail -f /dev/null
     deploy:
       resources:

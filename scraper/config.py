@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     IMPLICIT_WAIT: int = 10
     SELENIUM_BROWSER_BINARY: str = ""
     SELENIUM_DRIVER_PATH: str = ""
+    # Driver backend selection:
+    # - auto: prefer stable Selenium ChromeDriver unless UC is explicitly requested
+    # - selenium: always use Selenium ChromeDriver
+    # - uc: always use undetected_chromedriver
+    DRIVER_BACKEND: str = "auto"
 
     # Manual / safest scraping mode
     # - When running on your laptop (outside Docker), set HEADLESS=False so you can
@@ -37,6 +42,8 @@ class Settings(BaseSettings):
     # When enabled, launches undetected_chromedriver with minimal options
     # (closer to a real user session; fewer flags = fewer startup crashes on macOS).
     MINIMAL_UC_MODE: bool = False
+    UC_VERSION_MAIN: int = 0
+    UC_USE_SUBPROCESS: bool = False
     CHROME_USER_DATA_DIR: str = ""
     CHROME_PROFILE_DIRECTORY: str = ""
     MANUAL_CHALLENGE_MAX_SECONDS: int = 300

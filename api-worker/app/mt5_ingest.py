@@ -383,6 +383,9 @@ class MT5IngestServer:
         self._bootstrap_send_task: dict[int, asyncio.Task] = {}
         self._bootstrap_subscribed: set[int] = set()
         self._job_id_seq = 1
+        # Job IDs that must upsert history rows regardless of global env.
+        # Used by internal/manual backfill requests.
+        self._force_upsert_jobs: set[int] = set()
 
         # Bootstrap flow-control and retry
         self._bootstrap_max_inflight = _env_int("MT5_BOOTSTRAP_MAX_INFLIGHT", 5)
@@ -463,6 +466,49 @@ class MT5IngestServer:
         )
         frame = pack_frame(MSG_HISTORY_FETCH, payload, job_id=job_id)
         return await self._broadcast(frame)
+
+    def allocate_job_id(self) -> int:
+        """Allocate a process-unique job id for history fetch requests."""
+        job_id = int(self._job_id_seq)
+        self._job_id_seq += 1
+        return job_id
+
+    async def request_history_fetch(
+        self,
+        *,
+        symbol: str,
+        from_ts: int,
+        to_ts: int,
+        tf: int = TF_M1,
+        max_bars: int = 2000,
+        chunk_bars: int = 1000,
+        upsert: bool = False,
+        job_id: Optional[int] = None,
+    ) -> tuple[int, int]:
+        """Send a history fetch request to all connected bridge sessions.
+
+        Returns:
+            (sent_sessions_count, job_id)
+        """
+        req_job_id = int(job_id) if job_id and int(job_id) > 0 else self.allocate_job_id()
+        if upsert:
+            self._force_upsert_jobs.add(req_job_id)
+
+        sent = await self.broadcast_history_fetch(
+            symbol=symbol,
+            from_ts=int(from_ts),
+            to_ts=int(to_ts),
+            tf=int(tf),
+            max_bars=int(max_bars),
+            chunk_bars=int(chunk_bars),
+            job_id=req_job_id,
+        )
+
+        # No recipients => cleanup forced-upsert marker.
+        if sent <= 0 and upsert:
+            self._force_upsert_jobs.discard(req_job_id)
+
+        return sent, req_job_id
 
     async def _broadcast(self, data: bytes) -> int:
         async with self._lock:
@@ -669,6 +715,7 @@ class MT5IngestServer:
                     meta, rows = iter_hist_chunk(frame.payload)
                     tf_code = meta.get("timeframe", TF_M1)
                     tf_name = TF_TO_NAME.get(tf_code, "M1")
+                    force_upsert = int(frame.job_id) in self._force_upsert_jobs
 
                     if self._debug:
                         first_ts = rows[0]["ts_open"] if rows else None
@@ -689,7 +736,7 @@ class MT5IngestServer:
                         symbol=meta["symbol"],
                         timeframe=tf_name,
                         rows=rows,
-                        upsert=history_upsert,
+                        upsert=(history_upsert or force_upsert),
                     )
 
                 elif frame.msg_type in {MSG_HIST_BEGIN, MSG_HIST_END}:
@@ -699,6 +746,8 @@ class MT5IngestServer:
 
                     # If we're bootstrapping history, mark jobs complete on HIST_END and subscribe once done.
                     if frame.msg_type == MSG_HIST_END:
+                        # Cleanup manual upsert marker when job fully finishes.
+                        self._force_upsert_jobs.discard(int(frame.job_id))
                         pending = self._bootstrap_pending_jobs.get(sid)
                         if pending is not None and int(frame.job_id) in pending:
                             pending.discard(int(frame.job_id))

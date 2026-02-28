@@ -27,7 +27,7 @@ BEGIN
     s.confidence,
     s.expiry_time
   FROM strategies s
-  WHERE s.trading_pair = pair
+  WHERE s.symbol = UPPER(pair)
     AND s.status = 'active'
     AND s.expiry_time > NOW()
   ORDER BY s.confidence DESC, s.timestamp DESC;

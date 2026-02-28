@@ -27,8 +27,8 @@ fi
 
 # Minimal-UC mode (mimics the stable forexfactory-scraper approach)
 export HEADLESS="${HEADLESS:-0}"
-export USE_UNDETECTED_CHROME="${USE_UNDETECTED_CHROME:-1}"
-export MINIMAL_UC_MODE="${MINIMAL_UC_MODE:-1}"
+export USE_UNDETECTED_CHROME="${USE_UNDETECTED_CHROME:-0}"
+export MINIMAL_UC_MODE="${MINIMAL_UC_MODE:-0}"
 
 # Use a dedicated Chrome profile dir to avoid conflicts with your real Chrome session
 export CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-$HOME/Library/Application Support/FFScraperChrome}"

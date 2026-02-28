@@ -6,14 +6,22 @@ Handles streaming of candles, news, and strategies
 import asyncio
 import json
 import logging
+import os
+import time
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from .cache import redis_client, PubSubManager, get_last_candle_update
+from .cache import NewsCache, StrategyCache, redis_client, PubSubManager, get_last_candle_update
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stream", tags=["streaming"])
+HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("SSE_HEARTBEAT_INTERVAL_SECONDS", "15"))
+
+
+def _server_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 async def event_generator(
@@ -22,6 +30,7 @@ async def event_generator(
     *,
     initial_payloads: list[dict] | None = None,
     send_connected: bool = True,
+    heartbeat_interval_s: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> AsyncGenerator[str, None]:
     """
     Generate SSE events from Redis pub/sub channel
@@ -49,6 +58,7 @@ async def event_generator(
                 yield f"data: {json.dumps(payload)}\n\n"
         
         # Listen for messages
+        last_heartbeat = time.monotonic()
         while True:
             # Check if client disconnected
             if await request.is_disconnected():
@@ -62,6 +72,12 @@ async def event_generator(
                 # Forward the message to client
                 data = message['data']
                 yield f"data: {data}\n\n"
+
+            now = time.monotonic()
+            if heartbeat_interval_s > 0 and now - last_heartbeat >= heartbeat_interval_s:
+                heartbeat = {"type": "heartbeat", "server_ts": _server_timestamp()}
+                yield f"data: {json.dumps(heartbeat)}\n\n"
+                last_heartbeat = now
             
             # Small sleep to prevent CPU spinning
             await asyncio.sleep(0.1)
@@ -169,8 +185,19 @@ async def stream_news(request: Request):
     """
     logger.info("Starting news stream")
     
+    snapshot = NewsCache.get("all") or []
+    initial_payloads = None
+    if snapshot:
+        initial_payloads = [
+            {"type": "news_snapshot", "news": snapshot, "server_ts": _server_timestamp()}
+        ]
+
     return StreamingResponse(
-        event_generator(PubSubManager.CHANNELS['news'], request),
+        event_generator(
+            PubSubManager.CHANNELS['news'],
+            request,
+            initial_payloads=initial_payloads,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -181,7 +208,7 @@ async def stream_news(request: Request):
 
 
 @router.get("/strategies")
-async def stream_strategies(request: Request):
+async def stream_strategies(request: Request, pair: str | None = None):
     """
     Stream real-time strategy updates
     
@@ -193,8 +220,24 @@ async def stream_strategies(request: Request):
     """
     logger.info("Starting strategies stream")
     
+    normalized_pair = pair.upper() if pair else None
+    snapshot = StrategyCache.get(normalized_pair or "all") or []
+    initial_payloads = None
+    if snapshot:
+        initial_payloads = [
+            {
+                "type": "strategies_snapshot",
+                "strategies": snapshot,
+                "server_ts": _server_timestamp(),
+            }
+        ]
+
     return StreamingResponse(
-        event_generator(PubSubManager.CHANNELS['strategies'], request),
+        event_generator(
+            PubSubManager.CHANNELS['strategies'],
+            request,
+            initial_payloads=initial_payloads,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

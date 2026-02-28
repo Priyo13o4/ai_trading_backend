@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from trading_common.cache import (
     create_redis_client,
@@ -198,6 +198,45 @@ class PubSubManager:
         pubsub = redis_client.pubsub()
         pubsub.subscribe(channel)
         return pubsub
+
+
+def _publish_payload(channel: str, payload: Dict[str, Any]) -> bool:
+    try:
+        redis_client.publish(channel, json.dumps(payload))
+        return True
+    except Exception as e:
+        logger.error(f"PubSub publish error: {e}")
+        return False
+
+
+def publish_news_snapshot(news: List[Dict[str, Any]]) -> bool:
+    """Publish a news snapshot event for SSE consumers."""
+    payload = {
+        "type": "news_snapshot",
+        "news": news,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["news"], payload)
+
+
+def publish_strategies_snapshot(strategies: List[Dict[str, Any]]) -> bool:
+    """Publish a strategies snapshot event for SSE consumers."""
+    payload = {
+        "type": "strategies_snapshot",
+        "strategies": strategies,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["strategies"], payload)
+
+
+def publish_strategy_update(strategy: Dict[str, Any]) -> bool:
+    """Publish a single strategy update event for SSE consumers."""
+    payload = {
+        "type": "strategy_update",
+        "strategy": strategy,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["strategies"], payload)
 
 
 def check_redis_connection():
