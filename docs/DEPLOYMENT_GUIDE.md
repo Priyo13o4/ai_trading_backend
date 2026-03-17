@@ -93,7 +93,9 @@ python calculate_recent_indicators_v2.py --symbol XAUUSD --timeframe H1
 Real-time updates are driven by MT5 ingest + the `api-worker` scheduler. No separate cron/n8n job is required.
 
 **What It Does:**
-- Fetches latest 2 candles per symbol/timeframe (current + previous for confirmation)
+- Uses per-symbol/timeframe indicator watermarks to find newly closed candles only
+- If no new closed candle exists after watermark, returns up-to-date with near-zero compute
+- If new candles exist, recalculates a bounded window (new candles + tiny overlap) and advances watermark monotonically
 - Stores in database with UPSERT
 - Updates metadata automatically via trigger
 - Logs progress to console/file
@@ -225,11 +227,18 @@ SELECT * FROM find_data_gaps('XAUUSD', 'H1', 24);
 SELECT calculate_data_completeness('XAUUSD', 'H1');
 ```
 
-### Clean Old Indicators (Keep Only Last 1000 Bars)
+### Check Indicator Watermarks
 ```sql
--- TimescaleDB compression automatically handles this
--- But you can manually run:
-SELECT cleanup_old_indicators();
+SELECT symbol, timeframe, watermark_time, updated_at
+FROM indicator_update_watermarks
+ORDER BY symbol, timeframe;
+```
+
+```sql
+SELECT symbol, timeframe, MAX(time) AS latest_candle_time
+FROM candlesticks
+GROUP BY symbol, timeframe
+ORDER BY symbol, timeframe;
 ```
 
 ### Re-Backfill Single Symbol/Timeframe
@@ -309,8 +318,11 @@ python calculate_recent_indicators_v2.py
 # Check PostgreSQL is running
 docker ps | grep n8n-postgres
 
-# Check connection string in scripts
-export DATABASE_URL="postgresql://postgres:yourpassword@localhost:5432/trading_db"
+# Check DATABASE_URL is set for the worker process
+echo "$DATABASE_URL"
+
+# Example format only (do not hardcode credentials in shell history)
+# postgresql://<user>:<password>@<host>:<port>/<database>
 ```
 
 ## 🎯 Next Steps

@@ -23,6 +23,11 @@ services:
     ports:
       - "8080:8080"
       - "9001:9001"
+    environment:
+      # Dev auth overrides — prevents inheriting production values from docker-compose.yml
+      AUTH_ENV: development
+      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
+      COOKIE_SECURE: "false"
 
   api-worker:
     volumes:

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import time
 from fastapi import HTTPException, Request
 
@@ -7,10 +8,12 @@ from ..redis_cache import CACHE_REDIS
 
 logger = logging.getLogger(__name__)
 
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "0") == "1"
+
 
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
+    if TRUST_PROXY_HEADERS and forwarded:
         return forwarded.split(",")[0].strip()
     if request.client:
         return request.client.host

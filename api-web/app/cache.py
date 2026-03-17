@@ -7,14 +7,12 @@ Provides cache utilities for web service needs.
 import json
 import logging
 import os
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Dict, Any, Iterable
+from datetime import datetime, timezone
 
 from trading_common.cache import (
     create_redis_client,
     build_cache_key,
-    invalidate_cache_pattern,
-    get_cache_ttl,
     DEFAULT_CACHE_TTL
 )
 
@@ -40,12 +38,15 @@ def news_key(symbol: str = "all") -> str:
 
 def strategies_key(symbol: str = "all") -> str:
     """Generate Redis key for strategies."""
-    return build_cache_key("strategies", symbol)
+    normalized_symbol = str(symbol or "all").strip()
+    if not normalized_symbol:
+        normalized_symbol = "all"
+    elif normalized_symbol.lower() != "all":
+        normalized_symbol = normalized_symbol.upper()
+    else:
+        normalized_symbol = "all"
 
-
-def performance_key(symbol: str) -> str:
-    """Generate Redis key for performance data."""
-    return build_cache_key("performance", symbol)
+    return build_cache_key("strategies", normalized_symbol)
 
 
 def last_candle_key(symbol: str, timeframe: str, *, is_forming: bool) -> str:
@@ -239,11 +240,29 @@ def publish_strategy_update(strategy: Dict[str, Any]) -> bool:
     return _publish_payload(PubSubManager.CHANNELS["strategies"], payload)
 
 
-def check_redis_connection():
-    """Check Redis connection health."""
+def invalidate_strategy_cache_domain(strategy_ids: Iterable[int]) -> Dict[str, int]:
+    """Invalidate strategy detail keys and strategy list keys under latest:strategies:*."""
+    deleted_detail = 0
+    deleted_list = 0
+
     try:
-        redis_client.ping()
-        return True
+        normalized_ids = sorted({int(x) for x in strategy_ids if x is not None})
+        if not normalized_ids:
+            return {"deleted_detail": 0, "deleted_list": 0}
+
+        for strategy_id in normalized_ids:
+            key = f"latest:strategy:id:{strategy_id}"
+            try:
+                deleted_detail += int(redis_client.delete(key) or 0)
+            except Exception:
+                logger.warning("Failed to delete strategy detail key %s", key, exc_info=True)
+
+        # Selective domain invalidation for list/read models.
+        list_keys = list(redis_client.scan_iter(match="latest:strategies:*"))
+        if list_keys:
+            deleted_list = int(redis_client.delete(*list_keys) or 0)
+
+        return {"deleted_detail": deleted_detail, "deleted_list": deleted_list}
     except Exception as e:
-        logger.error(f"Redis connection failed: {e}")
-        return False
+        logger.error("Strategy cache invalidation failed: %s", e, exc_info=True)
+        return {"deleted_detail": deleted_detail, "deleted_list": deleted_list}

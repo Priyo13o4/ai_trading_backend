@@ -7,7 +7,7 @@ Complete guide for implementing subscription-based API access control with FastA
 ## 📋 Overview
 
 Your FastAPI backend needs to:
-1. ✅ Verify JWT tokens from Supabase
+1. ✅ Exchange Supabase access tokens for Redis-backed server sessions
 2. ✅ Check if user has active subscription
 3. ✅ Verify user can access requested trading pair
 4. ✅ Handle payment webhooks
@@ -43,16 +43,29 @@ pydantic>=2.0.0
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_JWT_SECRET=your-jwt-secret  # From Settings → API → JWT Secret
+SUPABASE_AUDIENCE=authenticated
+SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
 
 # Stripe (for payments)
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_WEBHOOK_SECRET=whsec_...
 
-# Redis
-REDIS_HOST=localhost
-REDIS_PORT=6379
+# Session Redis
+SESSION_REDIS_URL=redis://:password@redis:6379/0
+SERVER_SESSION_MAX_TTL=86400
+PERMS_CACHE_TTL_SECONDS=900
+
+# Session/Cookie
+SESSION_COOKIE_NAME=session
+CSRF_COOKIE_NAME=csrf_token
+COOKIE_SECURE=1
+COOKIE_SAMESITE=lax
+TRUST_PROXY_HEADERS=0
+
+# Invalidation webhook
+AUTH_INVALIDATION_WEBHOOK_SECRET=replace-me
+AUTH_INVALIDATION_USE_SIGNED=1
+AUTH_INVALIDATION_TOLERANCE_SECONDS=300
 
 # App
 API_PORT=8080
@@ -63,82 +76,81 @@ CORS_ORIGINS=http://localhost:3000,https://pipfactor.com
 
 ## Part 2: Authentication System (`auth.py`)
 
-**CURRENT IMPLEMENTATION:** The authentication is handled by `ai_trading_bot/api-web/app/auth.py` using an `auth_context` dependency.
+**CURRENT IMPLEMENTATION:** Session auth is handled by:
+- `ai_trading_bot/api-web/app/authn/routes.py` (`/auth/*` bootstrap + invalidation)
+- `ai_trading_bot/api-web/app/authn/session_store.py` (Redis session/perms store)
+- `ai_trading_bot/api-web/app/auth.py` (`auth_context` dependency for API routes)
 
 ### Key Components:
 
-#### 1. **JWT Verification (Supabase Tokens)**
+#### 1. **Session Bootstrap (`POST /auth/exchange`)**
 
-The system verifies Supabase JWT tokens using multiple methods:
-- **JWKS** (JSON Web Key Set) - Primary method
-- **HS256 shared secret** - Fallback method
-- **Supabase user endpoint** - Final fallback
+`/auth/exchange` is the only place where a Supabase access token is accepted.
+
+What happens:
+1. Verifies `access_token` via Supabase JWKS (`verify_supabase_access_token`).
+2. Reads/caches plan permissions in Redis.
+3. Creates Redis session (`session:{sid}` + `user_sessions:{user_id}`).
+4. Sets cookies:
+   - `session` (HTTP-only)
+   - `csrf_token` (readable; used for double-submit CSRF)
+5. Returns `csrf_token`, `permissions`, and `expires_in`.
 
 ```python
 from auth import auth_context
 
 @app.get("/api/signals/{pair}")
 async def get_signals(pair: str, ctx=Depends(auth_context)):
-    if ctx["anonymous"]:
-        raise HTTPException(402, "Login required")
-    
     user_id = ctx["user_id"]
     # Your endpoint logic here
     return {"signals": signals}
 ```
 
-#### 2. **Anonymous Access with Rate Limiting**
+#### 2. **Primary Auth for API Routes (`auth_context`)**
 
-The system supports anonymous access with limits:
-- Free tier: 3 requests per day (configurable via `ANON_FREE_LIMIT`)
-- Uses HMAC-signed cookies for tracking
-- Automatically creates anon tokens on first visit
+`auth_context` is cookie + Redis only. It does not read `Authorization: Bearer`.
+
+Behavior:
+1. Reads `SESSION_COOKIE_NAME` from request cookies.
+2. Loads session from Redis via `get_session`.
+3. Returns `{user_id, plan, permissions}`.
+4. Returns `401` when cookie is missing/invalid/expired.
+
+#### 3. **CSRF Double-Submit**
+
+Middleware enforces CSRF on cookie-authenticated state-changing requests:
+- Methods: `POST`, `PUT`, `PATCH`, `DELETE`
+- Requires `X-CSRF-Token` header equal to `csrf_token` cookie
+- Exempt paths: `/auth/exchange`, `/auth/invalidate`
 
 ```python
-async def get_public_data(ctx=Depends(auth_context)):
-    if ctx["anonymous"]:
-        # Anonymous user - limited access
-        anon_jti = ctx["anon_jti"]
-    else:
-        # Authenticated user - full access
-        user_id = ctx["user_id"]
+from app.authn.csrf import enforce_csrf
+
+if request.cookies.get(SESSION_COOKIE_NAME):
+    enforce_csrf(request, CSRF_COOKIE_NAME)
 ```
 
-#### 3. **How auth_context Works**
+#### 4. **Session Lifecycle Endpoints**
 
-**What it does:**
-1. Checks for `Authorization: Bearer <token>` header
-2. Verifies JWT token with Supabase (JWKS → HS256 → /user endpoint)
-3. Returns `{"anonymous": False, "user_id": "..."}` for authenticated users
-4. Falls back to anonymous cookie tracking for unauthenticated users
-5. Returns `{"anonymous": True, "anon_jti": "..."}` for anon users
-6. Creates new anon cookie if none exists
-7. Increments Redis counter for anon usage
-8. Raises `HTTPException(402)` if anon limit exceeded
+- `GET /auth/validate`: Returns `{allowed: true/false}` from session cookie validity.
+- `POST /auth/logout`: Deletes current session and clears `session` + `csrf_token` cookies.
+- `POST /auth/logout-all`: Requires current session, deletes all sessions for that user, clears current cookies.
 
-#### 4. **Environment Variables Required**
+#### 5. **Invalidation Webhook (`POST /auth/invalidate`)**
 
-```bash
-# Supabase Auth
-SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
-SUPABASE_JWT_SECRET=your-jwt-secret  # HS256 fallback
-SUPABASE_PROJECT_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_AUDIENCE=authenticated
+Purpose: internal invalidation of a user's permissions cache + all sessions.
 
-# Anonymous Access
-ANON_HMAC_SECRET=change-me  # For signing anon cookies
-ANON_COOKIE_NAME=anon_pass
-ANON_FREE_LIMIT=3  # Free requests per day
-RATE_LIMIT_PER_MIN=60
+Signed mode (default):
+- `AUTH_INVALIDATION_USE_SIGNED=1`
+- Required headers: `x-webhook-timestamp`, `x-webhook-signature`, `x-webhook-id`
+- Signature input: `timestamp + "." + raw_body`
+- Replay guard: Redis `SET NX EX` on `replay:auth_invalidate:{id}`
+- Timestamp skew limit: `AUTH_INVALIDATION_TOLERANCE_SECONDS`
 
-# Redis (for anon tracking)
-REDIS_HOST=n8n-redis
-REDIS_PORT=6379
-REDIS_PASSWORD=your-redis-password
-```
+Legacy mode (`AUTH_INVALIDATION_USE_SIGNED=0`):
+- Accepts `x-webhook-secret` and compares with `AUTH_INVALIDATION_WEBHOOK_SECRET`
 
-#### 5. **Using auth_context in Your Endpoints**
+#### 6. **Using auth_context in Your Endpoints**
 
 ```python
 from fastapi import Depends
@@ -147,31 +159,30 @@ from auth import auth_context
 # Protected endpoint (requires authentication)
 @app.get("/api/protected")
 async def protected_route(ctx=Depends(auth_context)):
-    if ctx["anonymous"]:
-        raise HTTPException(401, "Authentication required")
-    return {"user_id": ctx["user_id"]}
+    return {
+        "user_id": ctx["user_id"],
+        "plan": ctx.get("plan"),
+        "permissions": ctx.get("permissions", []),
+    }
 
 # Public endpoint with optional auth
+from auth import optional_auth_context
+
 @app.get("/api/public")
-async def public_route(ctx=Depends(auth_context)):
-    if ctx["anonymous"]:
-        return {"message": "Anonymous access", "limited": True}
-    return {"user_id": ctx["user_id"], "limited": False}
+async def public_route(ctx=Depends(optional_auth_context)):
+    return {
+        "user_id": ctx.get("user_id"),
+        "plan": ctx.get("plan", "free"),
+    }
 ```
 
 ---
 
-## Part 2B: Alternative - Subscription Middleware (Optional)
+## Part 2B: Operational Notes
 
-**NOTE:** The guide below describes `subscription_middleware.py` which can be used **alongside** `auth_context` for subscription-based access control. This is optional and not currently implemented in the main API.
-
-If you want to add subscription checking, you can create `subscription_middleware.py`:
-
-```python
-from fastapi import Depends, HTTPException
-from auth import auth_context
-# Add subscription checking logic here
-```
+- `SESSION_REDIS_URL` (or host/port/password fallback) must be configured or app startup fails.
+- Session TTL is capped by `SERVER_SESSION_MAX_TTL` and Supabase token `exp`.
+- CSRF is only enforced when a session cookie is present.
 
 ---
 
@@ -261,7 +272,7 @@ async def get_signals(
 @app.get("/api/signals")
 async def get_multiple_signals(
     pairs: str,  # Comma-separated: "XAUUSD,EURUSD,GBPUSD"
-    user_id: str = Depends(get_user_from_token)
+    ctx=Depends(auth_context)
 ):
     """
     Get signals for multiple pairs
@@ -270,7 +281,7 @@ async def get_multiple_signals(
     requested_pairs = pairs.split(",")
     
     # Get user subscription
-    subscription = await check_subscription_access(user_id)
+    subscription = await check_subscription_access(ctx["user_id"])
     allowed_pairs = subscription["pairs_allowed"]
     
     # Filter pairs
@@ -296,14 +307,14 @@ async def get_multiple_signals(
 ```python
 @app.get("/api/subscription")
 async def get_subscription(
-    user_id: str = Depends(get_user_from_token)
+    ctx=Depends(auth_context)
 ):
     """
     Get user's current subscription details
     """
     subscription = supabase.rpc(
         "get_active_subscription",
-        {"p_user_id": user_id}
+        {"p_user_id": ctx["user_id"]}
     ).execute()
     
     if not subscription.data:
@@ -338,7 +349,7 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 @app.post("/api/create-checkout")
 async def create_checkout(
     plan_id: str,
-    user_id: str = Depends(get_user_from_token)
+    ctx=Depends(auth_context)
 ):
     """
     Create Stripe checkout session for subscription upgrade
@@ -354,7 +365,7 @@ async def create_checkout(
         raise HTTPException(404, "Plan not found")
     
     # Get user email
-    user = supabase.auth.admin.get_user_by_id(user_id)
+    user = supabase.auth.admin.get_user_by_id(ctx["user_id"])
     
     # Create Stripe checkout session
     session = stripe.checkout.Session.create(
@@ -368,7 +379,7 @@ async def create_checkout(
         success_url='https://pipfactor.com/success?session_id={CHECKOUT_SESSION_ID}',
         cancel_url='https://pipfactor.com/pricing',
         metadata={
-            'user_id': user_id,
+            'user_id': ctx["user_id"],
             'plan_id': plan_id
         }
     )
@@ -525,11 +536,7 @@ app.add_middleware(
 )
 
 # Import routes
-from subscription_middleware import (
-    SubscriptionRequired, 
-    get_user_from_token,
-    check_subscription_access
-)
+from auth import auth_context
 
 # Health check
 @app.get("/health")
@@ -599,12 +606,14 @@ if pair not in allowed_pairs:
 ### Test Authentication
 
 ```bash
-# Get JWT token (from frontend login)
-TOKEN="eyJhbG..."
+# 1) Exchange Supabase access token for session + csrf cookies
+ACCESS_TOKEN="eyJhbG..."
+curl -i -c cookies.txt -X POST http://localhost:8080/auth/exchange \
+    -H "Content-Type: application/json" \
+    -d '{"access_token":"'"$ACCESS_TOKEN"'"}'
 
-# Test protected endpoint
-curl -H "Authorization: Bearer $TOKEN" \
-     http://localhost:8080/api/signals/XAUUSD
+# 2) Call protected endpoint with cookie session
+curl -b cookies.txt http://localhost:8080/api/signals/XAUUSD
 
 # Expected: 200 OK with signals (if subscribed)
 # Or: 403 Forbidden (if not subscribed)
@@ -617,21 +626,29 @@ curl -H "Authorization: Bearer $TOKEN" \
 import requests
 
 BASE_URL = "http://localhost:8080"
-TOKEN = "your-jwt-token"
-
-headers = {"Authorization": f"Bearer {TOKEN}"}
+cookies = {"session": "your-session-cookie-value"}
 
 # Test allowed pair
-response = requests.get(f"{BASE_URL}/api/signals/XAUUSD", headers=headers)
+response = requests.get(f"{BASE_URL}/api/signals/XAUUSD", cookies=cookies)
 print(f"XAUUSD: {response.status_code}")  # Should be 200
 
 # Test denied pair (if on free plan)
-response = requests.get(f"{BASE_URL}/api/signals/EURUSD", headers=headers)
+response = requests.get(f"{BASE_URL}/api/signals/EURUSD", cookies=cookies)
 print(f"EURUSD: {response.status_code}")  # Should be 403
 
 # Get subscription info
-response = requests.get(f"{BASE_URL}/api/subscription", headers=headers)
+response = requests.get(f"{BASE_URL}/api/subscription", cookies=cookies)
 print(response.json())
+```
+
+### Test CSRF (state-changing route)
+
+```bash
+# Read csrf_token value from /auth/exchange response or cookie jar.
+CSRF_TOKEN="from_exchange_response"
+
+curl -i -b cookies.txt -X POST http://localhost:8080/auth/logout \
+    -H "X-CSRF-Token: $CSRF_TOKEN"
 ```
 
 ---
@@ -672,10 +689,12 @@ gunicorn app.main:app \
 - ✅ Admin: Update previews
 
 **Security Features:**
-- ✅ JWT verification
+- ✅ Supabase token verification at `/auth/exchange` only
+- ✅ Redis-backed server sessions for API auth
+- ✅ CSRF double-submit for cookie-authenticated writes
 - ✅ Subscription validation
 - ✅ Pair-specific access control
-- ✅ Webhook signature verification
+- ✅ Signed invalidation webhook verification (default)
 - ✅ Rate limiting ready (add if needed)
 
 **Next Steps:**

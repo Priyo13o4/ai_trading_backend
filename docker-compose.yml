@@ -18,6 +18,8 @@ services:
       # Init scripts run only on FIRST init of an empty PGDATA.
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./db/continuous_aggregates.sql:/docker-entrypoint-initdb.d/02_continuous_aggregates.sql:ro
+      - ./db/20260228_core_api_bootstrap.sql:/docker-entrypoint-initdb.d/03_core_api_bootstrap.sql:ro
+      - ./db/20260221_create_calendar_events_tables.sql:/docker-entrypoint-initdb.d/04_calendar_events.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost"]
       interval: 10s
@@ -136,6 +138,11 @@ services:
       SESSION_REDIS_PORT: 6379
       SESSION_REDIS_DB: 0
       SESSION_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      AUTH_ENV: production
+      TRUST_PROXY_HEADERS: "1"
+      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "1"
+      STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS: "30"
+      STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK: "5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -145,7 +152,7 @@ services:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=5).read()\""]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 3
       start_period: 20s
@@ -181,6 +188,19 @@ services:
       MT5_READY_CONNECTED_REDIS_KEY: mt5:ready:connected
       MT5_READY_SUBSCRIBED_REDIS_KEY: mt5:ready:subscribed
       MT5_READY_REDIS_TTL_SECONDS: 180
+      # Recovery-mode resilience: avoid brittle scheduler exits during long catch-up windows.
+      WORKER_SCHEDULER_REQUIRED: "true"
+      WORKER_SCHEDULER_MAX_RESTARTS: "0"
+      INDICATOR_UPDATER_CONSECUTIVE_FAILURE_THRESHOLD: "10"
+      INDICATOR_UPDATER_TIMEOUT_SECONDS: "900"
+      INDICATOR_MAX_NEW_BARS_PER_CYCLE: "8"
+      INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS: "7200"
+      INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP: "50000"
+      INDICATOR_LOOKBACK_BARS_STARTUP: "300"
+      INDICATOR_SAFETY_BACKFILL_BARS_STARTUP: "2"
+      WORKER_LOCK_TTL_SECONDS: "1200"
+      WORKER_LOCK_TTL_SAFETY_MARGIN_SECONDS: "60"
+      WORKER_LOCK_STRICT_MODE: "true"
     depends_on:
       postgres:
         condition: service_healthy

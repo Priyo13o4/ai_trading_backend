@@ -16,6 +16,7 @@ FIX 5 COMPLIANCE:
 import os
 import sys
 import time
+import random
 import subprocess
 import threading
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 INDICATOR_SCRIPT = os.path.join(SCRIPTS_ROOT, "calculate_recent_indicators_v2.py")  # v2.0 - DST-safe with HTF checks
 UPDATE_INTERVAL = 300  # 5 minutes in seconds
+_LOCAL_SCHEDULER_LOCK = threading.Lock()
 
 
 def _touch(path: str) -> None:
@@ -43,6 +45,13 @@ def _touch(path: str) -> None:
 
 def _use_timescale_caggs() -> bool:
     return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def log(message):
@@ -71,18 +80,87 @@ def _get_redis_client() -> Optional[redis.Redis]:
         return None
 
 
-def _acquire_scheduler_lock(client: Optional[redis.Redis]) -> Optional[redis.lock.Lock]:
+def _acquire_scheduler_lock_with_status(
+    client: Optional[redis.Redis],
+    *,
+    strict_lock_mode: bool,
+) -> tuple[str, Optional[redis.lock.Lock]]:
+    fallback_enabled = _env_bool("WORKER_LOCAL_FALLBACK_LOCK_ENABLED", True)
+    if strict_lock_mode:
+        fallback_enabled = False
     if client is None:
-        return None
+        if fallback_enabled and _LOCAL_SCHEDULER_LOCK.acquire(blocking=False):
+            return "acquired_local", None
+        if fallback_enabled:
+            return "held_locally", None
+        return "backend_unavailable", None
     lock_key = os.getenv("WORKER_LOCK_KEY", "locks:data_updater_scheduler")
     ttl_seconds = int(os.getenv("WORKER_LOCK_TTL_SECONDS", "420"))
     try:
         lock = client.lock(lock_key, timeout=ttl_seconds, blocking_timeout=0)
         if lock.acquire(blocking=False):
-            return lock
+            return "acquired", lock
+        return "held_elsewhere", None
     except Exception as e:
         log(f"⚠️  Failed to acquire scheduler lock: {e}")
-    return None
+        if fallback_enabled and _LOCAL_SCHEDULER_LOCK.acquire(blocking=False):
+            log("⚠️  Using process-local fallback lock because distributed lock backend is unavailable")
+            return "acquired_local", None
+        if fallback_enabled:
+            return "held_locally", None
+        return "backend_unavailable", None
+
+
+def _validate_lock_ttl(strict_lock_mode: bool) -> bool:
+    lock_ttl_seconds = int(os.getenv("WORKER_LOCK_TTL_SECONDS", "420"))
+    updater_timeout_seconds = int(os.getenv("INDICATOR_UPDATER_TIMEOUT_SECONDS", "240"))
+    safety_margin_seconds = int(os.getenv("WORKER_LOCK_TTL_SAFETY_MARGIN_SECONDS", "30"))
+    minimum_required = updater_timeout_seconds + safety_margin_seconds
+
+    if lock_ttl_seconds >= minimum_required:
+        return True
+
+    log(
+        "⚠️  Scheduler lock TTL too short: "
+        f"WORKER_LOCK_TTL_SECONDS={lock_ttl_seconds} < "
+        f"INDICATOR_UPDATER_TIMEOUT_SECONDS + margin ({minimum_required})"
+    )
+    if strict_lock_mode:
+        log("🛑 Strict lock mode enabled; refusing to start scheduler with unsafe lock TTL")
+        return False
+
+    log("⚠️  Strict lock mode disabled; continuing with potentially unsafe lock TTL")
+    return True
+
+
+def _start_lock_renewal_thread(
+    lock: Optional[redis.lock.Lock],
+    *,
+    ttl_seconds: int,
+    stop_event: threading.Event,
+    lost_event: threading.Event,
+) -> Optional[threading.Thread]:
+    if lock is None or ttl_seconds <= 0:
+        return None
+
+    interval_seconds = float(os.getenv("WORKER_LOCK_RENEW_INTERVAL_SECONDS", str(max(1, ttl_seconds // 3))))
+    interval_seconds = max(1.0, min(interval_seconds, float(max(1, ttl_seconds - 1))))
+
+    def _loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                try:
+                    lock.extend(ttl_seconds, replace_ttl=True)
+                except TypeError:
+                    lock.extend(ttl_seconds)
+            except Exception as e:
+                log(f"⚠️  Failed to renew scheduler lock lease: {e}")
+                lost_event.set()
+                break
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return t
 
 
 def _start_heartbeat_thread() -> None:
@@ -103,58 +181,138 @@ def log_mode_banner():
         log("🧱 Timescale CAGG mode enabled: higher TF candles computed in DB")
 
 
-def run_indicator_updater():
+def _phase_env(phase: str, startup_name: str, scheduled_name: str, default: str) -> str:
+    if phase == "startup":
+        return os.getenv(startup_name, os.getenv(scheduled_name, default))
+    return os.getenv(scheduled_name, default)
+
+
+def run_indicator_updater(
+    active_lock: Optional[redis.lock.Lock] = None,
+    *,
+    phase: str = "scheduled",
+):
     """Calculate and store technical indicators for recent bars."""
     log("=" * 80)
-    log("Starting indicator updater (recent bars -> technical_indicators)...")
+    log(f"Starting indicator updater phase={phase} (recent bars -> technical_indicators)...")
     log("=" * 80)
-    try:
-        result = subprocess.run(
-            [sys.executable, INDICATOR_SCRIPT],
-            capture_output=False,
-            text=True,
+    timeout_seconds = int(
+        _phase_env(
+            phase,
+            "INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS",
+            "INDICATOR_UPDATER_TIMEOUT_SECONDS",
+            "240",
         )
-        if result.returncode == 0:
+    )
+    backfill_bars = _phase_env(
+        phase,
+        "INDICATOR_SAFETY_BACKFILL_BARS_STARTUP",
+        "INDICATOR_SAFETY_BACKFILL_BARS",
+        "2",
+    )
+    max_new_bars = _phase_env(
+        phase,
+        "INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP",
+        "INDICATOR_MAX_NEW_BARS_PER_CYCLE",
+        "8",
+    )
+    lookback_bars = _phase_env(
+        phase,
+        "INDICATOR_LOOKBACK_BARS_STARTUP",
+        "INDICATOR_LOOKBACK_BARS",
+        "300",
+    )
+    force_overlap_recompute_minutes = _phase_env(
+        phase,
+        "INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES_STARTUP",
+        "INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES",
+        "60",
+    )
+    strict_lock_mode = _env_bool("WORKER_LOCK_STRICT_MODE", True)
+    lock_ttl_seconds = int(os.getenv("WORKER_LOCK_TTL_SECONDS", "420"))
+    log(
+        f"Updater profile: timeout={timeout_seconds}s max_new={max_new_bars} "
+        f"lookback={lookback_bars} backfill={backfill_bars} "
+        f"force_overlap={force_overlap_recompute_minutes}m"
+    )
+    cmd = [
+        sys.executable,
+        INDICATOR_SCRIPT,
+        "--safety-backfill-bars",
+        str(backfill_bars),
+        "--max-new-bars-per-cycle",
+        str(max_new_bars),
+        "--lookback-bars",
+        str(lookback_bars),
+        "--force-overlap-recompute-minutes",
+        str(force_overlap_recompute_minutes),
+    ]
+    proc: Optional[subprocess.Popen] = None
+    lease_stop_event = threading.Event()
+    lease_lost_event = threading.Event()
+    renewal_thread = None
+
+    try:
+        proc = subprocess.Popen(cmd)
+
+        if active_lock is not None:
+            renewal_thread = _start_lock_renewal_thread(
+            active_lock,
+                ttl_seconds=lock_ttl_seconds,
+                stop_event=lease_stop_event,
+                lost_event=lease_lost_event,
+            )
+
+        start_time = time.monotonic()
+        while True:
+            if proc.poll() is not None:
+                break
+
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout_seconds:
+                log(f"✗ Indicator updater timed out after {timeout_seconds}s")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                return False
+
+            if lease_lost_event.is_set() and strict_lock_mode:
+                log("🛑 Scheduler lock lease lost during run; terminating updater due to strict lock mode")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                return False
+
+            time.sleep(0.5)
+
+        if proc.returncode == 0:
             log("✓ Indicator updater completed successfully")
         else:
-            log(f"✗ Indicator updater failed with exit code {result.returncode}")
-        return result.returncode == 0
+            log(f"✗ Indicator updater failed with exit code {proc.returncode}")
+        return proc.returncode == 0
     except Exception as e:
         log(f"✗ Error running indicator updater: {e}")
         return False
+    finally:
+        lease_stop_event.set()
+        if renewal_thread is not None:
+            renewal_thread.join(timeout=2)
 
 
-def wait_for_candle_close():
-    """Wait until 1 second after the next 5-minute mark"""
-    now = datetime.now()
-    current_minute = now.minute
-    current_second = now.second
-
-    # Calculate next 5-minute mark
-    next_5min_mark = ((current_minute // 5) + 1) * 5
-    if next_5min_mark >= 60:
-        next_5min_mark = 0
-
-    # Calculate seconds to wait
-    if next_5min_mark == 0:
-        # Next hour
-        minutes_to_wait = 60 - current_minute
-    else:
-        minutes_to_wait = next_5min_mark - current_minute
-
-    seconds_to_wait = (minutes_to_wait * 60) - current_second + 1  # +1 for 1 second after
-
-    if seconds_to_wait > 0:
-        next_time = now.replace(second=0, microsecond=0)
-        if next_5min_mark == 0:
-            from datetime import timedelta
-            next_time = (next_time + timedelta(hours=1)).replace(minute=0)
-        else:
-            next_time = next_time.replace(minute=next_5min_mark)
-
-        log(f"⏱️  Waiting {seconds_to_wait}s until candle closes at {next_time.strftime('%H:%M:%S')}...")
-        time.sleep(seconds_to_wait)
-        log("✅ Candle closed, starting fetch...")
+def _sleep_cycle_jitter() -> None:
+    max_jitter_seconds = float(os.getenv("INDICATOR_CYCLE_JITTER_SECONDS", "1.5"))
+    if max_jitter_seconds <= 0:
+        return
+    jitter = random.uniform(0.0, max_jitter_seconds)
+    if jitter > 0:
+        log(f"⏱️  Applying jitter before cycle run: {jitter:.2f}s")
+        time.sleep(jitter)
 
 
 def wait_for_next_5min_mark():
@@ -243,6 +401,38 @@ def main():
 
     log_mode_banner()
 
+    strict_lock_mode = _env_bool("WORKER_LOCK_STRICT_MODE", True)
+    if not _validate_lock_ttl(strict_lock_mode):
+        return 1
+
+    try:
+        failure_threshold = int(os.getenv("INDICATOR_UPDATER_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
+    except Exception:
+        failure_threshold = 3
+    failure_threshold = max(1, failure_threshold)
+    consecutive_failures = 0
+
+    def _record_updater_result(success: bool, phase: str) -> bool:
+        nonlocal consecutive_failures
+        if success:
+            if consecutive_failures > 0:
+                log(f"✅ Indicator updater recovered during {phase}; resetting consecutive failure counter")
+            consecutive_failures = 0
+            return False
+
+        consecutive_failures += 1
+        log(
+            f"⚠️  Indicator updater failure during {phase} "
+            f"(consecutive failures: {consecutive_failures}/{failure_threshold})"
+        )
+        if consecutive_failures >= failure_threshold:
+            log(
+                "🛑 Consecutive indicator updater failure threshold reached; "
+                "exiting scheduler with non-zero status for supervision"
+            )
+            return True
+        return False
+
     _start_heartbeat_thread()
     redis_client = _get_redis_client()
 
@@ -252,18 +442,38 @@ def main():
     wait_for_mt5_ready(redis_client=redis_client)
     log("\n🚀 STARTUP: MT5 mode - Broker pushes data via TCP")
     log("🧮 STARTUP: Computing indicators...")
-    startup_lock = _acquire_scheduler_lock(redis_client)
-    if redis_client is None or startup_lock is not None:
+    startup_lock_status, startup_lock = _acquire_scheduler_lock_with_status(
+        redis_client,
+        strict_lock_mode=strict_lock_mode,
+    )
+    startup_local_lock_acquired = startup_lock_status == "acquired_local"
+    if startup_lock_status in {"acquired", "acquired_local"}:
         try:
-            run_indicator_updater()
+            startup_success = run_indicator_updater(active_lock=startup_lock, phase="startup")
+            if _record_updater_result(startup_success, "startup"):
+                return 2
         finally:
             if startup_lock is not None:
                 try:
                     startup_lock.release()
                 except Exception:
                     pass
-    else:
+            if startup_local_lock_acquired and _LOCAL_SCHEDULER_LOCK.locked():
+                _LOCAL_SCHEDULER_LOCK.release()
+    elif startup_lock_status == "held_elsewhere":
         log("⏸️  Scheduler lock held elsewhere; skipping startup run")
+    elif startup_lock_status == "held_locally":
+        log("⏸️  Process-local scheduler lock already held; skipping startup run")
+    else:
+        if strict_lock_mode:
+            log("🛑 Lock backend unavailable in strict mode; skipping startup run")
+            if _record_updater_result(False, "startup (strict lock backend unavailable)"):
+                return 2
+        else:
+            log("⚠️  Lock backend unavailable; strict mode disabled, running startup updater unlocked")
+            startup_success = run_indicator_updater()
+            if _record_updater_result(startup_success, "startup"):
+                return 2
 
     # ============================================================================
     # STEP 2: Continuous 5-minute indicator updates
@@ -282,32 +492,57 @@ def main():
             log(f"\n🔄 SCHEDULED UPDATE #{run_count}")
 
             # MT5 mode: Broker pushes candles continuously → Just compute indicators
-            cycle_lock = _acquire_scheduler_lock(redis_client)
-            if redis_client is not None and cycle_lock is None:
+            cycle_lock_status, cycle_lock = _acquire_scheduler_lock_with_status(
+                redis_client,
+                strict_lock_mode=strict_lock_mode,
+            )
+            if cycle_lock_status == "held_elsewhere":
                 log("⏸️  Scheduler lock held elsewhere; skipping this cycle")
                 continue
+            if cycle_lock_status == "held_locally":
+                log("⏸️  Process-local scheduler lock already held; skipping this cycle")
+                continue
+            if cycle_lock_status == "backend_unavailable" and strict_lock_mode:
+                log("🛑 Lock backend unavailable in strict mode; skipping this cycle")
+                if _record_updater_result(
+                    False,
+                    f"scheduled cycle #{run_count} (strict lock backend unavailable)",
+                ):
+                    return 2
+                continue
+            if cycle_lock_status == "backend_unavailable":
+                log("⚠️  Lock backend unavailable; strict mode disabled, running this cycle unlocked")
+            local_lock_acquired = cycle_lock_status == "acquired_local"
 
             try:
-                run_indicator_updater()
+                _sleep_cycle_jitter()
+                cycle_success = run_indicator_updater(active_lock=cycle_lock, phase="scheduled")
+                if _record_updater_result(cycle_success, f"scheduled cycle #{run_count}"):
+                    return 2
             finally:
                 if cycle_lock is not None:
                     try:
                         cycle_lock.release()
                     except Exception:
                         pass
+                if local_lock_acquired and _LOCAL_SCHEDULER_LOCK.locked():
+                    _LOCAL_SCHEDULER_LOCK.release()
 
         except KeyboardInterrupt:
             log("\n\n⚠️  Received interrupt signal, shutting down...")
             break
         except Exception as e:
             log(f"\n✗ Unexpected error: {e}")
+            if _record_updater_result(False, "outer scheduler loop exception"):
+                return 2
             log("Continuing after 60 seconds...")
             time.sleep(60)
 
     log("=" * 80)
     log("DATA UPDATER SCHEDULER STOPPED")
     log("=" * 80)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,4 +1,4 @@
-CREATE TABLE public.weekly_macro_playbook (
+CREATE TABLE IF NOT EXISTS public.weekly_macro_playbook (
     playbook_id SERIAL PRIMARY KEY,
     target_week_start TIMESTAMP WITH TIME ZONE NOT NULL,
     date_range VARCHAR(100),
@@ -10,10 +10,10 @@ CREATE TABLE public.weekly_macro_playbook (
 );
 
 -- Index to quickly grab the most recent playbook
-CREATE INDEX idx_weekly_playbook_date ON public.weekly_macro_playbook (target_week_start DESC);
+CREATE INDEX IF NOT EXISTS idx_weekly_playbook_date ON public.weekly_macro_playbook (target_week_start DESC);
 
 
-CREATE TABLE public.economic_event_analysis (
+CREATE TABLE IF NOT EXISTS public.economic_event_analysis (
     analysis_id SERIAL PRIMARY KEY,
     event_name VARCHAR(255) NOT NULL,
     event_time TIMESTAMP WITH TIME ZONE NOT NULL,

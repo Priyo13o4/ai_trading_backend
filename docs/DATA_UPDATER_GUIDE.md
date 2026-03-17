@@ -12,8 +12,9 @@ Automated data updates run on server startup and every 5 minutes to keep market 
 
 ### Update Cycle
 1. **On Startup**: Runs immediately when container starts
-2. **Every 5 Minutes**: Automatically fetches new candles for all pairs/timeframes
-3. **Smart Detection**: Only fetches data if gap > 1 hour (skips if up to date)
+2. **Every 5 Minutes**: Scheduler runs indicator updater against latest broker-ingested candles
+3. **Smart Detection**: Uses per-symbol/timeframe watermarks to process only newly closed candles
+4. **Indicator Incremental Mode**: If no new closed candle exists, exits as `up_to_date`; a tiny overlap refresh can run periodically to catch late/corrected bars
 
 ## Fixed Issues
 
@@ -69,7 +70,8 @@ docker logs tradingbot-api-worker 2>&1 | grep -E "(SCHEDULER|💤|GAP FILLING)" 
 docker exec tradingbot-api-worker python -c "
 import psycopg
 from datetime import datetime, timezone
-conn = psycopg.connect('postgresql://Priyo13o4:priyodip13o4@n8n-postgres:5432/ai_trading_bot_data')
+import os
+conn = psycopg.connect(os.environ['DATABASE_URL'])
 cur = conn.cursor()
 cur.execute('SELECT symbol, timeframe, MAX(time) FROM candlesticks WHERE timeframe='\''M5'\'' GROUP BY symbol, timeframe ORDER BY symbol')
 for r in cur.fetchall():
@@ -133,7 +135,8 @@ docker compose restart api-worker
 # Delete incorrect data (if needed)
 docker exec tradingbot-api-worker python -c "
 import psycopg
-conn = psycopg.connect('postgresql://Priyo13o4:priyodip13o4@n8n-postgres:5432/ai_trading_bot_data')
+import os
+conn = psycopg.connect(os.environ['DATABASE_URL'])
 cur = conn.cursor()
 cur.execute('DELETE FROM candlesticks WHERE time > NOW()')
 conn.commit()
@@ -150,4 +153,4 @@ If you see rate limit errors, the scheduler will automatically continue on the n
 
 ---
 
-Last Updated: 2025-12-22 17:12 UTC
+Last Updated: 2025-12-22 17:12 UTC (historical snapshot; verify runtime status from current logs/queries)

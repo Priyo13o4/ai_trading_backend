@@ -10,8 +10,9 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from .auth import auth_context
 from .cache import NewsCache, StrategyCache, redis_client, PubSubManager, get_last_candle_update
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,24 @@ HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("SSE_HEARTBEAT_INTERVAL_SECONDS", "
 
 def _server_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _strategy_pair_from_payload(payload: dict) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    value = payload.get("symbol") or payload.get("pair") or payload.get("trading_pair")
+    if isinstance(value, str) and value.strip():
+        return value.strip().upper()
+    return None
+
+
+def _strategy_matches_pair(payload: dict, normalized_pair: str | None) -> bool:
+    if not normalized_pair:
+        return True
+
+    strategy_pair = _strategy_pair_from_payload(payload)
+    return strategy_pair == normalized_pair
 
 
 async def event_generator(
@@ -95,7 +114,7 @@ async def event_generator(
 
 
 @router.get("/candles/{symbol}/{timeframe}")
-async def stream_candles(symbol: str, timeframe: str, request: Request):
+async def stream_candles(symbol: str, timeframe: str, request: Request, _ctx=Depends(auth_context)):
     """
     Stream real-time candle updates for a specific symbol and timeframe
     
@@ -150,7 +169,7 @@ async def stream_candles(symbol: str, timeframe: str, request: Request):
 
 
 @router.get("/candles")
-async def stream_all_candles(request: Request):
+async def stream_all_candles(request: Request, _ctx=Depends(auth_context)):
     """
     Stream real-time candle updates for ALL symbols and timeframes
     
@@ -173,7 +192,7 @@ async def stream_all_candles(request: Request):
 
 
 @router.get("/news")
-async def stream_news(request: Request):
+async def stream_news(request: Request, _ctx=Depends(auth_context)):
     """
     Stream real-time news updates
     
@@ -208,7 +227,7 @@ async def stream_news(request: Request):
 
 
 @router.get("/strategies")
-async def stream_strategies(request: Request, pair: str | None = None):
+async def stream_strategies(request: Request, pair: str | None = None, _ctx=Depends(auth_context)):
     """
     Stream real-time strategy updates
     
@@ -222,6 +241,12 @@ async def stream_strategies(request: Request, pair: str | None = None):
     
     normalized_pair = pair.upper() if pair else None
     snapshot = StrategyCache.get(normalized_pair or "all") or []
+    if normalized_pair:
+        snapshot = [
+            item for item in snapshot
+            if _strategy_matches_pair(item, normalized_pair)
+        ]
+
     initial_payloads = None
     if snapshot:
         initial_payloads = [
@@ -232,12 +257,54 @@ async def stream_strategies(request: Request, pair: str | None = None):
             }
         ]
 
-    return StreamingResponse(
-        event_generator(
+    async def filtered_generator():
+        async for event in event_generator(
             PubSubManager.CHANNELS['strategies'],
             request,
             initial_payloads=initial_payloads,
-        ),
+        ):
+            if not normalized_pair:
+                yield event
+                continue
+
+            if 'data: ' not in event or event.strip() == 'data:':
+                yield event
+                continue
+
+            try:
+                data = json.loads(event.replace('data: ', '').strip())
+            except json.JSONDecodeError:
+                yield event
+                continue
+
+            event_type = data.get('type')
+            if event_type in {'connected', 'heartbeat', 'error'}:
+                yield event
+                continue
+
+            if event_type == 'strategy_update':
+                strategy_payload = data.get('strategy') if isinstance(data.get('strategy'), dict) else data
+                if _strategy_matches_pair(strategy_payload, normalized_pair):
+                    yield event
+                continue
+
+            if event_type == 'strategies_snapshot':
+                strategies_payload = data.get('strategies')
+                if isinstance(strategies_payload, list):
+                    filtered = [
+                        item for item in strategies_payload
+                        if _strategy_matches_pair(item, normalized_pair)
+                    ]
+                    if filtered:
+                        data['strategies'] = filtered
+                        yield f"data: {json.dumps(data)}\n\n"
+                continue
+
+            if _strategy_matches_pair(data, normalized_pair):
+                yield event
+
+    return StreamingResponse(
+        filtered_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

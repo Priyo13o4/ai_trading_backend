@@ -1,5 +1,5 @@
-import json, asyncio, logging, os
-from datetime import datetime
+import json, asyncio, logging, os, hmac, uuid
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -8,10 +8,15 @@ from .auth import auth_context, REDIS, log_redis_connection_health
 from .authn.authz import require_permission
 from .authn.csrf import enforce_csrf
 from .authn.routes import router as auth_router
-from .authn.session_store import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+from .authn.session_store import (
+    CSRF_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    prune_stale_session_indexes_scan,
+)
 from .db import (
     get_latest_signal_from_db, 
-    get_old_signal_from_db, 
+    get_old_signal_from_db,
+    get_news_preview_from_db,
     get_latest_regime_from_db,
     get_regime_for_pair,
     get_regime_market_data_from_db,
@@ -19,6 +24,12 @@ from .db import (
     get_upcoming_news_from_db,
     get_news_count,
     get_active_strategies,
+    get_strategies_all_from_db,
+    get_strategy_by_id_from_db,
+    expire_elapsed_strategies_batch,
+    get_latest_weekly_macro_playbook_from_db,
+    get_economic_event_analysis_from_db,
+    get_missing_core_tables,
     get_pair_performance,
     insert_trade_outcome,
     update_trade_outcome
@@ -32,16 +43,15 @@ from trading_common.symbols import get_active_symbols
 
 # Import historical routes
 from .routes.historical import router as historical_router
-
 # Import cache and SSE
 from .cache import (
     CandleCache,
     NewsCache,
     StrategyCache,
-    check_redis_connection,
     publish_news_snapshot,
     publish_strategy_update,
     publish_strategies_snapshot,
+    invalidate_strategy_cache_domain,
 )
 from .sse import router as sse_router
 
@@ -55,11 +65,84 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: Optional[int] = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except Exception:
+            value = default
+    if value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+STRATEGY_CACHE_MAX_TTL_SECONDS = 300
+STRATEGY_CACHE_MIN_TTL_SECONDS = 1
+STRATEGY_EXPIRY_JANITOR_BATCH_SIZE = _env_int(
+    "STRATEGY_EXPIRY_JANITOR_BATCH_SIZE",
+    1000,
+    minimum=1,
+    maximum=5000,
+)
+STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK = _env_int(
+    "STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK",
+    10,
+    minimum=1,
+    maximum=50,
+)
+STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS = _env_int(
+    "STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS",
+    30,
+    minimum=1,
+    maximum=3600,
+)
+SESSION_INDEX_PRUNE_ENABLED = bool(
+    _env_int("SESSION_INDEX_PRUNE_ENABLED", 1, minimum=0, maximum=1)
+)
+SESSION_INDEX_PRUNE_INTERVAL_SECONDS = _env_int(
+    "SESSION_INDEX_PRUNE_INTERVAL_SECONDS",
+    300,
+    minimum=5,
+    maximum=86400,
+)
+SESSION_INDEX_PRUNE_USER_SCAN_COUNT = _env_int(
+    "SESSION_INDEX_PRUNE_USER_SCAN_COUNT",
+    100,
+    minimum=1,
+    maximum=2000,
+)
+SESSION_INDEX_PRUNE_SID_PROBE_BATCH_SIZE = _env_int(
+    "SESSION_INDEX_PRUNE_SID_PROBE_BATCH_SIZE",
+    500,
+    minimum=1,
+    maximum=5000,
+)
+
+_strategy_expiry_janitor_task: Optional[asyncio.Task] = None
+_strategy_expiry_janitor_stop: Optional[asyncio.Event] = None
+_session_index_prune_janitor_task: Optional[asyncio.Task] = None
+_session_index_prune_janitor_stop: Optional[asyncio.Event] = None
+_events_singleflight_local_locks: dict[str, asyncio.Lock] = {}
+_events_singleflight_local_locks_guard = asyncio.Lock()
+
 app = FastAPI(
     title="AI Trading Bot API",
     description="FastAPI backend with Redis caching, auth gating, and MT5 integration",
     version="2.0.0"
 )
+
+AUTH_CSRF_EXEMPT_PATHS = {
+    "/auth/exchange",
+    "/auth/logout",
+    "/auth/logout-all",
+    "/auth/invalidate",
+}
 
 
 def _parse_cors_origins() -> list[str]:
@@ -88,20 +171,296 @@ def _cors_origin_regex() -> str:
     return os.getenv("ALLOWED_ORIGIN_REGEX", r"https://.*\.pipfactor\.com")
 
 
+def _cors_allow_headers() -> list[str]:
+    required_headers = {
+        "Content-Type",
+        "X-CSRF-Token",
+        "Authorization",
+        "X-Requested-With",
+        "X-API-Key",
+    }
+
+    raw = (os.getenv("ALLOWED_CORS_HEADERS") or "").strip()
+    if raw:
+        extras = {h.strip() for h in raw.split(",") if h.strip()}
+        return sorted(required_headers | extras)
+
+    # Keep this list tight to known frontend/internal usage.
+    return sorted(required_headers)
+
+
+def _normalize_optional_query_value(value: Optional[str], *, lowercase: bool = False) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+
+    return normalized.lower() if lowercase else normalized
+
+
+def _cache_key_token(value) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _singleflight_lock_key(cache_key: str) -> str:
+    return f"lock:{cache_key}"
+
+
+async def _redis_get_best_effort(key: str) -> Optional[str]:
+    try:
+        return await REDIS.get(key)
+    except Exception as exc:
+        logger.warning("[API] Redis GET failed for key=%s: %s", key, exc)
+        return None
+
+
+async def _redis_setex_best_effort(key: str, ttl_seconds: int, value: str) -> bool:
+    try:
+        await REDIS.setex(key, ttl_seconds, value)
+        return True
+    except Exception as exc:
+        logger.warning("[API] Redis SETEX failed for key=%s: %s", key, exc)
+        return False
+
+
+async def _redis_exists_best_effort(key: str) -> Optional[bool]:
+    try:
+        return bool(await REDIS.exists(key))
+    except Exception as exc:
+        logger.warning("[API] Redis EXISTS failed for key=%s: %s", key, exc)
+        return None
+
+
+async def _acquire_redis_lock(lock_key: str, lock_ttl_seconds: int) -> tuple[bool, str]:
+    token = uuid.uuid4().hex
+    try:
+        acquired = bool(await REDIS.set(lock_key, token, nx=True, ex=lock_ttl_seconds))
+        return acquired, token
+    except Exception as exc:
+        logger.warning("[API] Redis lock acquire failed for key=%s: %s", lock_key, exc)
+        return False, token
+
+
+async def _release_redis_lock_best_effort(lock_key: str, token: str) -> None:
+    # Atomic compare-and-del so one request cannot release another request's lock.
+    try:
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+          return redis.call('del', KEYS[1])
+        end
+        return 0
+        """
+        await REDIS.eval(script, 1, lock_key, token)
+    except Exception as exc:
+        logger.warning("[API] Redis lock release failed for key=%s: %s", lock_key, exc)
+        return
+
+
+async def _get_events_local_singleflight_lock(cache_key: str) -> asyncio.Lock:
+    async with _events_singleflight_local_locks_guard:
+        lock = _events_singleflight_local_locks.get(cache_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _events_singleflight_local_locks[cache_key] = lock
+        return lock
+
+
+async def _cleanup_events_local_singleflight_lock(cache_key: str, lock: asyncio.Lock) -> None:
+    async with _events_singleflight_local_locks_guard:
+        current = _events_singleflight_local_locks.get(cache_key)
+        if current is lock and not lock.locked():
+            _events_singleflight_local_locks.pop(cache_key, None)
+
+
+def _require_internal_api_key(request: Request, *env_var_names: str) -> str:
+    provided = (request.headers.get("X-API-Key") or "").strip()
+    if not provided:
+        raise HTTPException(401, "Missing X-API-Key")
+
+    for env_name in env_var_names:
+        expected = (os.getenv(env_name) or "").strip()
+        if expected and hmac.compare_digest(provided, expected):
+            return env_name
+
+    raise HTTPException(401, "Unauthorized")
+
+
+def _seconds_to_expiry(expiry_value) -> Optional[int]:
+    if not expiry_value:
+        return None
+
+    try:
+        if isinstance(expiry_value, datetime):
+            expiry_dt = expiry_value
+        elif isinstance(expiry_value, str):
+            parsed = expiry_value.strip().replace("Z", "+00:00")
+            expiry_dt = datetime.fromisoformat(parsed)
+        else:
+            return None
+
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+
+        now_utc = datetime.now(timezone.utc)
+        return int((expiry_dt - now_utc).total_seconds())
+    except Exception:
+        return None
+
+
+def _strategy_cache_ttl(rows: list[dict]) -> int:
+    seconds_candidates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        seconds = _seconds_to_expiry(row.get("expiry_time"))
+        if seconds is not None:
+            seconds_candidates.append(seconds)
+
+    if not seconds_candidates:
+        return STRATEGY_CACHE_MAX_TTL_SECONDS
+
+    seconds_to_earliest_expiry = min(seconds_candidates)
+    return min(
+        STRATEGY_CACHE_MAX_TTL_SECONDS,
+        max(STRATEGY_CACHE_MIN_TTL_SECONDS, seconds_to_earliest_expiry),
+    )
+
+
+async def _run_strategy_expiry_janitor_tick() -> int:
+    expired_ids: set[int] = set()
+
+    for _ in range(STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK):
+        rows = await asyncio.to_thread(
+            expire_elapsed_strategies_batch,
+            STRATEGY_EXPIRY_JANITOR_BATCH_SIZE,
+        )
+        if not rows:
+            break
+
+        for row in rows:
+            strategy_id = row.get("strategy_id")
+            if strategy_id is not None:
+                expired_ids.add(int(strategy_id))
+
+        if len(rows) < STRATEGY_EXPIRY_JANITOR_BATCH_SIZE:
+            break
+
+    if expired_ids:
+        invalidated = await asyncio.to_thread(invalidate_strategy_cache_domain, expired_ids)
+        logger.info(
+            "[JANITOR] Expired %s strategies and invalidated cache detail=%s list=%s",
+            len(expired_ids),
+            invalidated.get("deleted_detail", 0),
+            invalidated.get("deleted_list", 0),
+        )
+
+    return len(expired_ids)
+
+
+async def _strategy_expiry_janitor_loop(stop_event: asyncio.Event) -> None:
+    logger.info("[JANITOR] Strategy expiry janitor started")
+    while not stop_event.is_set():
+        try:
+            await _run_strategy_expiry_janitor_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[JANITOR] Strategy janitor tick failed: %s", exc, exc_info=True)
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+    logger.info("[JANITOR] Strategy expiry janitor stopped")
+
+
+async def _session_index_prune_janitor_loop(stop_event: asyncio.Event) -> None:
+    logger.info("[JANITOR] Session index prune janitor started")
+    cursor = 0
+
+    while not stop_event.is_set():
+        try:
+            cursor, stats = await prune_stale_session_indexes_scan(
+                cursor=cursor,
+                user_scan_count=SESSION_INDEX_PRUNE_USER_SCAN_COUNT,
+                sid_probe_batch_size=SESSION_INDEX_PRUNE_SID_PROBE_BATCH_SIZE,
+            )
+
+            if stats.get("stale_removed", 0) > 0 or stats.get("errors", 0) > 0:
+                logger.info(
+                    "[JANITOR] Session index prune scanned=%s users_pruned=%s stale_removed=%s errors=%s cursor=%s",
+                    stats.get("users_scanned", 0),
+                    stats.get("users_pruned", 0),
+                    stats.get("stale_removed", 0),
+                    stats.get("errors", 0),
+                    cursor,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[JANITOR] Session index prune tick failed: %s", exc, exc_info=True)
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=SESSION_INDEX_PRUNE_INTERVAL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+    logger.info("[JANITOR] Session index prune janitor stopped")
+
+
+async def require_signals_context(ctx=Depends(auth_context)):
+    require_permission(ctx, "signals")
+    return ctx
+
+
 @app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
     # Enforce CSRF for cookie-authenticated state-changing requests.
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        if request.url.path.startswith("/auth/"):
-            # /auth/exchange is pre-session; /auth/validate is non-mutating but POST.
-            pass
-        elif request.url.path.startswith("/webhooks/"):
-            pass
-        else:
-            if request.cookies.get(SESSION_COOKIE_NAME):
-                enforce_csrf(request, CSRF_COOKIE_NAME)
+    try:
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            request_path = request.url.path
+            if request_path in AUTH_CSRF_EXEMPT_PATHS:
+                pass
+            else:
+                if request.cookies.get(SESSION_COOKIE_NAME):
+                    enforce_csrf(request, CSRF_COOKIE_NAME)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:",
+    )
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    is_https = request.url.scheme == "https" or forwarded_proto == "https"
+    if is_https:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    return response
 
 # Add CORS middleware
 app.add_middleware(
@@ -109,8 +468,8 @@ app.add_middleware(
     allow_origins=_parse_cors_origins(),
     allow_origin_regex=_cors_origin_regex(),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=_cors_allow_headers(),
 )
 
 
@@ -141,11 +500,99 @@ async def startup_event():
             await log_redis_connection_health()
         except Exception as err:
             logger.error("Redis health check failed: %s", err)
+
+    if is_first:
+        try:
+            missing_tables = await asyncio.to_thread(get_missing_core_tables)
+            if missing_tables:
+                logger.warning(
+                    "[BOOTSTRAP WARNING] Missing core API tables in public schema: %s. "
+                    "Mounted init SQL currently does not create all strategy/news tables on fresh bootstrap; "
+                    "apply app schema migrations before serving production traffic.",
+                    ", ".join(missing_tables),
+                )
+        except Exception as err:
+            logger.error("Core table bootstrap check failed: %s", err)
     
+    global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
+    global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
+
     if is_first:
         logger.info("="*80)
         logger.info("STARTUP COMPLETE")
+        logger.info(
+            "[JANITOR] Config interval=%ss batch_size=%s max_batches_per_tick=%s",
+            STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS,
+            STRATEGY_EXPIRY_JANITOR_BATCH_SIZE,
+            STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK,
+        )
+        logger.info(
+            "[JANITOR] Session-index prune enabled=%s interval=%ss scan_count=%s sid_probe_batch=%s",
+            SESSION_INDEX_PRUNE_ENABLED,
+            SESSION_INDEX_PRUNE_INTERVAL_SECONDS,
+            SESSION_INDEX_PRUNE_USER_SCAN_COUNT,
+            SESSION_INDEX_PRUNE_SID_PROBE_BATCH_SIZE,
+        )
         logger.info("="*80)
+
+    if _strategy_expiry_janitor_task is None:
+        _strategy_expiry_janitor_stop = asyncio.Event()
+        _strategy_expiry_janitor_task = asyncio.create_task(
+            _strategy_expiry_janitor_loop(_strategy_expiry_janitor_stop)
+        )
+
+    if SESSION_INDEX_PRUNE_ENABLED and _session_index_prune_janitor_task is None:
+        _session_index_prune_janitor_stop = asyncio.Event()
+        _session_index_prune_janitor_task = asyncio.create_task(
+            _session_index_prune_janitor_loop(_session_index_prune_janitor_stop)
+        )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
+    global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
+
+    if _strategy_expiry_janitor_task is None:
+        pass
+
+    if _strategy_expiry_janitor_stop is not None:
+        _strategy_expiry_janitor_stop.set()
+
+    if _strategy_expiry_janitor_task is not None:
+        try:
+            await asyncio.wait_for(_strategy_expiry_janitor_task, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("[JANITOR] Timed out waiting for strategy janitor to stop, cancelling task")
+            _strategy_expiry_janitor_task.cancel()
+            try:
+                await _strategy_expiry_janitor_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as exc:
+            logger.error("[JANITOR] Strategy janitor shutdown failed: %s", exc, exc_info=True)
+        finally:
+            _strategy_expiry_janitor_task = None
+            _strategy_expiry_janitor_stop = None
+
+    if _session_index_prune_janitor_stop is not None:
+        _session_index_prune_janitor_stop.set()
+
+    if _session_index_prune_janitor_task is not None:
+        try:
+            await asyncio.wait_for(_session_index_prune_janitor_task, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("[JANITOR] Timed out waiting for session index janitor to stop, cancelling task")
+            _session_index_prune_janitor_task.cancel()
+            try:
+                await _session_index_prune_janitor_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as exc:
+            logger.error("[JANITOR] Session index janitor shutdown failed: %s", exc, exc_info=True)
+        finally:
+            _session_index_prune_janitor_task = None
+            _session_index_prune_janitor_stop = None
 
 
 # Include routers
@@ -280,20 +727,143 @@ async def get_signal_preview(pair: str, request: Request):
         logger.error(f"[API ERROR] /api/preview/{pair}: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
+@app.get("/api/news/preview")
+async def get_news_preview(request: Request):
+    """Get latest high-impact news item for landing page (no auth required)."""
+    logger.info("[API] GET /api/news/preview - Public access")
+
+    try:
+        key = "preview:news:latest"
+
+        # Try Redis cache (30 min TTL - news changes slowly enough)
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for news preview")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for news preview, querying database")
+        row = await asyncio.to_thread(get_news_preview_from_db)
+
+        if not row:
+            logger.warning("[API] No high-impact news found for preview")
+            raise HTTPException(404, "No news preview available")
+
+        ttl = 30 * 60  # 30 minutes
+        serialized = json_dumps(row)
+        await REDIS.setex(key, ttl, serialized)
+        logger.info("[API] Cached news preview with TTL=%ss", ttl)
+
+        return JSONResponse(content=json.loads(serialized))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/news/preview: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
 @app.get("/api/strategies")
+
 async def get_all_active_strategies(pair: str = None, ctx=Depends(auth_context)):
     """Get all active strategies, optionally filtered by pair"""
     logger.info(f"[API] GET /api/strategies?pair={pair} - User: {ctx.get('user_id', 'anonymous')}")
     
     try:
+        normalized_pair = _normalize_optional_query_value(pair, lowercase=True)
+        cache_pair = normalized_pair or "all"
+        key = f"latest:strategies:{cache_pair}"
+
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/strategies")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for /api/strategies, querying database")
         strategies = await asyncio.to_thread(get_active_strategies, pair)
         logger.info(f"[API] Found {len(strategies)} active strategies")
         StrategyCache.set(strategies, pair or "all")
         publish_strategies_snapshot(strategies)
         serialized = json_dumps({"strategies": strategies})
+        ttl = _strategy_cache_ttl(strategies)
+        await REDIS.setex(key, ttl, serialized)
         return JSONResponse(content=json.loads(serialized))
     except Exception as e:
         logger.error(f"[API ERROR] /api/strategies: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
+
+@app.get("/api/strategies/all")
+async def get_strategies_all(
+    request: Request,
+    response: Response,
+    symbol: Optional[str] = Query(None),
+    direction: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx=Depends(require_signals_context),
+):
+    """Get strategies with optional filters + pagination (requires signals permission)."""
+    logger.info(
+        "[API] GET /api/strategies/all - User: %s, symbol=%s, direction=%s, status=%s, search=%s, limit=%s, offset=%s",
+        ctx.get("user_id", "anonymous"),
+        symbol,
+        direction,
+        status,
+        search,
+        limit,
+        offset,
+    )
+
+    try:
+        normalized_symbol = _normalize_optional_query_value(symbol)
+        cache_symbol = normalized_symbol.lower() if normalized_symbol else None
+
+        normalized_direction = _normalize_optional_query_value(direction, lowercase=True)
+        if normalized_direction and normalized_direction not in {"buy", "sell"}:
+            raise HTTPException(422, "direction must be one of: buy, sell")
+
+        normalized_status = _normalize_optional_query_value(status, lowercase=True)
+        normalized_search = _normalize_optional_query_value(search)
+        cache_search = normalized_search.lower() if normalized_search else None
+
+        key = (
+            f"latest:strategies:all:{_cache_key_token(cache_symbol)}:"
+            f"{_cache_key_token(normalized_direction)}:"
+            f"{_cache_key_token(normalized_status)}:"
+            f"{_cache_key_token(cache_search)}:"
+            f"{_cache_key_token(limit)}:{_cache_key_token(offset)}"
+        )
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/strategies/all")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for /api/strategies/all, querying database")
+        rows, total = await asyncio.to_thread(
+            get_strategies_all_from_db,
+            normalized_symbol,
+            normalized_direction,
+            normalized_status,
+            normalized_search,
+            limit,
+            offset,
+        )
+
+        result = {
+            "strategies": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+        ttl = _strategy_cache_ttl(rows)
+        serialized = json_dumps(result)
+        await REDIS.setex(key, ttl, serialized)
+        return JSONResponse(content=json.loads(serialized))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/strategies/all: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
 
@@ -327,6 +897,41 @@ async def publish_strategy_update_endpoint(request: Request):
         logger.warning("Failed to refresh strategies cache after publish: %s", exc)
 
     return {"status": "ok"}
+
+
+@app.get("/api/strategies/{strategy_id}")
+async def get_strategy_by_id(
+    strategy_id: int,
+    request: Request,
+    response: Response,
+    ctx=Depends(auth_context),
+):
+    """Get a single strategy by ID (requires signals permission)."""
+    logger.info(f"[API] GET /api/strategies/{strategy_id} - User: {ctx.get('user_id', 'anonymous')}")
+
+    try:
+        require_permission(ctx, "signals")
+
+        key = f"latest:strategy:id:{strategy_id}"
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info(f"[API] Cache HIT for strategy id={strategy_id}")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info(f"[API] Cache MISS for strategy id={strategy_id}, querying database")
+        row = await asyncio.to_thread(get_strategy_by_id_from_db, strategy_id)
+        if not row:
+            raise HTTPException(404, f"Strategy {strategy_id} not found")
+
+        ttl = _strategy_cache_ttl([row])
+        serialized = json_dumps(row)
+        await REDIS.setex(key, ttl, serialized)
+        return JSONResponse(content=json.loads(serialized))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/strategies/{strategy_id}: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
 
 # ============================================================================
 # REGIME ANALYSIS ENDPOINTS
@@ -789,26 +1394,181 @@ async def get_upcoming_news(request: Request, response: Response, ctx=Depends(au
         cached = await REDIS.get(key)
         if cached:
             logger.info("[API] Cache HIT for upcoming news")
-            return JSONResponse(content=json.loads(cached))
+            cached_payload = json.loads(cached)
+            normalized_cached = cached_payload.get("news", []) if isinstance(cached_payload, dict) else cached_payload
+            if not isinstance(normalized_cached, list):
+                normalized_cached = []
+            return JSONResponse(content=normalized_cached)
         
         # Cache miss
         logger.info("[API] Cache MISS for upcoming news, querying database")
         rows = await asyncio.to_thread(get_upcoming_news_from_db)
+        normalized_rows = rows if isinstance(rows, list) else []
         
-        if not rows:
+        if not normalized_rows:
             logger.info("[API] No upcoming news found in database")
-            return JSONResponse(content={"news": []})
+            return JSONResponse(content=[])
         
         # Cache for 5 minutes
         ttl = 5 * 60
-        serialized = json_dumps(rows)
+        serialized = json_dumps(normalized_rows)
         await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached {len(rows)} upcoming news items with TTL={ttl}s")
+        logger.info(f"[API] Cached {len(normalized_rows)} upcoming news items with TTL={ttl}s")
         
         return JSONResponse(content=json.loads(serialized))
     
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/upcoming: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
+
+@app.get("/api/news/playbook")
+async def get_news_playbook(request: Request, response: Response, ctx=Depends(auth_context)):
+    """Get the latest weekly macro playbook (authenticated session required)."""
+    logger.info(f"[API] GET /api/news/playbook - User: {ctx.get('user_id', 'anonymous')}")
+
+    try:
+        key = "latest:news:playbook"
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/news/playbook")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for /api/news/playbook, querying database")
+        row = await asyncio.to_thread(get_latest_weekly_macro_playbook_from_db)
+        result = {"playbook": [row] if row else []}
+        ttl = 5 * 60
+        serialized = json_dumps(result)
+        await REDIS.setex(key, ttl, serialized)
+        return JSONResponse(content=json.loads(serialized))
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/news/playbook: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
+
+@app.get("/api/news/events")
+async def get_news_events(
+    request: Request,
+    response: Response,
+    upcoming_only: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx=Depends(auth_context),
+):
+    """Get economic event analysis rows with optional upcoming-only filter."""
+    logger.info(
+        "[API] GET /api/news/events - User: %s, upcoming_only=%s, limit=%s, offset=%s",
+        ctx.get("user_id", "anonymous"),
+        upcoming_only,
+        limit,
+        offset,
+    )
+
+    async def _query_events_payload() -> str:
+        rows, total = await asyncio.to_thread(
+            get_economic_event_analysis_from_db,
+            limit,
+            offset,
+            upcoming_only,
+        )
+        result = {
+            "events": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "upcoming_only": upcoming_only,
+        }
+        return json_dumps(result)
+
+    try:
+        require_permission(ctx, "signals")
+
+        key = f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
+        cached = await _redis_get_best_effort(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/news/events")
+            return JSONResponse(content=json.loads(cached))
+
+        lock_key = _singleflight_lock_key(key)
+        lock_ttl_raw = (os.getenv("EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS") or "15").strip()
+        try:
+            lock_ttl = max(2, int(lock_ttl_raw))
+        except ValueError:
+            logger.warning(
+                "[API] Invalid EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS=%s, defaulting to 15",
+                lock_ttl_raw,
+            )
+            lock_ttl = 15
+
+        wait_timeout_raw = (os.getenv("EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS") or str(lock_ttl)).strip()
+        try:
+            wait_timeout_seconds = max(0.2, float(wait_timeout_raw))
+        except ValueError:
+            logger.warning(
+                "[API] Invalid EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS=%s, defaulting to %s",
+                wait_timeout_raw,
+                lock_ttl,
+            )
+            wait_timeout_seconds = float(lock_ttl)
+
+        lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
+
+        if not lock_acquired:
+            logger.info("[API] Single-flight lock busy for /api/news/events, waiting for warm cache")
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(0.2, wait_timeout_seconds)
+
+            while True:
+                warmed = await _redis_get_best_effort(key)
+                if warmed:
+                    logger.info("[API] Cache filled by peer for /api/news/events")
+                    return JSONResponse(content=json.loads(warmed))
+
+                lock_exists = await _redis_exists_best_effort(lock_key)
+                if lock_exists is not True:
+                    lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
+                    if lock_acquired:
+                        logger.info("[API] Acquired single-flight lock for /api/news/events after wait")
+                        break
+
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+
+                await asyncio.sleep(min(0.2, remaining))
+
+            if not lock_acquired:
+                logger.warning(
+                    "[API] Single-flight wait timed out for /api/news/events; using local single-flight fallback"
+                )
+                local_lock = await _get_events_local_singleflight_lock(key)
+                try:
+                    async with local_lock:
+                        warmed_local = await _redis_get_best_effort(key)
+                        if warmed_local:
+                            logger.info("[API] Cache filled before local fallback DB call for /api/news/events")
+                            return JSONResponse(content=json.loads(warmed_local))
+
+                        serialized = await _query_events_payload()
+                        ttl = 5 * 60
+                        await _redis_setex_best_effort(key, ttl, serialized)
+                        return JSONResponse(content=json.loads(serialized))
+                finally:
+                    await _cleanup_events_local_singleflight_lock(key, local_lock)
+
+        try:
+            logger.info("[API] Cache MISS for /api/news/events, querying database")
+            serialized = await _query_events_payload()
+            ttl = 5 * 60
+            await _redis_setex_best_effort(key, ttl, serialized)
+            return JSONResponse(content=json.loads(serialized))
+        finally:
+            if lock_acquired:
+                await _release_redis_lock_best_effort(lock_key, lock_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/news/events: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/markers/{symbol}")
@@ -979,7 +1739,12 @@ async def get_performance(pair: str, ctx=Depends(auth_context)):
 @app.post("/api/trades/outcome")
 async def record_trade_outcome(request: Request):
     """Record MT5 trade execution (called by EA when opening position)"""
-    logger.info("[API] POST /api/trades/outcome")
+    auth_source = _require_internal_api_key(
+        request,
+        "MT5_TRADE_WEBHOOK_KEY",
+        "N8N_MARKET_DATA_KEY",
+    )
+    logger.info("[API] POST /api/trades/outcome - Internal auth=%s", auth_source)
     
     try:
         trade_data = await request.json()
@@ -996,7 +1761,12 @@ async def record_trade_outcome(request: Request):
 @app.put("/api/trades/{ticket}/close")
 async def close_trade(ticket: int, request: Request):
     """Update trade when closed in MT5 (records P/L, exit price, outcome)"""
-    logger.info(f"[API] PUT /api/trades/{ticket}/close")
+    auth_source = _require_internal_api_key(
+        request,
+        "MT5_TRADE_WEBHOOK_KEY",
+        "N8N_MARKET_DATA_KEY",
+    )
+    logger.info("[API] PUT /api/trades/%s/close - Internal auth=%s", ticket, auth_source)
     
     try:
         outcome_data = await request.json()

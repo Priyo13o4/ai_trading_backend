@@ -1,6 +1,7 @@
 import os
 import psycopg
 import logging
+from typing import Any
 from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,45 @@ def get_old_signal_from_db(pair: str):
                 return result
     except Exception as e:
         logger.error(f"[DB ERROR] get_old_signal_from_db({pair}): {str(e)}", exc_info=True)
+        raise
+
+def get_news_preview_from_db():
+    """
+    Get the single most recent high-impact or breaking news item for public preview.
+    Used on landing page without authentication.
+    Returns: dict with id, title, text, timestamp, importance_score, market_impact_prediction, forexfactory_url
+    """
+    logger.info("[DB] Fetching public news preview")
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                  SELECT
+                    email_id as id,
+                    headline as title,
+                    COALESCE(human_takeaway, ai_analysis_summary, original_email_content) as text,
+                    email_received_at as timestamp,
+                    importance_score,
+                    market_impact_prediction,
+                    volatility_expectation,
+                    forex_instruments,
+                    confidence_label,
+                    forexfactory_urls[1] as forexfactory_url,
+                    breaking_news
+                  FROM email_news_analysis
+                  WHERE forex_relevant = true
+                  AND (importance_score >= 4 OR breaking_news = true)
+                  ORDER BY email_received_at DESC
+                  LIMIT 1
+                """)
+                result = cur.fetchone()
+                if result:
+                    logger.info(f"[DB] Found news preview: {result.get('title', '')[:60]}")
+                else:
+                    logger.warning("[DB] No high-impact news found for preview")
+                return result
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_news_preview_from_db: {str(e)}", exc_info=True)
         raise
 
 # ============================================================================
@@ -558,6 +598,177 @@ def get_upcoming_news_from_db():
         logger.error(f"[DB ERROR] get_upcoming_news_from_db: {str(e)}")
         raise
 
+
+def get_latest_weekly_macro_playbook_from_db():
+    """Get the latest weekly macro playbook row."""
+    logger.info("[DB] Fetching latest weekly macro playbook")
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                  SELECT *
+                  FROM weekly_macro_playbook
+                  ORDER BY target_week_start DESC NULLS LAST, created_at DESC
+                  LIMIT 1
+                """)
+                result = cur.fetchone()
+                if result:
+                    logger.info("[DB] Found weekly macro playbook id=%s", result.get("playbook_id"))
+                else:
+                    logger.info("[DB] No weekly macro playbook rows found")
+                return result
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_latest_weekly_macro_playbook_from_db: {str(e)}", exc_info=True)
+        raise
+
+
+_economic_event_time_column_cache: str | None = None
+_economic_event_time_column_checked = False
+_economic_event_currency_column_cache: str | None = None
+_economic_event_currency_column_checked = False
+
+
+def _get_economic_event_analysis_columns(conn) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+              SELECT column_name
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'economic_event_analysis'
+            """
+        )
+        return {row["column_name"] for row in cur.fetchall()}
+
+
+def _resolve_economic_event_time_column(conn) -> str | None:
+    """Resolve the canonical event timestamp column once to tolerate schema drift."""
+    global _economic_event_time_column_cache, _economic_event_time_column_checked
+
+    if _economic_event_time_column_checked:
+        return _economic_event_time_column_cache
+
+    candidates = (
+        "event_time",
+        "event_time_utc",
+        "release_time",
+        "event_datetime",
+        "scheduled_time",
+        "event_date",
+    )
+
+    existing_columns = _get_economic_event_analysis_columns(conn)
+
+    for col in candidates:
+        if col in existing_columns:
+            _economic_event_time_column_cache = col
+            _economic_event_time_column_checked = True
+            return col
+
+    _economic_event_time_column_checked = True
+    logger.warning(
+        "[DB] No known event timestamp column found in public.economic_event_analysis. "
+        "Falling back to created_at ordering and NULL event_time in response."
+    )
+    return None
+
+
+def _resolve_economic_event_currency_column(conn) -> str | None:
+    """Resolve currency-like column name once to tolerate schema drift."""
+    global _economic_event_currency_column_cache, _economic_event_currency_column_checked
+
+    if _economic_event_currency_column_checked:
+        return _economic_event_currency_column_cache
+
+    candidates = ("currency", "country")
+    existing_columns = _get_economic_event_analysis_columns(conn)
+
+    for col in candidates:
+        if col in existing_columns:
+            _economic_event_currency_column_cache = col
+            _economic_event_currency_column_checked = True
+            return col
+
+    _economic_event_currency_column_checked = True
+    logger.warning(
+        "[DB] No known currency column found in public.economic_event_analysis. "
+        "Falling back to NULL currency in response."
+    )
+    return None
+
+
+def get_economic_event_analysis_from_db(limit: int = 20, offset: int = 0, upcoming_only: bool = False):
+    """Get economic event analysis rows with optional upcoming-only filter and total count."""
+    logger.info(
+        "[DB] Fetching economic events (upcoming_only=%s, limit=%s, offset=%s)",
+        upcoming_only,
+        limit,
+        offset,
+    )
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            time_column = _resolve_economic_event_time_column(conn)
+            currency_column = _resolve_economic_event_currency_column(conn)
+
+            if time_column:
+                select_time_sql = f"{time_column} AS event_time,"
+                where_sql = f"WHERE {time_column} >= NOW()" if upcoming_only else ""
+                order_sql = (
+                    f"ORDER BY {time_column} ASC, created_at DESC"
+                    if upcoming_only
+                    else f"ORDER BY {time_column} DESC, created_at DESC"
+                )
+            else:
+                select_time_sql = "NULL::timestamptz AS event_time,"
+                where_sql = ""
+                order_sql = "ORDER BY created_at DESC"
+
+            if currency_column:
+                select_currency_sql = f"{currency_column} AS currency,"
+            else:
+                select_currency_sql = "NULL::text AS currency,"
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                      SELECT
+                        analysis_id,
+                        event_name,
+                                                {select_time_sql}
+                        {select_currency_sql}
+                        impact,
+                        key_numbers,
+                        market_pricing_sentiment,
+                        primary_affected_pairs,
+                        trading_scenarios,
+                        market_dynamics,
+                        created_at
+                      FROM economic_event_analysis
+                      {where_sql}
+                      {order_sql}
+                      LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                      SELECT COUNT(*) AS total
+                      FROM economic_event_analysis
+                      {where_sql}
+                    """
+                )
+                count_row = cur.fetchone()
+
+            total = int(count_row["total"] if count_row else 0)
+            logger.info("[DB] Found %s economic events (total=%s)", len(rows), total)
+            return rows, total
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_economic_event_analysis_from_db: {str(e)}", exc_info=True)
+        raise
+
 # ============================================================================
 # TRADE OUTCOME TRACKING (For future MT5 integration)
 # ============================================================================
@@ -649,6 +860,47 @@ def update_trade_outcome(ticket: int, outcome_data: dict):
 # HELPER FUNCTIONS
 # ============================================================================
 
+def expire_elapsed_strategies_batch(batch_size: int = 1000) -> list[dict[str, Any]]:
+    """Expire elapsed active strategies in a lock-safe batch and return affected rows."""
+    safe_batch_size = max(1, min(int(batch_size or 1000), 5000))
+
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH candidates AS (
+                        SELECT strategy_id, expiry_time
+                        FROM public.strategies
+                        WHERE status = 'active'
+                          AND expiry_time <= NOW()
+                        ORDER BY expiry_time ASC, strategy_id ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    ),
+                    updated AS (
+                        UPDATE public.strategies s
+                        SET status = 'expired'
+                        FROM candidates c
+                        WHERE s.strategy_id = c.strategy_id
+                        RETURNING s.strategy_id, c.expiry_time
+                    )
+                    SELECT strategy_id, expiry_time
+                    FROM updated
+                    ORDER BY expiry_time ASC, strategy_id ASC
+                    """,
+                    (safe_batch_size,),
+                )
+                rows = cur.fetchall()
+                conn.commit()
+
+        if rows:
+            logger.info("[DB] Expired %s elapsed strategies in janitor batch", len(rows))
+        return rows
+    except Exception as e:
+        logger.error("[DB ERROR] expire_elapsed_strategies_batch: %s", str(e), exc_info=True)
+        raise
+
 def get_active_strategies(pair: str = None):
     """
     Get all active strategies, optionally filtered by pair
@@ -658,20 +910,168 @@ def get_active_strategies(pair: str = None):
     try:
         with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
+                query = """
+                  SELECT *
+                  FROM strategies
+                  WHERE status = 'active'
+                    AND expiry_time > NOW()
+                """
+                params: list[Any] = []
                 if pair:
-                    cur.execute("SELECT * FROM get_active_strategies(%s)", (pair.upper(),))
-                else:
-                    cur.execute("""
-                      SELECT * FROM strategies
-                      WHERE status = 'active'
-                      AND expiry_time > NOW()
-                      ORDER BY confidence DESC
-                    """)
+                    query += " AND symbol = %s"
+                    params.append(pair.upper())
+
+                query += " ORDER BY confidence DESC"
+                cur.execute(query, tuple(params))
                 results = cur.fetchall()
                 logger.info(f"[DB] Found {len(results)} active strategies")
                 return results
     except Exception as e:
         logger.error(f"[DB ERROR] get_active_strategies: {str(e)}")
+        raise
+
+
+def get_strategies_all_from_db(
+    symbol: str = None,
+    direction: str = None,
+    status: str = None,
+    search: str = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """Get strategies with optional filters and pagination, including total count."""
+    logger.info(
+        "[DB] Fetching strategies (symbol=%s, direction=%s, status=%s, search=%s, limit=%s, offset=%s)",
+        symbol,
+        direction,
+        status,
+        search,
+        limit,
+        offset,
+    )
+    try:
+        where_clauses = []
+        params = []
+
+        if symbol:
+            where_clauses.append("symbol = %s")
+            params.append(symbol.upper())
+        if direction:
+            where_clauses.append("LOWER(direction) = %s")
+            params.append(direction.lower())
+        if status:
+            normalized_status = status.lower()
+            where_clauses.append("LOWER(status) = %s")
+            params.append(normalized_status)
+            if normalized_status == "active":
+                where_clauses.append("expiry_time > NOW()")
+        if search:
+            search_pattern = f"%{search.strip()}%"
+            where_clauses.append(
+                "("
+                "strategy_name ILIKE %s OR "
+                "symbol ILIKE %s OR "
+                "COALESCE(summary, '') ILIKE %s OR "
+                "COALESCE(news_context, '') ILIKE %s OR "
+                "COALESCE(detailed_analysis::text, '') ILIKE %s"
+                ")"
+            )
+            params.extend([
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+            ])
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                      SELECT
+                        strategy_id,
+                        strategy_name,
+                        symbol as pair,
+                        direction,
+                        confidence,
+                        take_profit,
+                        stop_loss,
+                        risk_reward_ratio,
+                        expiry_minutes,
+                        expiry_time,
+                        timestamp as created_at,
+                        detailed_analysis,
+                        entry_signal,
+                        status
+                      FROM strategies
+                      {where_sql}
+                      ORDER BY timestamp DESC
+                      LIMIT %s OFFSET %s
+                    """,
+                    (*params, limit, offset),
+                )
+                rows = cur.fetchall()
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                      SELECT COUNT(*) AS total
+                      FROM strategies
+                      {where_sql}
+                    """,
+                    tuple(params),
+                )
+                count_row = cur.fetchone()
+
+            total = int(count_row["total"] if count_row else 0)
+            logger.info("[DB] Found %s strategies (total=%s)", len(rows), total)
+            return rows, total
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_strategies_all_from_db: {str(e)}", exc_info=True)
+        raise
+
+
+def get_strategy_by_id_from_db(strategy_id: int):
+    """Get a single strategy by strategy_id."""
+    logger.info("[DB] Fetching strategy by id=%s", strategy_id)
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                      SELECT
+                        strategy_id,
+                        strategy_name,
+                        symbol as pair,
+                        direction,
+                        confidence,
+                        take_profit,
+                        stop_loss,
+                        risk_reward_ratio,
+                        expiry_minutes,
+                        expiry_time,
+                        timestamp as created_at,
+                        detailed_analysis,
+                        entry_signal,
+                        status
+                      FROM strategies
+                                            WHERE strategy_id = %s
+                                                AND status = 'active'
+                                                AND expiry_time > NOW()
+                      LIMIT 1
+                    """,
+                    (strategy_id,),
+                )
+                result = cur.fetchone()
+                if result:
+                    logger.info("[DB] Found strategy id=%s", strategy_id)
+                else:
+                    logger.info("[DB] No strategy found for id=%s", strategy_id)
+                return result
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_strategy_by_id_from_db({strategy_id}): {str(e)}", exc_info=True)
         raise
 
 def get_pair_performance(pair: str):
@@ -692,15 +1092,26 @@ def get_pair_performance(pair: str):
         logger.error(f"[DB ERROR] get_pair_performance({pair}): {str(e)}")
         raise
 
-# ============================================================================
-# LEGACY FUNCTIONS (For backward compatibility - will be removed)
-# ============================================================================
 
-def update_signal_preview(trading_pair: str, signal_data: dict):
-    """
-    Legacy function - kept for backward compatibility
-    In v2.0, preview uses get_old_signal_from_db directly
-    """
-    logger.warning(f"[DB] update_signal_preview called - this is a legacy function")
-    # No-op in v2.0 - previews are fetched directly from strategies table
-    pass
+def get_missing_core_tables(required_tables: list[str] | None = None) -> list[str]:
+    """Return required core API tables that are currently missing in public schema."""
+    tables = required_tables or [
+        "strategies",
+        "email_news_analysis",
+        "weekly_macro_playbook",
+        "economic_event_analysis",
+    ]
+
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                missing: list[str] = []
+                for table_name in tables:
+                    cur.execute("SELECT to_regclass(%s) AS regclass", (f"public.{table_name}",))
+                    row = cur.fetchone()
+                    if not row or row.get("regclass") is None:
+                        missing.append(table_name)
+                return missing
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_missing_core_tables: {str(e)}", exc_info=True)
+        raise
