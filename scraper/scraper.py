@@ -277,6 +277,34 @@ class WebScraper:
             self._driver = self._get_selenium_driver()
         return self._driver
 
+    def _normalize_driver_window_context(self, driver: webdriver.Chrome) -> None:
+        """Keep Selenium attached to a single tab to avoid hidden/pseudo-window drift."""
+        try:
+            target_handle = driver.current_window_handle
+            handles = driver.window_handles
+            if not handles:
+                return
+
+            if target_handle not in handles:
+                target_handle = handles[0]
+
+            for handle in list(handles):
+                if handle == target_handle:
+                    continue
+                try:
+                    driver.switch_to.window(handle)
+                    driver.close()
+                except Exception as exc:
+                    logger.debug("Could not close extra Selenium tab %s: %s", handle, exc)
+
+            driver.switch_to.window(target_handle)
+            try:
+                driver.maximize_window()
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.debug("Could not normalize Selenium window context: %s", exc)
+
     def _reset_driver(self) -> None:
         """Force-close and recreate the Selenium driver on next use."""
         if self._driver is not None:
@@ -461,6 +489,8 @@ class WebScraper:
             driver = self._ensure_driver()
 
             try:
+                self._normalize_driver_window_context(driver)
+
                 # Navigate to URL
                 driver.get(url)
 

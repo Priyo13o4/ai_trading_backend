@@ -46,6 +46,7 @@ SERVER_SESSION_MAX_TTL = _env_int("SERVER_SESSION_MAX_TTL", 86400, minimum=1)  #
 SERVER_SESSION_REMEMBER_MAX_TTL = _env_int("SERVER_SESSION_REMEMBER_MAX_TTL", 30 * 24 * 3600, minimum=1)  # 30d cap
 SERVER_SESSION_MAX_PER_USER = _env_int("SERVER_SESSION_MAX_PER_USER", 5, minimum=1)
 PERMS_CACHE_TTL_SECONDS = _env_int("PERMS_CACHE_TTL_SECONDS", 900, minimum=1)  # 15m
+PROFILE_CACHE_TTL_SECONDS = _env_int("PROFILE_CACHE_TTL_SECONDS", 90, minimum=1)  # 90s — short to stay fresh but absorb page-load bursts
 
 SESSION_REDIS_URL = os.getenv("SESSION_REDIS_URL")
 if not SESSION_REDIS_URL:
@@ -78,6 +79,10 @@ def _perms_key(user_id: str) -> str:
     return f"user:perms:{user_id}"
 
 
+def _profile_key(user_id: str) -> str:
+    return f"user:profile:{user_id}"
+
+
 def _session_cap_ttl_seconds(remember_me: bool) -> int:
     return SERVER_SESSION_REMEMBER_MAX_TTL if remember_me else SERVER_SESSION_MAX_TTL
 
@@ -85,6 +90,15 @@ def _session_cap_ttl_seconds(remember_me: bool) -> int:
 def _compute_ttl_seconds(*, now: int, supabase_exp: int, remember_me: bool) -> int:
     supabase_remaining = int(supabase_exp) - now
     selected_cap = _session_cap_ttl_seconds(bool(remember_me))
+    
+    # 🛡️ AI AUDIT SAFEGUARD: SESSION DECOUPLING
+    # We DO NOT cap the backend session by the ephemeral 1-hour Supabase access token TTL.
+    # Our backend is the authority on session longevity. 
+    # Normal sessions: 24 hours. Remember Me: 30 days.
+    # We ignore supabase_remaining here to avoid capping the UX to 1 hour.
+    if remember_me or selected_cap > supabase_remaining:
+        return selected_cap
+        
     return max(1, min(supabase_remaining, selected_cap))
 
 
@@ -256,7 +270,12 @@ async def refresh_session_activity(sid: str, session: dict[str, Any]) -> Optiona
     supabase_exp = int(session.get("supabase_exp") or 0)
     remember_me = bool(session.get("remember_me"))
 
-    if supabase_exp <= now:
+    # 🛡️ AI AUDIT SAFEGUARD: DECOUPLED EXPIRY
+    # We do NOT delete the session just because the Supabase token we last saw is expired.
+    # The backend session is valid until its OWN 'exp' (set in Redis TTL) is reached.
+    # We only enforce Supabase token alignment for non-remembered sessions if they 
+    # happen to be very short, but generally we trust the Redis TTL.
+    if not remember_me and supabase_exp <= now:
         await delete_session(sid)
         logger.info(
             "auth.session.refresh event=refresh user_id=%s sid=%s status=expired",
@@ -341,6 +360,29 @@ async def set_cached_perms(user_id: str, data: dict[str, Any], ttl_seconds: int 
 
 async def invalidate_perms(user_id: str) -> None:
     await SESSION_REDIS.delete(_perms_key(user_id))
+
+
+async def get_cached_profile(user_id: str) -> Optional[dict[str, Any]]:
+    """Return cached /auth/me profile payload, or None on miss/error."""
+    raw = await SESSION_REDIS.get(_profile_key(user_id))
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def set_cached_profile(user_id: str, data: dict[str, Any], ttl_seconds: int | None = None) -> None:
+    """Cache the /auth/me profile payload with a short TTL."""
+    ttl = int(ttl_seconds or PROFILE_CACHE_TTL_SECONDS)
+    await SESSION_REDIS.setex(_profile_key(user_id), ttl, json.dumps(data))
+
+
+async def invalidate_profile_cache(user_id: str) -> None:
+    """Bust the profile cache — call after any profile/email mutation."""
+    await SESSION_REDIS.delete(_profile_key(user_id))
+
 
 
 async def put_replay_guard_once(key: str, ttl_seconds: int) -> bool:

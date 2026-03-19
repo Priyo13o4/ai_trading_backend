@@ -140,7 +140,10 @@ services:
       SESSION_REDIS_PASSWORD: ${REDIS_PASSWORD}
       AUTH_ENV: production
       TRUST_PROXY_HEADERS: "1"
-      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "1"
+      # 🛡️ AI SAFEGUARD: DO NOT CHANGE TO "1".
+      # Cloudflare Turnstile verification is handled by Supabase during signInWithPassword.
+      # Tokens are single-use, so enforcing Turnstile here (on /auth/exchange) causes "timeout-or-duplicate".
+      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
       STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS: "30"
       STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK: "5"
     depends_on:

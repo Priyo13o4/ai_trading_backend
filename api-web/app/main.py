@@ -4,7 +4,8 @@ from typing import Optional
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from .auth import auth_context, REDIS, log_redis_connection_health
+from .auth import REDIS, log_redis_connection_health
+from .authn.deps import optional_session, require_session
 from .authn.authz import require_permission
 from .authn.csrf import enforce_csrf
 from .authn.routes import router as auth_router
@@ -421,7 +422,7 @@ async def _session_index_prune_janitor_loop(stop_event: asyncio.Event) -> None:
     logger.info("[JANITOR] Session index prune janitor stopped")
 
 
-async def require_signals_context(ctx=Depends(auth_context)):
+async def require_signals_context(ctx=Depends(require_session)):
     require_permission(ctx, "signals")
     return ctx
 
@@ -649,7 +650,7 @@ async def health():
 # ============================================================================
 
 @app.get("/api/signals/{pair}")
-async def get_signal(pair: str, request: Request, response: Response, ctx=Depends(auth_context)):
+async def get_signal(pair: str, request: Request, response: Response, ctx=Depends(require_session)):
     """Get latest active strategy for a trading pair (requires auth)"""
     logger.info(f"[API] GET /api/signals/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -763,7 +764,7 @@ async def get_news_preview(request: Request):
 
 @app.get("/api/strategies")
 
-async def get_all_active_strategies(pair: str = None, ctx=Depends(auth_context)):
+async def get_all_active_strategies(pair: str = None, ctx=Depends(require_session)):
     """Get all active strategies, optionally filtered by pair"""
     logger.info(f"[API] GET /api/strategies?pair={pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -904,7 +905,7 @@ async def get_strategy_by_id(
     strategy_id: int,
     request: Request,
     response: Response,
-    ctx=Depends(auth_context),
+    ctx=Depends(require_session),
 ):
     """Get a single strategy by ID (requires signals permission)."""
     logger.info(f"[API] GET /api/strategies/{strategy_id} - User: {ctx.get('user_id', 'anonymous')}")
@@ -938,7 +939,7 @@ async def get_strategy_by_id(
 # ============================================================================
 
 @app.get("/api/regime")
-async def get_regime(request: Request, response: Response, ctx=Depends(auth_context)):
+async def get_regime(request: Request, response: Response, ctx=Depends(require_session)):
     """Get latest regime analysis for all trading pairs"""
     logger.info(f"[API] GET /api/regime - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1291,7 +1292,7 @@ async def get_regime_market_data_json(
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/regime/{pair}")
-async def get_regime_by_pair(pair: str, ctx=Depends(auth_context)):
+async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
     """Get latest regime analysis for a specific pair"""
     logger.info(f"[API] GET /api/regime/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1336,7 +1337,7 @@ async def get_current_news(
     response: Response, 
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    ctx=Depends(auth_context)
+    ctx=Depends(require_session)
 ):
     """Get current/recent high-impact forex news with pagination"""
     logger.info(f"[API] GET /api/news/current - User: {ctx.get('user_id', 'anonymous')}, limit={limit}, offset={offset}")
@@ -1383,7 +1384,7 @@ async def get_current_news(
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/upcoming")
-async def get_upcoming_news(request: Request, response: Response, ctx=Depends(auth_context)):
+async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session)):
     """Get upcoming high-impact forex events"""
     logger.info(f"[API] GET /api/news/upcoming - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1423,7 +1424,7 @@ async def get_upcoming_news(request: Request, response: Response, ctx=Depends(au
 
 
 @app.get("/api/news/playbook")
-async def get_news_playbook(request: Request, response: Response, ctx=Depends(auth_context)):
+async def get_news_playbook(request: Request, response: Response, ctx=Depends(require_session)):
     """Get the latest weekly macro playbook (authenticated session required)."""
     logger.info(f"[API] GET /api/news/playbook - User: {ctx.get('user_id', 'anonymous')}")
 
@@ -1453,7 +1454,7 @@ async def get_news_events(
     upcoming_only: bool = Query(False),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    ctx=Depends(auth_context),
+    ctx=Depends(require_session),
 ):
     """Get economic event analysis rows with optional upcoming-only filter."""
     logger.info(
@@ -1715,7 +1716,7 @@ async def get_news_markers(symbol: str, hours: int = None, min_importance: int =
 # ============================================================================
 
 @app.get("/api/performance/{pair}")
-async def get_performance(pair: str, ctx=Depends(auth_context)):
+async def get_performance(pair: str, ctx=Depends(require_session)):
     """Get performance metrics for a trading pair"""
     logger.info(f"[API] GET /api/performance/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     

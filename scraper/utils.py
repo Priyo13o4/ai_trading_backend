@@ -1,8 +1,11 @@
 """Utility functions for the web scraper and discovery stack."""
 import io
 import logging
+import os
+import platform
 import random
 import re
+import subprocess
 import time
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, urljoin
@@ -37,6 +40,48 @@ def get_random_user_agent() -> str:
 _STABLE_USER_AGENT: Optional[str] = None
 
 
+def _detect_chrome_major_version() -> Optional[int]:
+    """Best-effort detection of the local Chrome major version."""
+    candidates = [
+        os.getenv("CHROME_BIN", "").strip(),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "google-chrome",
+        "chromium",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            out = subprocess.check_output([candidate, "--version"], text=True, stderr=subprocess.STDOUT)
+            match = re.search(r"(\d+)\.\d+\.\d+\.\d+", out)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            continue
+    return None
+
+
+def _build_host_aligned_user_agent() -> str:
+    """Build a realistic, host-aligned Chrome UA to reduce fingerprint mismatch."""
+    major = _detect_chrome_major_version() or 146
+    system = platform.system()
+
+    if system == "Darwin":
+        platform_token = "Macintosh; Intel Mac OS X 10_15_7"
+    elif system == "Linux":
+        platform_token = "X11; Linux x86_64"
+    elif system == "Windows":
+        platform_token = "Windows NT 10.0; Win64; x64"
+    else:
+        platform_token = "X11; Linux x86_64"
+
+    return (
+        f"Mozilla/5.0 ({platform_token}) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
 def get_stable_user_agent() -> str:
     """Return a stable User-Agent for this process.
 
@@ -45,7 +90,11 @@ def get_stable_user_agent() -> str:
     """
     global _STABLE_USER_AGENT
     if _STABLE_USER_AGENT is None:
-        _STABLE_USER_AGENT = get_random_user_agent()
+        explicit_ua = os.getenv("SCRAPER_USER_AGENT", "").strip()
+        if explicit_ua:
+            _STABLE_USER_AGENT = explicit_ua
+        else:
+            _STABLE_USER_AGENT = _build_host_aligned_user_agent()
     return _STABLE_USER_AGENT
 
 
