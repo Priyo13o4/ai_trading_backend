@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from typing import Optional, List, Dict, Any, Iterable
+from app.utils import json_dumps
 from datetime import datetime, timezone
 
 from trading_common.cache import (
@@ -118,7 +119,7 @@ class NewsCache:
             key = news_key(symbol)
             ttl = ttl or CACHE_TTL['news']
             
-            redis_client.setex(key, ttl, json.dumps(news))
+            redis_client.setex(key, ttl, json_dumps(news))
             logger.info(f"Cached {len(news)} news items")
             return True
         except Exception as e:
@@ -147,7 +148,7 @@ class NewsMarkersCache:
             key = f"news_markers:{symbol}:{hours}h"
             ttl = ttl or CACHE_TTL['news_markers']
             
-            redis_client.setex(key, ttl, json.dumps(markers))
+            redis_client.setex(key, ttl, json_dumps(markers))
             logger.info(f"Cached {len(markers)} news markers for {symbol}")
             return True
         except Exception as e:
@@ -176,7 +177,7 @@ class StrategyCache:
             key = strategies_key(symbol)
             ttl = ttl or CACHE_TTL['strategies']
             
-            redis_client.setex(key, ttl, json.dumps(strategies))
+            redis_client.setex(key, ttl, json_dumps(strategies))
             logger.info(f"Cached {len(strategies)} strategies")
             return True
         except Exception as e:
@@ -203,7 +204,7 @@ class PubSubManager:
 
 def _publish_payload(channel: str, payload: Dict[str, Any]) -> bool:
     try:
-        redis_client.publish(channel, json.dumps(payload))
+        redis_client.publish(channel, json_dumps(payload))
         return True
     except Exception as e:
         logger.error(f"PubSub publish error: {e}")

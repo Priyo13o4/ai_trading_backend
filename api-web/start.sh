@@ -51,14 +51,11 @@ EOF
 
 # Start the API server
 echo "Starting FastAPI server (web only)..."
-GUNICORN_LOG_LEVEL="${LOG_LEVEL:-info}"
-if [ -z "$GUNICORN_WORKERS" ]; then
-	if [ "$MT5_INGEST_ENABLE" = "true" ]; then
-		GUNICORN_WORKERS=1
-	else
-		GUNICORN_WORKERS=2
-	fi
-fi
+# Number of workers.
+# SSE connections are handled by api-sse, so api-web only needs to serve
+# short-lived REST requests. (2 x cores) + 1 is the gunicorn-recommended rule.
+# We default to 4 which is safe on a 2-core machine.
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-4}"
 
 exec gunicorn -w "$GUNICORN_WORKERS" -k uvicorn.workers.UvicornWorker \
 	--bind 0.0.0.0:8080 \

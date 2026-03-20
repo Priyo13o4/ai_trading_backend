@@ -174,7 +174,7 @@ def _parse_cors_origins() -> list[str]:
 
 def _cors_origin_regex() -> str:
     raw = (os.getenv("ALLOWED_ORIGIN_REGEX") or "").strip()
-    return raw or r"^https://([a-zA-Z0-9_-]+\.)*pipfactor\.com$"
+    return raw or r"^https://([a-zA-Z0-9_-]+\.)*(pipfactor\.com|pages\.dev)$"
 
 
 def _cors_allow_headers() -> list[str]:

@@ -72,14 +72,49 @@ def _discover_symbols_from_db_sync(postgres_dsn: str) -> list[str]:
         return []
 
 
+async def _read_symbols_from_redis_async(redis_client: any) -> list[str]:
+    """Read symbols from Redis cache (async-native)."""
+    try:
+        t = await redis_client.type(SYMBOLS_ACTIVE_KEY)
+        if t == "set" or t == b"set":
+            members = await redis_client.smembers(SYMBOLS_ACTIVE_KEY) or set()
+            return _normalize_symbols(members)
+        if t == "string" or t == b"string":
+            raw = await redis_client.get(SYMBOLS_ACTIVE_KEY)
+            if not raw:
+                return []
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    return _normalize_symbols(data)
+            except Exception:
+                return []
+        return []
+    except Exception:
+        return []
+
+
+async def _write_symbols_to_redis_async(redis_client: any, symbols: list[str], ttl_seconds: int) -> None:
+    """Write symbols to Redis cache (async-native)."""
+    try:
+        async with redis_client.pipeline() as pipe:
+            pipe.delete(SYMBOLS_ACTIVE_KEY)
+            if symbols:
+                pipe.sadd(SYMBOLS_ACTIVE_KEY, *symbols)
+            pipe.expire(SYMBOLS_ACTIVE_KEY, int(ttl_seconds))
+            await pipe.execute()
+    except Exception as e:
+        logger.debug("[symbols] Redis refresh failed (non-fatal): %s", e)
+
+
 def _read_symbols_from_redis_sync(redis_client: redis.Redis) -> list[str]:
     """Read symbols from Redis cache."""
     try:
         t = redis_client.type(SYMBOLS_ACTIVE_KEY)
-        if t == "set":
+        if t == "set" or t == b"set":
             members = redis_client.smembers(SYMBOLS_ACTIVE_KEY) or set()
             return _normalize_symbols(members)
-        if t == "string":
+        if t == "string" or t == b"string":
             raw = redis_client.get(SYMBOLS_ACTIVE_KEY)
             if not raw:
                 return []
@@ -155,30 +190,60 @@ def get_active_symbols_sync(
 
 
 async def get_active_symbols(
-    redis_client: redis.Redis,
+    redis_client: any,
     postgres_dsn: str,
     ttl_seconds: Optional[int] = None,
     fallback: Optional[list[str]] = None,
 ) -> list[str]:
-    """Async version of get_active_symbols_sync."""
-    return await asyncio.to_thread(
-        get_active_symbols_sync,
-        redis_client=redis_client,
-        postgres_dsn=postgres_dsn,
-        ttl_seconds=ttl_seconds,
-        fallback=fallback,
-    )
+    """Async version of get_active_symbols."""
+    override = _env_override_symbols()
+    if override:
+        return override
+
+    # Check if this is an async redis client
+    is_async = hasattr(redis_client, "get") and asyncio.iscoroutinefunction(redis_client.get)
+
+    if is_async:
+        cached = await _read_symbols_from_redis_async(redis_client)
+        if cached:
+            return cached
+        
+        # Redis miss -> find from DB (sync) then write to Redis (async)
+        syms = await asyncio.to_thread(_discover_symbols_from_db_sync, postgres_dsn)
+        if syms:
+            await _write_symbols_to_redis_async(redis_client, syms, ttl_seconds or SYMBOLS_ACTIVE_TTL_SECONDS)
+            return syms
+    else:
+        # Fallback to sync via threadpool if passed a sync client
+        return await asyncio.to_thread(
+            get_active_symbols_sync,
+            redis_client=redis_client,
+            postgres_dsn=postgres_dsn,
+            ttl_seconds=ttl_seconds,
+            fallback=fallback,
+        )
+
+    return _normalize_symbols(fallback or [])
 
 
 async def refresh_active_symbols(
-    redis_client: redis.Redis,
+    redis_client: any,
     postgres_dsn: str,
     ttl_seconds: Optional[int] = None,
 ) -> list[str]:
     """Async version of refresh_active_symbols_sync."""
-    return await asyncio.to_thread(
-        refresh_active_symbols_sync,
-        redis_client=redis_client,
-        postgres_dsn=postgres_dsn,
-        ttl_seconds=ttl_seconds,
-    )
+    is_async = hasattr(redis_client, "get") and asyncio.iscoroutinefunction(redis_client.get)
+
+    if is_async:
+        ttl = int(ttl_seconds or SYMBOLS_ACTIVE_TTL_SECONDS)
+        syms = await asyncio.to_thread(_discover_symbols_from_db_sync, postgres_dsn)
+        if syms:
+            await _write_symbols_to_redis_async(redis_client, syms, ttl_seconds=ttl)
+        return syms
+    else:
+        return await asyncio.to_thread(
+            refresh_active_symbols_sync,
+            redis_client=redis_client,
+            postgres_dsn=postgres_dsn,
+            ttl_seconds=ttl_seconds,
+        )

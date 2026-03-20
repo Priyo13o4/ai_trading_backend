@@ -13,6 +13,7 @@ import os
 import json
 import asyncio
 import logging
+from app.utils import json_dumps
 import uuid
 
 from ..cache import redis_client
@@ -492,7 +493,7 @@ async def get_historical_data(
         
         # Cache response
         try:
-            redis_client.setex(cache_key, CACHE_TTL, json.dumps(response))
+            redis_client.setex(cache_key, CACHE_TTL, json_dumps(response))
             logger.info(f"[API] Cached {len(data)} candles for {sym} {tf} with TTL={CACHE_TTL}s")
         except Exception as e:
             logger.warning(f"[API] Cache set failed for {sym} {tf}: {e}")

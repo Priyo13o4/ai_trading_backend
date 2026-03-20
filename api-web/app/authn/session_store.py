@@ -328,19 +328,8 @@ async def refresh_session_activity(sid: str, session: dict[str, Any]) -> Optiona
     if now - last_act < 60:
         return session
 
-    # 🛡️ AI AUDIT SAFEGUARD: DECOUPLED EXPIRY
-    # We do NOT delete the session just because the Supabase token we last saw is expired.
-    # The backend session is valid until its OWN 'exp' (set in Redis TTL) is reached.
-    # We only enforce Supabase token alignment for non-remembered sessions if they 
-    # happen to be very short, but generally we trust the Redis TTL.
-    if not remember_me and supabase_exp <= now:
-        await delete_session(sid)
-        logger.info(
-            "auth.session.refresh event=refresh user_id=%s sid=%s status=expired",
-            session.get("user_id") or "",
-            sid,
-        )
-        return None
+    # Keep refresh validity server-authoritative: stale Supabase access-token exp must
+    # not invalidate an otherwise-active backend session before its own TTL/exp.
 
     ttl = _compute_ttl_seconds(now=now, supabase_exp=supabase_exp, remember_me=remember_me)
     exp = now + ttl
