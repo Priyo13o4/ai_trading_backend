@@ -10,12 +10,13 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Request, Response
 
 from .csrf import generate_csrf_token
 from .rate_limit_auth import rate_limit
 from .session_store import (
     CSRF_COOKIE_NAME,
+    SERVER_SESSION_MAX_PER_USER,
     SESSION_COOKIE_NAME,
     create_session,
     delete_all_sessions_for_user,
@@ -23,6 +24,8 @@ from .session_store import (
     get_cached_perms,
     get_cached_profile,
     get_session,
+    list_active_sessions_for_user,
+    public_session_id,
     invalidate_perms,
     invalidate_profile_cache,
     put_replay_guard_once,
@@ -143,6 +146,8 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
 AUTH_EXCHANGE_TURNSTILE_ENFORCE = _env_bool("AUTH_EXCHANGE_TURNSTILE_ENFORCE", False)
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
+SESSION_PUBLIC_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
 
 
 def _rid(request: Request) -> str:
@@ -338,6 +343,79 @@ def _request_client_ip(request: Request) -> str:
     return ""
 
 
+def _ip_prefix_for_storage(request: Request) -> str:
+    raw_ip = _request_client_ip(request)
+    if not raw_ip:
+        return ""
+
+    try:
+        ip = ipaddress.ip_address(raw_ip)
+    except ValueError:
+        return ""
+
+    if ip.version == 4:
+        octets = str(ip).split(".")
+        if len(octets) != 4:
+            return ""
+        return f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
+
+    hextets = ip.exploded.split(":")
+    return f"{':'.join(hextets[:4])}::/64"
+
+
+def _extract_country_code(request: Request) -> str | None:
+    for header_name in (
+        "cf-ipcountry",
+        "cloudfront-viewer-country",
+        "x-vercel-ip-country",
+        "x-country-code",
+        "x-country",
+    ):
+        value = (request.headers.get(header_name) or "").strip().upper()
+        if COUNTRY_PATTERN.match(value) and value not in {"XX", "ZZ"}:
+            return value
+    return None
+
+
+def _user_agent_summary(user_agent: str) -> str:
+    ua = (user_agent or "").strip()
+    if not ua:
+        return "Unknown"
+
+    ua_lower = ua.lower()
+    browser = "Unknown Browser"
+    if "edg/" in ua_lower:
+        browser = "Edge"
+    elif "opr/" in ua_lower or "opera" in ua_lower:
+        browser = "Opera"
+    elif "chrome/" in ua_lower and "chromium" not in ua_lower:
+        browser = "Chrome"
+    elif "safari/" in ua_lower and "chrome/" not in ua_lower:
+        browser = "Safari"
+    elif "firefox/" in ua_lower:
+        browser = "Firefox"
+
+    os_name = "Unknown OS"
+    if "windows" in ua_lower:
+        os_name = "Windows"
+    elif "mac os x" in ua_lower or "macintosh" in ua_lower:
+        os_name = "macOS"
+    elif "iphone" in ua_lower or "ipad" in ua_lower or "ios" in ua_lower:
+        os_name = "iOS"
+    elif "android" in ua_lower:
+        os_name = "Android"
+    elif "linux" in ua_lower:
+        os_name = "Linux"
+
+    device = "Desktop"
+    if "ipad" in ua_lower or "tablet" in ua_lower:
+        device = "Tablet"
+    elif "mobile" in ua_lower or "iphone" in ua_lower or "android" in ua_lower:
+        device = "Mobile"
+
+    return f"{browser} on {os_name} ({device})"[:160]
+
+
 def _user_agent_hash(user_agent: str) -> str:
     normalized = (user_agent or "").strip()
     if not normalized:
@@ -358,10 +436,13 @@ def _device_binding_matches(session: dict[str, Any], request: Request) -> bool:
 def _session_binding_components(request: Request) -> tuple[str, str]:
     mode = SESSION_BINDING_MODE
     if mode in {"off", "none", "disabled"}:
-        return "", ""
+        return "", _ip_prefix_for_storage(request)
     # IP binding is intentionally disabled. Even in strict mode, tunnels/proxies/mobile
     # frequently alter source address metadata and cause false invalidations.
-    return (_user_agent_hash(request.headers.get("user-agent") or ""), "")
+    return (
+        _user_agent_hash(request.headers.get("user-agent") or ""),
+        _ip_prefix_for_storage(request),
+    )
 
 
 def _parse_remember_me_flag(body: dict[str, Any]) -> bool:
@@ -636,6 +717,8 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         remember_me=remember_me,
         ua_hash=ua_hash,
         ip_prefix=ip_prefix,
+        ua_summary=_user_agent_summary(request.headers.get("user-agent") or ""),
+        country=_extract_country_code(request),
     )
     logger.debug(
         "auth.exchange.session.created user_id=%s sid=%s ttl=%s remember_me=%s ua_bound=%s ip_bound=%s",
@@ -680,6 +763,15 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         created["ttl"],
     )
 
+    session_cap_warning = None
+    if int(created.get("evicted_count") or 0) > 0:
+        session_cap_warning = {
+            "code": "session_cap_eviction",
+            "evicted_count": int(created.get("evicted_count") or 0),
+            "session_cap": int(SERVER_SESSION_MAX_PER_USER),
+            "message": "Older devices were signed out because your session limit was reached.",
+        }
+
     return {
         "ok": True,
         "user_id": user_id,
@@ -688,7 +780,82 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         "remember_me": remember_me,
         "csrf_token": csrf_token,
         "expires_in": created["ttl"],
+        "session_evicted_count": int(created.get("evicted_count") or 0),
+        "session_cap_warning": session_cap_warning,
     }
+
+
+@router.get("/sessions")
+async def auth_list_sessions(request: Request) -> dict[str, Any]:
+    await rate_limit(request, "auth_list_sessions", limit_per_minute=120)
+
+    session = await _require_session(request)
+    user_id = str(session.get("user_id") or "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    current_sid = request.cookies.get(SESSION_COOKIE_NAME) or ""
+    active_sessions = await list_active_sessions_for_user(user_id)
+
+    result = []
+    for entry in active_sessions:
+        sid = str(entry.get("sid") or "")
+        data = entry.get("session") if isinstance(entry.get("session"), dict) else {}
+        result.append(
+            {
+                "sid": public_session_id(sid),
+                "current": bool(current_sid and sid == current_sid),
+                "created_at": int(data.get("iat") or 0) or None,
+                "last_activity": int(data.get("last_activity") or 0) or None,
+                "expires_at": int(data.get("exp") or 0) or None,
+                "remember_me": bool(data.get("remember_me")),
+                "user_agent": {
+                    "summary": (str(data.get("ua_summary") or "Unknown")[:160]),
+                },
+                "ip": (str(data.get("ip_prefix") or "")[:64]) or None,
+                "country": (str(data.get("country") or "").upper()[:2]) or None,
+            }
+        )
+
+    return {"ok": True, "sessions": result, "total": len(result)}
+
+
+@router.delete("/sessions/{public_sid}")
+async def auth_revoke_session(
+    request: Request,
+    response: Response,
+    public_sid: str = Path(..., min_length=16, max_length=16),
+) -> dict[str, Any]:
+    await rate_limit(request, "auth_revoke_session", limit_per_minute=60)
+
+    if not SESSION_PUBLIC_ID_PATTERN.match(public_sid):
+        raise HTTPException(status_code=400, detail="Invalid session id")
+
+    session = await _require_session(request)
+    user_id = str(session.get("user_id") or "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    active_sessions = await list_active_sessions_for_user(user_id)
+    target_sid = None
+    for entry in active_sessions:
+        sid = str(entry.get("sid") or "")
+        if sid and hmac.compare_digest(public_session_id(sid), public_sid):
+            target_sid = sid
+            break
+
+    if not target_sid:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await delete_session(target_sid)
+
+    current_sid = request.cookies.get(SESSION_COOKIE_NAME) or ""
+    current_revoked = bool(current_sid and current_sid == target_sid)
+    if current_revoked:
+        _delete_cookie_both_scopes(request, response, SESSION_COOKIE_NAME)
+        _delete_cookie_both_scopes(request, response, CSRF_COOKIE_NAME)
+
+    return {"ok": True, "revoked": True, "current_revoked": current_revoked}
 
 
 @router.post("/logout")
