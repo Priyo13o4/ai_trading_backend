@@ -54,17 +54,20 @@ from .cache import (
     publish_strategies_snapshot,
     invalidate_strategy_cache_domain,
 )
-from .sse import router as sse_router
 
 # Configure logging with UTC
 import time
 logging.Formatter.converter = time.gmtime
+LOG_LEVEL_NAME = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL,
     format='%(asctime)s UTC | %(levelname)-5s | %(name)s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+logger.info("logging.configured level=%s", LOG_LEVEL_NAME)
+AUTHDBG_ENABLED = (os.getenv("AUTHDBG_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: Optional[int] = None) -> int:
@@ -155,6 +158,7 @@ def _parse_cors_origins() -> list[str]:
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
             "https://pipfactor.com",
+            "https://www.pipfactor.com",
         ]
 
     try:
@@ -169,13 +173,16 @@ def _parse_cors_origins() -> list[str]:
 
 
 def _cors_origin_regex() -> str:
-    return os.getenv("ALLOWED_ORIGIN_REGEX", r"https://.*\.pipfactor\.com")
+    raw = (os.getenv("ALLOWED_ORIGIN_REGEX") or "").strip()
+    return raw or r"^https://([a-zA-Z0-9_-]+\.)*pipfactor\.com$"
 
 
 def _cors_allow_headers() -> list[str]:
     required_headers = {
         "Content-Type",
         "X-CSRF-Token",
+        "X-Request-ID",
+        "X-Correlation-ID",
         "Authorization",
         "X-Requested-With",
         "X-API-Key",
@@ -188,6 +195,11 @@ def _cors_allow_headers() -> list[str]:
 
     # Keep this list tight to known frontend/internal usage.
     return sorted(required_headers)
+
+
+def _authdbg(message: str, *args) -> None:
+    if AUTHDBG_ENABLED:
+        logger.info("AUTHDBG " + message, *args)
 
 
 def _normalize_optional_query_value(value: Optional[str], *, lowercase: bool = False) -> Optional[str]:
@@ -464,14 +476,43 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 # Add CORS middleware
+CORS_ALLOW_ORIGINS = _parse_cors_origins()
+CORS_ALLOW_ORIGIN_REGEX = _cors_origin_regex()
+CORS_ALLOW_HEADERS = _cors_allow_headers()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_parse_cors_origins(),
-    allow_origin_regex=_cors_origin_regex(),
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_origin_regex=CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=_cors_allow_headers(),
+    allow_headers=CORS_ALLOW_HEADERS,
 )
+
+
+@app.middleware("http")
+async def cors_debug_middleware(request: Request, call_next):
+    rid = (request.headers.get("x-request-id") or "").strip() or uuid.uuid4().hex[:12]
+    origin = request.headers.get("origin") or ""
+    is_preflight = int(request.method == "OPTIONS" and bool(request.headers.get("access-control-request-method")))
+    _authdbg(
+        "event=cors.request rid=%s method=%s path=%s origin=%s preflight=%s",
+        rid,
+        request.method,
+        request.url.path,
+        origin,
+        is_preflight,
+    )
+
+    response = await call_next(request)
+    _authdbg(
+        "event=cors.response rid=%s status=%s acao=%s acc=%s",
+        rid,
+        response.status_code,
+        response.headers.get("access-control-allow-origin") or "",
+        response.headers.get("access-control-allow-credentials") or "",
+    )
+    return response
 
 
 # ============================================================================
@@ -521,6 +562,12 @@ async def startup_event():
     if is_first:
         logger.info("="*80)
         logger.info("STARTUP COMPLETE")
+        _authdbg(
+            "event=cors.config allow_origins_count=%s has_origin_regex=%s allow_credentials=1 allow_headers=%s",
+            len(CORS_ALLOW_ORIGINS),
+            int(bool(CORS_ALLOW_ORIGIN_REGEX)),
+            ",".join(CORS_ALLOW_HEADERS),
+        )
         logger.info(
             "[JANITOR] Config interval=%ss batch_size=%s max_batches_per_tick=%s",
             STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS,
@@ -598,7 +645,6 @@ async def shutdown_event():
 
 # Include routers
 app.include_router(historical_router)
-app.include_router(sse_router)  # Server-Sent Events for real-time updates
 app.include_router(auth_router)
 
 # ============================================================================
@@ -642,7 +688,6 @@ async def get_symbols():
 
 @app.get("/api/health")
 async def health(): 
-    logger.info("[API] Health check requested")
     return {"status": "ok", "version": "2.0.0"}
 
 # ============================================================================
@@ -1180,8 +1225,8 @@ async def get_regime_market_data_markdown(request: Request):
         
         # Cache for 5 minutes
         ttl = 5 * 60
-        import json
-        await REDIS.setex(key, ttl, json.dumps(response_data))
+        from app.utils import json_dumps
+        await REDIS.setex(key, ttl, json_dumps(response_data))
         logger.info(f"[API] Cached regime market data for {len(market_data_formatted)} symbols with TTL={ttl}s")
         
         return JSONResponse(content=response_data)

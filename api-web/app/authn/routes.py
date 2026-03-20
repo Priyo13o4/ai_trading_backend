@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -121,7 +122,10 @@ def _is_development_environment() -> bool:
 
 COOKIE_SECURE = _env_bool("COOKIE_SECURE", True)
 COOKIE_SAMESITE = _env_cookie_samesite("COOKIE_SAMESITE", "lax")
+COOKIE_DOMAIN = (os.getenv("COOKIE_DOMAIN") or "").strip().lstrip(".")
 TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", False)
+SESSION_BINDING_MODE = (os.getenv("SESSION_BINDING_MODE") or "ua_only").strip().lower()
+AUTHDBG_ENABLED = _env_bool("AUTHDBG_ENABLED", False)
 # Secure-by-default: require signed invalidation webhooks unless explicitly disabled.
 AUTH_INVALIDATION_USE_SIGNED = _env_bool("AUTH_INVALIDATION_USE_SIGNED", True)
 AUTH_INVALIDATION_TOLERANCE_SECONDS = _env_int(
@@ -139,6 +143,25 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
 AUTH_EXCHANGE_TURNSTILE_ENFORCE = _env_bool("AUTH_EXCHANGE_TURNSTILE_ENFORCE", False)
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _rid(request: Request) -> str:
+    return (
+        (request.headers.get("x-request-id") or "").strip()
+        or (request.headers.get("x-correlation-id") or "").strip()
+        or uuid.uuid4().hex[:12]
+    )
+
+
+def _sid_hash(sid: str | None) -> str:
+    if not sid:
+        return "none"
+    return hashlib.sha256(sid.encode("utf-8")).hexdigest()[:10]
+
+
+def _authdbg(message: str, *args: Any) -> None:
+    if AUTHDBG_ENABLED:
+        logger.info("AUTHDBG " + message, *args)
 
 
 def _request_host(request: Request) -> str:
@@ -232,6 +255,28 @@ def _should_use_secure_cookie(request: Request) -> bool:
 
 
 def _set_cookie(request: Request, response: Response, name: str, value: str, max_age: int) -> None:
+    domain = _cookie_domain_for_request(request)
+    rid = _rid(request)
+    _authdbg(
+        "event=cookie.set rid=%s cookie=%s secure=%s httponly=%s samesite=%s domain=%s max_age=%s",
+        rid,
+        name,
+        int(_should_use_secure_cookie(request)),
+        int(name == SESSION_COOKIE_NAME),
+        COOKIE_SAMESITE,
+        domain or "<host-only>",
+        max_age,
+    )
+    logger.debug(
+        "auth.cookie.set name=%s host=%s domain=%s secure=%s samesite=%s max_age=%s httponly=%s",
+        name,
+        _request_host(request),
+        domain or "<host-only>",
+        int(_should_use_secure_cookie(request)),
+        COOKIE_SAMESITE,
+        max_age,
+        int(name == SESSION_COOKIE_NAME),
+    )
     response.set_cookie(
         name,
         value,
@@ -240,38 +285,57 @@ def _set_cookie(request: Request, response: Response, name: str, value: str, max
         secure=_should_use_secure_cookie(request),
         samesite=COOKIE_SAMESITE,
         path="/",
+        domain=domain,
     )
+
+
+def _cookie_domain_for_request(request: Request) -> str | None:
+    if not COOKIE_DOMAIN:
+        return None
+    host = _request_host(request)
+    if _is_local_host(request):
+        return None
+    # Never attach Domain for raw IP hosts; browsers reject domain attrs there.
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+
+    # Only use configured domain when host belongs to that domain.
+    # Misconfigured values (e.g., COOKIE_DOMAIN=www.example.com with host=api.example.com)
+    # cause browsers to reject Set-Cookie and break session persistence.
+    if host == COOKIE_DOMAIN or host.endswith(f".{COOKIE_DOMAIN}"):
+        return COOKIE_DOMAIN
+
+    logger.warning(
+        "auth.cookie.domain_mismatch configured=%s host=%s fallback=host-only",
+        COOKIE_DOMAIN,
+        host,
+    )
+    return None
+
+
+def _delete_cookie_both_scopes(request: Request, response: Response, name: str) -> None:
+    # Clear host-only cookie.
+    response.delete_cookie(name, path="/")
+    # Also clear shared domain cookie to prevent stale auth in mixed deployments.
+    domain = _cookie_domain_for_request(request)
+    if domain:
+        response.delete_cookie(name, path="/", domain=domain)
 
 
 def _request_client_ip(request: Request) -> str:
     if TRUST_PROXY_HEADERS:
+        cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+        if cf_connecting_ip:
+            return cf_connecting_ip
         forwarded = (request.headers.get("x-forwarded-for") or "").strip()
         if forwarded:
             return forwarded.split(",", 1)[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return ""
-
-
-def _ip_prefix_for_binding(ip_value: str) -> str:
-    ip_raw = (ip_value or "").strip()
-    if not ip_raw:
-        return ""
-
-    try:
-        parsed = ipaddress.ip_address(ip_raw)
-    except ValueError:
-        return ""
-
-    if isinstance(parsed, ipaddress.IPv4Address):
-        octets = ip_raw.split(".")
-        if len(octets) == 4:
-            return ".".join(octets[:3]) + ".*"
-        return ""
-
-    # Tolerant /56-ish prefix grouping for IPv6.
-    exploded = parsed.exploded.split(":")
-    return ":".join(exploded[:4]) + ":*"
 
 
 def _user_agent_hash(user_agent: str) -> str:
@@ -283,17 +347,21 @@ def _user_agent_hash(user_agent: str) -> str:
 
 def _device_binding_matches(session: dict[str, Any], request: Request) -> bool:
     expected_ua_hash = str(session.get("ua_hash") or "")
-    expected_ip_prefix = str(session.get("ip_prefix") or "")
-
-    if not expected_ua_hash and not expected_ip_prefix:
+    if not expected_ua_hash:
         return True
 
     current_ua_hash = _user_agent_hash(request.headers.get("user-agent") or "")
-    current_ip_prefix = _ip_prefix_for_binding(_request_client_ip(request))
-
     ua_ok = (not expected_ua_hash) or hmac.compare_digest(current_ua_hash, expected_ua_hash)
-    ip_ok = (not expected_ip_prefix) or hmac.compare_digest(current_ip_prefix, expected_ip_prefix)
-    return ua_ok and ip_ok
+    return ua_ok
+
+
+def _session_binding_components(request: Request) -> tuple[str, str]:
+    mode = SESSION_BINDING_MODE
+    if mode in {"off", "none", "disabled"}:
+        return "", ""
+    # IP binding is intentionally disabled. Even in strict mode, tunnels/proxies/mobile
+    # frequently alter source address metadata and cause false invalidations.
+    return (_user_agent_hash(request.headers.get("user-agent") or ""), "")
 
 
 def _parse_remember_me_flag(body: dict[str, Any]) -> bool:
@@ -309,15 +377,56 @@ def _parse_remember_me_flag(body: dict[str, Any]) -> bool:
 
 
 async def _require_session(request: Request) -> dict[str, Any]:
+    rid = _rid(request)
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
+        _authdbg("event=routes.require_session.denied rid=%s reason=missing_sid", rid)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     session = await get_session(sid)
     if not session:
+        _authdbg(
+            "event=routes.require_session.denied rid=%s reason=sid_not_found sid=%s",
+            rid,
+            _sid_hash(sid),
+        )
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # 🛡️ CSRF PROTECTION: Enforce for all mutating methods (POST, PATCH, DELETE, etc.)
+    # We use the 'Double Submit Cookie' pattern. The frontend must send the value
+    # from the 'csrf_token' cookie in the 'X-CSRF-Token' header.
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME)
+        header_csrf = (
+            request.headers.get("X-CSRF-Token")
+            or request.headers.get("x-csrf-token")
+            or ""
+        )
+        if not cookie_csrf or not header_csrf or not hmac.compare_digest(cookie_csrf, header_csrf):
+            _authdbg(
+                "event=routes.require_session.denied rid=%s reason=csrf method=%s cookie_present=%s header_present=%s",
+                rid,
+                request.method,
+                int(bool(cookie_csrf)),
+                int(bool(header_csrf)),
+            )
+            logger.warning(
+                "auth.csrf_failure user_id=%s method=%s",
+                session.get("user_id") or "unknown",
+                request.method,
+            )
+            raise HTTPException(
+                status_code=403, detail="CSRF validation failed. Please refresh the page."
+            )
+
     if not _device_binding_matches(session, request):
+        _authdbg(
+            "event=routes.require_session.denied rid=%s reason=device_mismatch sid=%s mode=%s ua_present=%s",
+            rid,
+            _sid_hash(sid),
+            SESSION_BINDING_MODE,
+            int(bool(session.get("ua_hash"))),
+        )
         await delete_session(sid)
         logger.warning(
             "auth.session.device_mismatch event=device-mismatch user_id=%s sid=%s",
@@ -328,7 +437,19 @@ async def _require_session(request: Request) -> dict[str, Any]:
 
     refreshed = await refresh_session_activity(sid, session)
     if not refreshed:
+        _authdbg(
+            "event=routes.require_session.denied rid=%s reason=refresh_failed sid=%s",
+            rid,
+            _sid_hash(sid),
+        )
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    _authdbg(
+        "event=routes.require_session.allowed rid=%s sid=%s user_tail=%s",
+        rid,
+        _sid_hash(sid),
+        str(refreshed.get("user_id") or "")[-6:],
+    )
 
     return refreshed
 
@@ -350,6 +471,7 @@ def _build_profile(user: dict[str, Any]) -> dict[str, Any]:
 @router.post("/exchange")
 async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     await rate_limit(request, "auth_exchange", limit_per_minute=20)
+    rid = _rid(request)
 
     body = await request.json()
     if not isinstance(body, dict):
@@ -360,6 +482,29 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="access_token is required")
     turnstile_token = (body.get("turnstile_token") or "").strip() or None
     enforce_turnstile = _should_enforce_turnstile(request)
+    _authdbg(
+        "event=exchange.start rid=%s host=%s origin=%s referer=%s enforce_turnstile=%s remember_me=%s",
+        rid,
+        _request_host(request),
+        request.headers.get("origin") or "",
+        request.headers.get("referer") or "",
+        int(enforce_turnstile),
+        int(remember_me),
+    )
+    logger.debug(
+        "auth.exchange.start host=%s origin=%s referer=%s enforce_turnstile=%s token_present=%s secure_cookie=%s cookie_domain=%s samesite=%s xf_proto=%s cf_connecting_ip=%s xff=%s",
+        _request_host(request),
+        request.headers.get("origin") or "",
+        request.headers.get("referer") or "",
+        int(enforce_turnstile),
+        int(bool(turnstile_token)),
+        int(_should_use_secure_cookie(request)),
+        _cookie_domain_for_request(request) or "<host-only>",
+        COOKIE_SAMESITE,
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower(),
+        request.headers.get("cf-connecting-ip") or "",
+        (request.headers.get("x-forwarded-for") or "").split(",")[0].strip(),
+    )
     if enforce_turnstile and not turnstile_token:
         logger.warning(
             "auth.exchange rejected: missing turnstile token user_id=unknown host=%s",
@@ -402,6 +547,15 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
                     data=turnstile_payload,
                 )
             ts_result = ts_response.json()
+            logger.debug(
+                "auth.exchange.turnstile.result status=%s success=%s hostname=%s action=%s error_codes=%s remoteip_included=%s",
+                getattr(ts_response, "status_code", "unknown"),
+                int(bool(ts_result.get("success"))),
+                ts_result.get("hostname") or "",
+                ts_result.get("action") or "",
+                ",".join(str(x) for x in (ts_result.get("error-codes") or [])),
+                int("remoteip" in turnstile_payload),
+            )
         except httpx.HTTPError as exc:
             logger.warning("auth.exchange turnstile verify request failed: %s", exc)
             raise HTTPException(status_code=503, detail="Captcha verification unavailable") from exc
@@ -472,14 +626,33 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
 
     existing_sid = request.cookies.get(SESSION_COOKIE_NAME)
 
+    ua_hash, ip_prefix = _session_binding_components(request)
+
     created = await create_session(
         user_id=user_id,
         supabase_exp=supabase_exp,
         plan=plan,
         permissions=permissions,
         remember_me=remember_me,
-        ua_hash=_user_agent_hash(request.headers.get("user-agent") or ""),
-        ip_prefix=_ip_prefix_for_binding(_request_client_ip(request)),
+        ua_hash=ua_hash,
+        ip_prefix=ip_prefix,
+    )
+    logger.debug(
+        "auth.exchange.session.created user_id=%s sid=%s ttl=%s remember_me=%s ua_bound=%s ip_bound=%s",
+        user_id,
+        created["sid"],
+        created["ttl"],
+        int(remember_me),
+        int(bool(ua_hash)),
+        int(bool(ip_prefix)),
+    )
+    _authdbg(
+        "event=exchange.session rid=%s user_tail=%s sid=%s ttl=%s rotated_from=%s",
+        rid,
+        str(user_id or "")[-6:],
+        _sid_hash(created.get("sid")),
+        created.get("ttl"),
+        _sid_hash(existing_sid),
     )
 
     if existing_sid and existing_sid != created["sid"]:
@@ -492,8 +665,20 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         )
 
     csrf_token = generate_csrf_token()
+    # Clear stale cookie variants first (host-only + shared-domain) so the browser
+    # does not send duplicate `session` cookies with conflicting SIDs.
+    _delete_cookie_both_scopes(request, response, SESSION_COOKIE_NAME)
+    _delete_cookie_both_scopes(request, response, CSRF_COOKIE_NAME)
     _set_cookie(request, response, SESSION_COOKIE_NAME, created["sid"], max_age=created["ttl"])
     _set_cookie(request, response, CSRF_COOKIE_NAME, csrf_token, max_age=created["ttl"])
+    logger.debug(
+        "auth.exchange.cookies_set user_id=%s secure=%s domain=%s samesite=%s ttl=%s",
+        user_id,
+        int(_should_use_secure_cookie(request)),
+        _cookie_domain_for_request(request) or "<host-only>",
+        COOKIE_SAMESITE,
+        created["ttl"],
+    )
 
     return {
         "ok": True,
@@ -516,8 +701,8 @@ async def auth_logout(request: Request, response: Response) -> dict[str, Any]:
         if session and session.get("user_id"):
             await invalidate_profile_cache(session["user_id"])
 
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+    _delete_cookie_both_scopes(request, response, SESSION_COOKIE_NAME)
+    _delete_cookie_both_scopes(request, response, CSRF_COOKIE_NAME)
     return {"ok": True}
 
 
@@ -528,19 +713,38 @@ async def auth_logout_all(request: Request, response: Response) -> dict[str, Any
 
     await invalidate_profile_cache(user_id)
     deleted = await delete_all_sessions_for_user(user_id)
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+    _delete_cookie_both_scopes(request, response, SESSION_COOKIE_NAME)
+    _delete_cookie_both_scopes(request, response, CSRF_COOKIE_NAME)
     return {"ok": True, "deleted": deleted}
 
 
 @router.get("/validate")
 async def auth_validate(request: Request) -> dict[str, Any]:
     await rate_limit(request, "auth_validate", limit_per_minute=120)
+    rid = _rid(request)
 
     try:
         session = await _require_session(request)
-    except HTTPException:
-        return {"allowed": False}
+    except HTTPException as exc:
+        _authdbg(
+            "event=validate.result rid=%s allowed=0 sid_present=%s host=%s",
+            rid,
+            int(bool(request.cookies.get(SESSION_COOKIE_NAME))),
+            _request_host(request),
+        )
+        logger.debug(
+            "auth.validate.denied host=%s sid_present=%s",
+            _request_host(request),
+            int(bool(request.cookies.get(SESSION_COOKIE_NAME))),
+        )
+        raise HTTPException(status_code=401, detail=exc.detail or "Not authenticated") from exc
+
+    _authdbg(
+        "event=validate.result rid=%s allowed=1 user_tail=%s perms_count=%s",
+        rid,
+        str(session.get("user_id") or "")[-6:],
+        len(session.get("permissions") or []),
+    )
 
     return {
         "allowed": True,

@@ -15,9 +15,9 @@ Usage:
 
 import hashlib
 import hmac
-import ipaddress
 import logging
 import os
+import uuid
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -33,30 +33,40 @@ from .session_store import (
 logger = logging.getLogger(__name__)
 
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
+SESSION_BINDING_MODE = (os.getenv("SESSION_BINDING_MODE") or "ua_only").strip().lower()
+AUTHDBG_ENABLED = os.getenv("AUTHDBG_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rid(request: Request) -> str:
+    return (
+        (request.headers.get("x-request-id") or "").strip()
+        or (request.headers.get("x-correlation-id") or "").strip()
+        or uuid.uuid4().hex[:12]
+    )
+
+
+def _sid_hash(sid: str | None) -> str:
+    if not sid:
+        return "none"
+    return hashlib.sha256(sid.encode("utf-8")).hexdigest()[:10]
+
+
+def _authdbg(message: str, *args: Any) -> None:
+    if AUTHDBG_ENABLED:
+        logger.info("AUTHDBG " + message, *args)
 
 
 def _request_client_ip(request: Request) -> str:
     if TRUST_PROXY_HEADERS:
+        cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+        if cf_connecting_ip:
+            return cf_connecting_ip
         forwarded = (request.headers.get("x-forwarded-for") or "").strip()
         if forwarded:
             return forwarded.split(",", 1)[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return ""
-
-
-def _ip_prefix(ip_value: str) -> str:
-    ip_raw = (ip_value or "").strip()
-    if not ip_raw:
-        return ""
-    try:
-        parsed = ipaddress.ip_address(ip_raw)
-    except ValueError:
-        return ""
-    if isinstance(parsed, ipaddress.IPv4Address):
-        parts = ip_raw.split(".")
-        return ".".join(parts[:3]) + ".*" if len(parts) == 4 else ""
-    return ":".join(parsed.exploded.split(":")[:4]) + ":*"
 
 
 def _ua_hash(user_agent: str) -> str:
@@ -67,27 +77,48 @@ def _ua_hash(user_agent: str) -> str:
 
 
 def _device_matches(session: dict[str, Any], request: Request) -> bool:
+    if SESSION_BINDING_MODE in {"off", "none", "disabled"}:
+        return True
+
     expected_ua = str(session.get("ua_hash") or "")
-    expected_ip = str(session.get("ip_prefix") or "")
-    if not expected_ua and not expected_ip:
+    if not expected_ua:
         return True
     ua_ok = (not expected_ua) or hmac.compare_digest(
         _ua_hash(request.headers.get("user-agent") or ""), expected_ua
     )
-    ip_ok = (not expected_ip) or hmac.compare_digest(
-        _ip_prefix(_request_client_ip(request)), expected_ip
-    )
-    return ua_ok and ip_ok
+    return ua_ok
 
 
 async def require_session(request: Request) -> dict[str, Any]:
     """Require an active, device-bound session. Raises HTTP 401 if absent/invalid."""
+    rid = _rid(request)
     sid = request.cookies.get(SESSION_COOKIE_NAME)
+    _authdbg(
+        "event=session.require.start rid=%s path=%s method=%s sid_present=%s",
+        rid,
+        request.url.path,
+        request.method,
+        int(bool(sid)),
+    )
     if not sid:
+        _authdbg(
+            "event=session.require.denied rid=%s reason=missing_sid path=%s method=%s",
+            rid,
+            request.url.path,
+            request.method,
+        )
+        logger.debug("auth.require_session.missing_sid path=%s method=%s", request.url.path, request.method)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     session = await get_session(sid)
     if not session:
+        _authdbg(
+            "event=session.require.denied rid=%s reason=sid_not_found sid=%s path=%s",
+            rid,
+            _sid_hash(sid),
+            request.url.path,
+        )
+        logger.debug("auth.require_session.sid_not_found sid=%s path=%s", sid, request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     # 🛡️ CSRF PROTECTION: Enforce for all mutating methods (POST, PATCH, DELETE, etc.)
@@ -101,6 +132,13 @@ async def require_session(request: Request) -> dict[str, Any]:
             or ""
         )
         if not cookie_csrf or not header_csrf or not hmac.compare_digest(cookie_csrf, header_csrf):
+            _authdbg(
+                "event=session.csrf rid=%s method=%s passed=0 cookie_present=%s header_present=%s",
+                rid,
+                request.method,
+                int(bool(cookie_csrf)),
+                int(bool(header_csrf)),
+            )
             logger.warning(
                 "auth.csrf_failure user_id=%s method=%s",
                 session.get("user_id") or "unknown",
@@ -109,19 +147,58 @@ async def require_session(request: Request) -> dict[str, Any]:
             raise HTTPException(
                 status_code=403, detail="CSRF validation failed. Please refresh the page."
             )
+        _authdbg(
+            "event=session.csrf rid=%s method=%s passed=1 cookie_present=%s header_present=%s",
+            rid,
+            request.method,
+            int(bool(cookie_csrf)),
+            int(bool(header_csrf)),
+        )
 
     if not _device_matches(session, request):
+        _authdbg(
+            "event=session.bind rid=%s mode=%s passed=0 expected_ua=%s sid=%s",
+            rid,
+            SESSION_BINDING_MODE,
+            int(bool(session.get("ua_hash"))),
+            _sid_hash(sid),
+        )
         await delete_session(sid)
         logger.warning(
-            "auth.session.device_mismatch user_id=%s sid=%s",
+            "auth.session.device_mismatch user_id=%s sid=%s mode=%s ua_present=%s",
             session.get("user_id") or "",
             sid,
+            SESSION_BINDING_MODE,
+            int(bool(session.get("ua_hash"))),
         )
         raise HTTPException(status_code=401, detail="Session invalidated")
 
+    _authdbg(
+        "event=session.bind rid=%s mode=%s passed=1 expected_ua=%s sid=%s",
+        rid,
+        SESSION_BINDING_MODE,
+        int(bool(session.get("ua_hash"))),
+        _sid_hash(sid),
+    )
+
     refreshed = await refresh_session_activity(sid, session)
     if not refreshed:
+        _authdbg(
+            "event=session.refresh rid=%s result=failed sid=%s path=%s",
+            rid,
+            _sid_hash(sid),
+            request.url.path,
+        )
+        logger.debug("auth.require_session.refresh_failed sid=%s path=%s", sid, request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    _authdbg(
+        "event=session.refresh rid=%s result=ok sid=%s ttl_hint=%s user_tail=%s",
+        rid,
+        _sid_hash(sid),
+        int(refreshed.get("exp") or 0),
+        str(refreshed.get("user_id") or "")[-6:],
+    )
 
     return refreshed
 
