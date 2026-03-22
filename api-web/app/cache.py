@@ -27,11 +27,6 @@ CACHE_TTL = DEFAULT_CACHE_TTL
 
 
 # Cache key builders
-def candles_key(symbol: str, timeframe: str) -> str:
-    """Generate Redis key for candlestick data."""
-    return build_cache_key("candles", symbol, timeframe)
-
-
 def news_key(symbol: str = "all") -> str:
     """Generate Redis key for news data."""
     return build_cache_key("news", symbol)
@@ -76,26 +71,6 @@ def get_last_candle_update(symbol: str, timeframe: str, *, prefer_forming: bool 
     except Exception:
         return None
     return None
-
-
-class CandleCache:
-    """Cache manager for candlestick data (read-only for api-web)."""
-    
-    @staticmethod
-    def get(symbol: str, timeframe: str, limit: int = 500) -> Optional[List[Dict]]:
-        """Get cached candlestick data."""
-        try:
-            key = candles_key(symbol, timeframe)
-            data = redis_client.get(key)
-            
-            if data:
-                candles = json.loads(data)
-                return candles[:limit]
-            
-            return None
-        except Exception as e:
-            logger.error(f"Cache get error for {symbol} {timeframe}: {e}")
-            return None
 
 
 class NewsCache:

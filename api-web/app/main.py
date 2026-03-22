@@ -9,6 +9,8 @@ from .authn.deps import optional_session, require_session
 from .authn.authz import require_permission
 from .authn.csrf import enforce_csrf
 from .authn.routes import router as auth_router
+from .payments.routes import payments_router
+from .payments.webhook_handler import webhook_router
 from .authn.session_store import (
     CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -46,7 +48,6 @@ from trading_common.symbols import get_active_symbols
 from .routes.historical import router as historical_router
 # Import cache and SSE
 from .cache import (
-    CandleCache,
     NewsCache,
     StrategyCache,
     publish_news_snapshot,
@@ -54,6 +55,7 @@ from .cache import (
     publish_strategies_snapshot,
     invalidate_strategy_cache_domain,
 )
+from .payments.tasks import deferred_cancellation_janitor_loop
 
 # Configure logging with UTC
 import time
@@ -132,6 +134,8 @@ _strategy_expiry_janitor_task: Optional[asyncio.Task] = None
 _strategy_expiry_janitor_stop: Optional[asyncio.Event] = None
 _session_index_prune_janitor_task: Optional[asyncio.Task] = None
 _session_index_prune_janitor_stop: Optional[asyncio.Event] = None
+_deferred_cancellation_janitor_task: Optional[asyncio.Task] = None
+_deferred_cancellation_janitor_stop: Optional[asyncio.Event] = None
 _events_singleflight_local_locks: dict[str, asyncio.Lock] = {}
 _events_singleflight_local_locks_guard = asyncio.Lock()
 
@@ -146,6 +150,8 @@ AUTH_CSRF_EXEMPT_PATHS = {
     "/auth/logout",
     "/auth/logout-all",
     "/auth/invalidate",
+    "/api/webhooks/razorpay",
+    "/api/webhooks/nowpayments",
 }
 
 
@@ -445,7 +451,7 @@ async def csrf_middleware(request: Request, call_next):
     try:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             request_path = request.url.path
-            if request_path in AUTH_CSRF_EXEMPT_PATHS:
+            if request_path in AUTH_CSRF_EXEMPT_PATHS or request_path.startswith("/api/webhooks/"):
                 pass
             else:
                 if request.cookies.get(SESSION_COOKIE_NAME):
@@ -558,6 +564,7 @@ async def startup_event():
     
     global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
+    global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
 
     if is_first:
         logger.info("="*80)
@@ -595,11 +602,17 @@ async def startup_event():
             _session_index_prune_janitor_loop(_session_index_prune_janitor_stop)
         )
 
+    if _deferred_cancellation_janitor_task is None:
+        _deferred_cancellation_janitor_stop = asyncio.Event()
+        _deferred_cancellation_janitor_task = asyncio.create_task(
+            deferred_cancellation_janitor_loop(_deferred_cancellation_janitor_stop)
+        )
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
+    global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
 
     if _strategy_expiry_janitor_task is None:
         pass
@@ -642,10 +655,31 @@ async def shutdown_event():
             _session_index_prune_janitor_task = None
             _session_index_prune_janitor_stop = None
 
+    if _deferred_cancellation_janitor_stop is not None:
+        _deferred_cancellation_janitor_stop.set()
+
+    if _deferred_cancellation_janitor_task is not None:
+        try:
+            await asyncio.wait_for(_deferred_cancellation_janitor_task, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("[JANITOR] Timed out waiting for deferred cancellation janitor to stop, cancelling task")
+            _deferred_cancellation_janitor_task.cancel()
+            try:
+                await _deferred_cancellation_janitor_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as exc:
+            logger.error("[JANITOR] Deferred cancellation janitor shutdown failed: %s", exc, exc_info=True)
+        finally:
+            _deferred_cancellation_janitor_task = None
+            _deferred_cancellation_janitor_stop = None
+
 
 # Include routers
 app.include_router(historical_router)
 app.include_router(auth_router)
+app.include_router(payments_router)
+app.include_router(webhook_router)
 
 # ============================================================================
 # SYMBOLS ENDPOINT (Dynamic symbol list for frontend)

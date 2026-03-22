@@ -390,6 +390,66 @@ async def delete_all_sessions_for_user(user_id: str) -> int:
     return len(sids)
 
 
+async def update_all_sessions_for_user_perms(user_id: str, plan: str, permissions: list[str]) -> int:
+    """Refreshes the plan and permissions in all active Redis sessions for a user without logging them out."""
+    now = int(time.time())
+    try:
+        legacy_sids = await SESSION_REDIS.smembers(_user_sessions_key(user_id))
+    except Exception:
+        logger.warning("auth.session.update_perms legacy-index-read-failed user=%s", user_id, exc_info=True)
+        legacy_sids = set()
+
+    try:
+        indexed_sids = await SESSION_REDIS.zrangebyscore(_user_sessions_index_key(user_id), now, "+inf")
+    except Exception:
+        logger.warning("auth.session.update_perms sorted-index-read-failed user=%s", user_id, exc_info=True)
+        indexed_sids = []
+
+    sids = set(legacy_sids or set()) | set(indexed_sids or [])
+    if not sids:
+        sids |= await _scan_active_session_ids_for_user(user_id)
+
+    if not sids:
+        return 0
+
+    updated_count = 0
+    ordered_sids = sorted(sids)
+    for sid_batch in _chunked(ordered_sids, 100):
+        keys = [_session_key(sid) for sid in sid_batch]
+        values = await SESSION_REDIS.mget(keys)
+        
+        pipe = SESSION_REDIS.pipeline()
+        for sid, raw in zip(sid_batch, values):
+            if not raw:
+                continue
+
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+
+            # Safety check: ensure the session still belongs to the intended user
+            if str(data.get("user_id") or "") != str(user_id):
+                continue
+
+            # Update fields
+            data["plan"] = plan
+            data["permissions"] = permissions
+            
+            # Preserve original TTL/expiry
+            exp = int(data.get("exp") or 0)
+            ttl = max(1, exp - now) if exp else SERVER_SESSION_MAX_TTL
+            
+            pipe.setex(_session_key(sid), ttl, json_dumps(data))
+            updated_count += 1
+            
+        if updated_count > 0:
+            await pipe.execute()
+
+    return updated_count
+
+
+
 async def list_active_sessions_for_user(user_id: str) -> list[dict[str, Any]]:
     now = int(time.time())
     try:

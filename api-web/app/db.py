@@ -13,6 +13,19 @@ POSTGRES_DSN = f"host={os.getenv('POSTGRES_HOST')} port={os.getenv('POSTGRES_POR
 def _use_timescale_caggs() -> bool:
     return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
 
+_supabase_client = None
+
+def get_supabase_client():
+    from supabase import create_client
+    global _supabase_client
+    if _supabase_client is None:
+        url = os.getenv("SUPABASE_PROJECT_URL")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not key:
+            raise Exception("Missing Supabase credentials (SUPABASE_PROJECT_URL / SUPABASE_SERVICE_ROLE_KEY) in environment")
+        _supabase_client = create_client(url, key)
+    return _supabase_client
+
 
 def _ohlcv_relation_for_timeframe(timeframe: str) -> str:
     # LOCKED ARCHITECTURE:

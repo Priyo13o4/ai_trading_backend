@@ -26,12 +26,13 @@ from .session_store import (
     get_session,
     list_active_sessions_for_user,
     public_session_id,
+    refresh_session_activity,
     invalidate_perms,
     invalidate_profile_cache,
     put_replay_guard_once,
-    refresh_session_activity,
     set_cached_perms,
     set_cached_profile,
+    update_all_sessions_for_user_perms,
 )
 from .supabase_admin import SupabaseAdminError, admin_get_user, admin_update_user
 from .supabase_rpc import rpc_get_active_subscription
@@ -1058,7 +1059,7 @@ async def auth_update_password(request: Request) -> dict[str, Any]:
 
 @router.post("/invalidate")
 async def auth_invalidate_user(request: Request) -> dict[str, Any]:
-    """Internal webhook target: invalidate a user's perms + all sessions."""
+    """Internal webhook target: invalidate a user's perms and optionally sessions."""
     await rate_limit(request, "auth_invalidate", limit_per_minute=60)
 
     secret = os.getenv("AUTH_INVALIDATION_WEBHOOK_SECRET") or ""
@@ -1067,7 +1068,6 @@ async def auth_invalidate_user(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="Service unavailable")
 
     raw_body = await request.body()
-
     if AUTH_INVALIDATION_USE_SIGNED:
         await _verify_signed_invalidation(request, secret, raw_body)
     else:
@@ -1080,9 +1080,27 @@ async def auth_invalidate_user(request: Request) -> dict[str, Any]:
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
 
+    force_logout = bool(payload.get("force_logout", False))
+    logger.info("auth.invalidate event=received user=%s force_logout=%s", user_id, force_logout)
+
+    # Always bust caches
     await invalidate_perms(user_id)
     await invalidate_profile_cache(user_id)
-    deleted = await delete_all_sessions_for_user(user_id)
-    logger.info("auth.invalidated user=%s sessions=%s", user_id, deleted)
-
-    return {"ok": True, "deleted": deleted}
+    
+    if force_logout:
+        deleted = await delete_all_sessions_for_user(user_id)
+        logger.info("auth.invalidated event=full_logout user=%s sessions_deleted=%s", user_id, deleted)
+        return {"ok": True, "deleted": deleted, "mode": "full_logout"}
+    else:
+        # Graceful refresh
+        try:
+            sub = await rpc_get_active_subscription(user_id)
+            plan = sub.get("plan_id") or "free"
+            permissions = sub.get("permissions") or []
+            
+            updated = await update_all_sessions_for_user_perms(user_id, plan, permissions)
+            logger.info("auth.invalidated event=graceful_refresh user=%s sessions_updated=%s plan=%s", user_id, updated, plan)
+            return {"ok": True, "updated": updated, "mode": "graceful_refresh"}
+        except Exception as e:
+            logger.error("auth.invalidated event=refresh_failed user=%s error=%s", user_id, str(e))
+            return {"ok": True, "error": str(e), "mode": "failed_refresh"}
