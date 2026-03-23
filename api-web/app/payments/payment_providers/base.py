@@ -32,3 +32,11 @@ class PaymentProvider(ABC):
         Returns True if successful.
         """
         pass
+
+    @abstractmethod
+    async def cancel_checkout_attempt(self, provider_payment_id: str) -> bool:
+        """
+        Best-effort cancellation for an unresolved checkout attempt at provider side.
+        Returns True if the attempt is now cancelled or already terminal.
+        """
+        pass

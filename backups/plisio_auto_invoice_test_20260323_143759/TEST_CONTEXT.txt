@@ -1,0 +1,14 @@
+Plisio auto-invoice QA context
+
+Test user_id: 8112e70e-8f45-4bc4-a128-521b5aafa437
+Fake subscription id: e1230aaa-5809-4a13-95c1-257929e6889d
+Fake external_subscription_id: qa-renewal-4fca62a808298e
+Janitor manual tick result: 1 invoice created
+Generated transaction id: 7f8e719d-bd13-43e7-999f-27fc60177079
+Generated provider_payment_id(order_number): 228550166353125
+Generated transaction status: pending
+Generated renewal_cycle_marker: 2026-03-23
+
+Notes:
+- Fake subscription metadata includes qa_test=plisio_auto_invoice.
+- Use this marker to clean up test rows after UI confirmation.

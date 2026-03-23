@@ -1,6 +1,7 @@
 import os
 import psycopg
 import logging
+from urllib.parse import urlparse
 from typing import Any
 from psycopg.rows import dict_row
 
@@ -14,6 +15,18 @@ def _use_timescale_caggs() -> bool:
     return (os.getenv("USE_TIMESCALE_CAGGS") or "").strip().lower() in {"1", "true", "yes", "y"}
 
 _supabase_client = None
+
+
+def get_supabase_project_host() -> str | None:
+    url = (os.getenv("SUPABASE_PROJECT_URL") or "").strip()
+    if not url:
+        return None
+    return urlparse(url).hostname
+
+
+def reset_supabase_client() -> None:
+    global _supabase_client
+    _supabase_client = None
 
 def get_supabase_client():
     from supabase import create_client

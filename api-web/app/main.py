@@ -1,4 +1,4 @@
-import json, asyncio, logging, os, hmac, uuid
+import json, asyncio, logging, os, hmac, uuid, fcntl
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
@@ -55,7 +55,10 @@ from .cache import (
     publish_strategies_snapshot,
     invalidate_strategy_cache_domain,
 )
-from .payments.tasks import deferred_cancellation_janitor_loop
+from .payments.tasks import (
+    deferred_cancellation_janitor_loop,
+    plisio_renewal_invoice_janitor_loop,
+)
 
 # Configure logging with UTC
 import time
@@ -136,6 +139,10 @@ _session_index_prune_janitor_task: Optional[asyncio.Task] = None
 _session_index_prune_janitor_stop: Optional[asyncio.Event] = None
 _deferred_cancellation_janitor_task: Optional[asyncio.Task] = None
 _deferred_cancellation_janitor_stop: Optional[asyncio.Event] = None
+_plisio_renewal_janitor_task: Optional[asyncio.Task] = None
+_plisio_renewal_janitor_stop: Optional[asyncio.Event] = None
+_janitor_leader_lock_handle = None
+_janitor_is_leader = False
 _events_singleflight_local_locks: dict[str, asyncio.Lock] = {}
 _events_singleflight_local_locks_guard = asyncio.Lock()
 
@@ -151,7 +158,7 @@ AUTH_CSRF_EXEMPT_PATHS = {
     "/auth/logout-all",
     "/auth/invalidate",
     "/api/webhooks/razorpay",
-    "/api/webhooks/nowpayments",
+    "/api/webhooks/plisio",
 }
 
 
@@ -440,6 +447,56 @@ async def _session_index_prune_janitor_loop(stop_event: asyncio.Event) -> None:
     logger.info("[JANITOR] Session index prune janitor stopped")
 
 
+def _try_acquire_janitor_leader_lock() -> bool:
+    global _janitor_leader_lock_handle, _janitor_is_leader
+
+    if _janitor_is_leader:
+        return True
+
+    lock_path = (os.getenv("JANITOR_LEADER_LOCK_PATH") or "/tmp/fastapi_janitor_leader.lock").strip() or "/tmp/fastapi_janitor_leader.lock"
+    lock_handle = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_handle.seek(0)
+        lock_handle.truncate()
+        lock_handle.write(str(os.getpid()))
+        lock_handle.flush()
+        _janitor_leader_lock_handle = lock_handle
+        _janitor_is_leader = True
+        logger.info("[JANITOR] Acquired leader lock path=%s pid=%s", lock_path, os.getpid())
+        return True
+    except BlockingIOError:
+        lock_handle.close()
+        _janitor_is_leader = False
+        logger.info("[JANITOR] Leader lock held by another worker path=%s", lock_path)
+        return False
+    except Exception:
+        lock_handle.close()
+        _janitor_is_leader = False
+        logger.exception("[JANITOR] Failed to acquire leader lock path=%s", lock_path)
+        return False
+
+
+def _release_janitor_leader_lock() -> None:
+    global _janitor_leader_lock_handle, _janitor_is_leader
+
+    handle = _janitor_leader_lock_handle
+    _janitor_leader_lock_handle = None
+    _janitor_is_leader = False
+    if handle is None:
+        return
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        logger.exception("[JANITOR] Failed to unlock leader lock")
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            logger.exception("[JANITOR] Failed to close leader lock handle")
+
+
 async def require_signals_context(ctx=Depends(require_session)):
     require_permission(ctx, "signals")
     return ctx
@@ -565,6 +622,9 @@ async def startup_event():
     global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
     global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
+    global _plisio_renewal_janitor_stop, _plisio_renewal_janitor_task
+
+    janitor_leader = _try_acquire_janitor_leader_lock()
 
     if is_first:
         logger.info("="*80)
@@ -590,29 +650,39 @@ async def startup_event():
         )
         logger.info("="*80)
 
-    if _strategy_expiry_janitor_task is None:
-        _strategy_expiry_janitor_stop = asyncio.Event()
-        _strategy_expiry_janitor_task = asyncio.create_task(
-            _strategy_expiry_janitor_loop(_strategy_expiry_janitor_stop)
-        )
+    if janitor_leader:
+        if _strategy_expiry_janitor_task is None:
+            _strategy_expiry_janitor_stop = asyncio.Event()
+            _strategy_expiry_janitor_task = asyncio.create_task(
+                _strategy_expiry_janitor_loop(_strategy_expiry_janitor_stop)
+            )
 
-    if SESSION_INDEX_PRUNE_ENABLED and _session_index_prune_janitor_task is None:
-        _session_index_prune_janitor_stop = asyncio.Event()
-        _session_index_prune_janitor_task = asyncio.create_task(
-            _session_index_prune_janitor_loop(_session_index_prune_janitor_stop)
-        )
+        if SESSION_INDEX_PRUNE_ENABLED and _session_index_prune_janitor_task is None:
+            _session_index_prune_janitor_stop = asyncio.Event()
+            _session_index_prune_janitor_task = asyncio.create_task(
+                _session_index_prune_janitor_loop(_session_index_prune_janitor_stop)
+            )
 
-    if _deferred_cancellation_janitor_task is None:
-        _deferred_cancellation_janitor_stop = asyncio.Event()
-        _deferred_cancellation_janitor_task = asyncio.create_task(
-            deferred_cancellation_janitor_loop(_deferred_cancellation_janitor_stop)
-        )
+        if _deferred_cancellation_janitor_task is None:
+            _deferred_cancellation_janitor_stop = asyncio.Event()
+            _deferred_cancellation_janitor_task = asyncio.create_task(
+                deferred_cancellation_janitor_loop(_deferred_cancellation_janitor_stop)
+            )
+
+        if _plisio_renewal_janitor_task is None:
+            _plisio_renewal_janitor_stop = asyncio.Event()
+            _plisio_renewal_janitor_task = asyncio.create_task(
+                plisio_renewal_invoice_janitor_loop(_plisio_renewal_janitor_stop)
+            )
+    else:
+        logger.info("[JANITOR] Skipping janitor task startup on non-leader worker pid=%s", os.getpid())
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global _strategy_expiry_janitor_stop, _strategy_expiry_janitor_task
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
     global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
+    global _plisio_renewal_janitor_stop, _plisio_renewal_janitor_task
 
     if _strategy_expiry_janitor_task is None:
         pass
@@ -673,6 +743,27 @@ async def shutdown_event():
         finally:
             _deferred_cancellation_janitor_task = None
             _deferred_cancellation_janitor_stop = None
+
+    if _plisio_renewal_janitor_stop is not None:
+        _plisio_renewal_janitor_stop.set()
+
+    if _plisio_renewal_janitor_task is not None:
+        try:
+            await asyncio.wait_for(_plisio_renewal_janitor_task, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("[JANITOR] Timed out waiting for Plisio renewal janitor to stop, cancelling task")
+            _plisio_renewal_janitor_task.cancel()
+            try:
+                await _plisio_renewal_janitor_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as exc:
+            logger.error("[JANITOR] Plisio renewal janitor shutdown failed: %s", exc, exc_info=True)
+        finally:
+            _plisio_renewal_janitor_task = None
+            _plisio_renewal_janitor_stop = None
+
+    _release_janitor_leader_lock()
 
 
 # Include routers

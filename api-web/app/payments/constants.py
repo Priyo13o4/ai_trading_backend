@@ -2,7 +2,7 @@ from enum import Enum
 
 class PaymentProviderName(str, Enum):
     RAZORPAY = "razorpay"
-    NOWPAYMENTS = "nowpayments"
+    PLISIO = "plisio"
     MANUAL = "manual"
 
 class PaymentTransactionStatus(str, Enum):
