@@ -12,12 +12,13 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY api-web/ /app/
 
-# Make startup script executable
-RUN chmod +x /app/start.sh
+# Make startup scripts executable
+RUN chmod +x /app/start.sh /app/sse_start.sh /app/docker_entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 
 EXPOSE 8080
 
+ENTRYPOINT ["/app/docker_entrypoint.sh"]
 CMD ["/app/start.sh"]

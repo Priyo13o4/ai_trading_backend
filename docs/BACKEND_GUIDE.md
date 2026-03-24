@@ -42,7 +42,6 @@ pydantic>=2.0.0
 ```bash
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 SUPABASE_AUDIENCE=authenticated
 SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
 

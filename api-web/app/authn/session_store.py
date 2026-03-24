@@ -354,6 +354,31 @@ async def refresh_session_activity(sid: str, session: dict[str, Any]) -> Optiona
     return updated
 
 
+async def persist_session(sid: str, session: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Persist the current session payload immediately while preserving expiry semantics."""
+    now = int(time.time())
+    updated = dict(session)
+
+    exp = int(updated.get("exp") or 0)
+    if exp and exp < now:
+        return None
+
+    if exp:
+        ttl = max(1, exp - now)
+    else:
+        supabase_exp = int(updated.get("supabase_exp") or now)
+        remember_me = bool(updated.get("remember_me"))
+        ttl = _compute_ttl_seconds(now=now, supabase_exp=supabase_exp, remember_me=remember_me)
+        updated["exp"] = now + ttl
+
+    pipe = SESSION_REDIS.pipeline()
+    pipe.setex(_session_key(sid), ttl, json_dumps(updated))
+    if updated.get("user_id"):
+        pipe.zadd(_user_sessions_index_key(updated["user_id"]), {sid: int(updated.get("exp") or (now + ttl))})
+    await pipe.execute()
+    return updated
+
+
 async def delete_all_sessions_for_user(user_id: str) -> int:
     now = int(time.time())
     try:

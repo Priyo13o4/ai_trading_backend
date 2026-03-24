@@ -1,11 +1,84 @@
 import os
 import psycopg
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
-from typing import Any
+from typing import Any, Callable, TypeVar
 from psycopg.rows import dict_row
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+DB_TIMEOUT_RETRY_AFTER_SECONDS = (os.getenv("DB_TIMEOUT_RETRY_AFTER_SECONDS") or "5").strip() or "5"
+
+# ============================================================================
+# ASYNC DB WRAPPER - Bounded ThreadPoolExecutor for non-blocking DB calls
+# ============================================================================
+
+# Max 20 concurrent DB calls per worker to prevent overload and unbounded thread explosion
+_db_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="db_pool")
+
+T = TypeVar("T")
+
+
+async def async_db(func: Callable[[], T], timeout: float = 5.0) -> T:
+    """
+    Execute a synchronous Supabase call non-blocking with strict timeout.
+
+    This wrapper prevents blocking the async event loop when calling
+    synchronous Supabase .execute() methods. It runs the blocking call
+    in a bounded thread pool with a strict timeout.
+
+    Args:
+        func: Callable that calls supabase.table(...).execute() or similar
+        timeout: Strict timeout in seconds (default 5.0, max recommended)
+
+    Returns:
+        Result from func()
+
+    Raises:
+        HTTPException(503): If the database call times out
+        HTTPException(500): If the database call fails
+
+    Example:
+        # BEFORE (blocking):
+        result = supabase.table("users").select("*").execute()
+
+        # AFTER (non-blocking):
+        result = await async_db(lambda: supabase.table("users").select("*").execute())
+
+    Security:
+        - Bounded thread pool prevents unbounded thread explosion
+        - Timeout prevents hanging connections from exhausting pool
+        - All exceptions are logged and re-raised appropriately
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_db_executor, func),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.error("DB call exceeded %s second timeout", timeout)
+        raise HTTPException(
+            status_code=503,
+            detail="Database timeout",
+            headers={"Retry-After": DB_TIMEOUT_RETRY_AFTER_SECONDS},
+        )
+    except Exception as e:
+        # Log the error but let it propagate for proper handling
+        logger.error("DB call failed: %s", str(e)[:200])
+        raise
+
+
+def shutdown_db_executor():
+    """Shutdown the thread pool executor. Call on application shutdown."""
+    _db_executor.shutdown(wait=True, cancel_futures=True)
+
+
+# ============================================================================
+# SUPABASE CLIENT
+# ============================================================================
 
 _db_name = os.getenv('TRADING_BOT_DB') or os.getenv('POSTGRES_DB')
 POSTGRES_DSN = f"host={os.getenv('POSTGRES_HOST')} port={os.getenv('POSTGRES_PORT')} dbname={_db_name} user={os.getenv('POSTGRES_USER')} password={os.getenv('POSTGRES_PASSWORD')}"
@@ -33,9 +106,9 @@ def get_supabase_client():
     global _supabase_client
     if _supabase_client is None:
         url = os.getenv("SUPABASE_PROJECT_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        key = os.getenv("SUPABASE_SECRET_KEY")
         if not url or not key:
-            raise Exception("Missing Supabase credentials (SUPABASE_PROJECT_URL / SUPABASE_SERVICE_ROLE_KEY) in environment")
+            raise Exception("Missing Supabase credentials (SUPABASE_PROJECT_URL and SUPABASE_SECRET_KEY) in environment")
         _supabase_client = create_client(url, key)
     return _supabase_client
 

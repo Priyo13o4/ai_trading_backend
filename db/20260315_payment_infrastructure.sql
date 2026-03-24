@@ -1,6 +1,6 @@
 -- ==========================================================================
 -- Payment Infrastructure Migration — PipFactor
--- Version: 2.0 (Live Mode, Razorpay + NOWPayments subscriptions)
+-- Version: 2.0 (Live Mode, Razorpay + Plisio subscriptions)
 -- Apply via: Supabase SQL Editor (this project does NOT use supabase CLI migrations)
 -- Idempotent: Safe to re-run. Uses IF NOT EXISTS / DO $$ guards throughout.
 -- ==========================================================================
@@ -38,7 +38,7 @@ ALTER TABLE public.profiles
 
 -- --------------------------------------------------------------------------
 -- 3. UPDATE payment_provider CHECK CONSTRAINT
--- Adds: 'nowpayments', 'coinbase'. Retains: 'stripe', 'razorpay', 'manual'.
+-- Adds: 'plisio', 'coinbase'. Retains: 'stripe', 'razorpay', 'manual'.
 -- Removes stale: 'paypal'
 -- --------------------------------------------------------------------------
 DO $$
@@ -55,7 +55,7 @@ BEGIN
     ALTER TABLE public.user_subscriptions
         ADD CONSTRAINT user_subscriptions_payment_provider_check
         CHECK (payment_provider = ANY (
-            ARRAY['razorpay','stripe','coinbase','nowpayments','manual']::text[]
+            ARRAY['razorpay','stripe','coinbase','plisio','manual']::text[]
         ));
 END;
 $$;
@@ -68,7 +68,7 @@ ALTER TABLE public.user_subscriptions
 
 -- --------------------------------------------------------------------------
 -- 5. PROVIDER CUSTOMERS TABLE
--- Maps users to provider-specific customer IDs (Razorpay, NOWPayments, etc.)
+-- Maps users to provider-specific customer IDs (Razorpay, Plisio, etc.)
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.provider_customers (
     id                   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -106,13 +106,13 @@ GRANT ALL ON TABLE public.provider_customers TO service_role;
 -- --------------------------------------------------------------------------
 -- 6. PROVIDER PRICES TABLE
 -- Maps subscription_plans to provider-specific plan/price IDs.
--- Seeded with NOWPayments Core plan ID (confirmed in dashboard screenshot).
+-- Seeded with Plisio Core plan ID.
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.provider_prices (
     id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     plan_id           UUID        NOT NULL REFERENCES public.subscription_plans(id) ON DELETE CASCADE,
     provider          TEXT        NOT NULL,
-    provider_price_id TEXT        NOT NULL,  -- Razorpay plan_id or NOWPayments subscription plan ID
+    provider_price_id TEXT        NOT NULL,  -- Razorpay plan_id or Plisio subscription identifier
     metadata          JSONB       DEFAULT '{}',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT provider_prices_provider_price_unique
@@ -141,12 +141,12 @@ $$;
 REVOKE ALL ON TABLE public.provider_prices FROM PUBLIC, anon, authenticated;
 GRANT ALL ON TABLE public.provider_prices TO service_role;
 
--- Seed: NOWPayments "Core" subscription plan (ID confirmed from dashboard, 21 Mar 2026)
+-- Seed: Plisio "Core" subscription plan
 -- This INSERT is idempotent via the UNIQUE constraint + ON CONFLICT DO NOTHING.
 INSERT INTO public.provider_prices (plan_id, provider, provider_price_id, metadata)
 SELECT
     sp.id,
-    'nowpayments',
+    'plisio',
     '2082535887',
     jsonb_build_object(
         'plan_name', 'Core',
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS public.payment_transactions (
     user_id                     UUID        NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
     subscription_id             UUID        REFERENCES public.user_subscriptions(id) ON DELETE SET NULL,
 
-    provider                    TEXT        NOT NULL,   -- 'razorpay', 'nowpayments', 'stripe'
+    provider                    TEXT        NOT NULL,   -- 'razorpay', 'plisio', 'stripe'
     provider_payment_id         TEXT,                   -- Razorpay payment_id / NP invoice ID
     provider_checkout_session_id TEXT,                  -- stripe checkout session (reserved)
     provider_subscription_id    TEXT,                   -- Razorpay sub_xxx / NP subscription ID
@@ -216,7 +216,7 @@ BEGIN
     ) THEN
         ALTER TABLE public.payment_transactions
             ADD CONSTRAINT payment_transactions_provider_check
-            CHECK (provider IN ('razorpay','nowpayments','stripe','coinbase','manual'));
+            CHECK (provider IN ('razorpay','plisio','stripe','coinbase','manual'));
     END IF;
 END;
 $$;
@@ -286,7 +286,7 @@ GRANT ALL ON TABLE public.payment_transactions TO service_role;
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.webhook_events (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    provider         TEXT        NOT NULL,   -- 'razorpay', 'nowpayments', 'stripe'
+    provider         TEXT        NOT NULL,   -- 'razorpay', 'plisio', 'stripe'
     event_id         TEXT        NOT NULL,   -- provider's unique event/IPN ID
     event_type       TEXT        NOT NULL,   -- 'subscription.charged', 'payment_status', etc.
 
@@ -333,10 +333,10 @@ CREATE TABLE IF NOT EXISTS public.crypto_invoices (
     user_id                UUID        NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
     transaction_id         UUID        REFERENCES public.payment_transactions(id) ON DELETE SET NULL,
 
-    provider               TEXT        NOT NULL,     -- 'nowpayments'
-    provider_payment_id    TEXT        NOT NULL,     -- NOWPayments payment/invoice ID
+    provider               TEXT        NOT NULL,     -- 'plisio'
+    provider_payment_id    TEXT        NOT NULL,     -- Plisio payment/invoice ID
 
-    hosted_url             TEXT,                     -- NOWPayments hosted invoice page URL
+    hosted_url             TEXT,                     -- Plisio hosted invoice page URL
     pay_address            TEXT,                     -- blockchain address
     pay_currency           TEXT,                     -- BTC, ETH, USDT, USDC
     pay_amount             NUMERIC(24, 8),            -- crypto denomination amount
@@ -434,7 +434,7 @@ CREATE TABLE IF NOT EXISTS public.payment_audit_logs (
     previous_state  TEXT,
     new_state       TEXT        NOT NULL,
 
-    trigger_source  TEXT        NOT NULL,  -- 'razorpay_webhook','nowpayments_webhook','admin','cron'
+    trigger_source  TEXT        NOT NULL,  -- 'razorpay_webhook','plisio_webhook','admin','cron'
     trigger_event_id TEXT,                 -- webhook_events.event_id that caused this change
 
     reason          TEXT,

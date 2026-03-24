@@ -1,5 +1,5 @@
 -- ============================================================================
--- Phase 1: Replace NOWPayments provider checks with Plisio
+-- Phase 1: Align provider checks with Plisio-only runtime
 -- Idempotent migration for provider CHECK constraints.
 -- ============================================================================
 
@@ -8,11 +8,11 @@ BEGIN;
 -- Safety remap for historical rows so new constraints can be applied.
 UPDATE public.user_subscriptions
 SET payment_provider = 'manual'
-WHERE payment_provider = 'nowpayments';
+WHERE payment_provider NOT IN ('razorpay','stripe','coinbase','plisio','manual');
 
 UPDATE public.payment_transactions
 SET provider = 'manual'
-WHERE provider = 'nowpayments';
+WHERE provider NOT IN ('razorpay','stripe','coinbase','plisio','manual');
 
 DO $$
 BEGIN

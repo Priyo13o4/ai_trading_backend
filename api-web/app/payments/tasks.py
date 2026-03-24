@@ -1,16 +1,18 @@
 import asyncio
 import logging
 import os
+import random
 import uuid
 from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from app.db import get_supabase_client, get_supabase_project_host, reset_supabase_client
+from app.db import async_db, get_supabase_client, get_supabase_project_host, reset_supabase_client
 from app.payments.constants import PaymentTransactionStatus
 from app.payments.payment_providers.plisio_provider import PlisioProvider
 from app.payments.payment_providers.router import get_provider
-from app.redis_cache import CACHE_REDIS
+from app.payments.webhook_handler import process_claimed_webhook_event
+from app.redis_cache import CACHE_REDIS, safe_unlock
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +22,149 @@ PLISIO_RENEWAL_JANITOR_INTERVAL_SECONDS = 1800  # run every 30 minutes
 PLISIO_RENEWAL_LEAD_TIME_HOURS = 24
 STALE_PENDING_ATTEMPTS_MAX_AGE_HOURS = 72
 STALE_PENDING_ATTEMPTS_MAX_ROWS_PER_TICK = 200
+RAZORPAY_PENDING_MAX_AGE_MINUTES = int((os.getenv("RAZORPAY_PENDING_MAX_AGE_MINUTES") or "15").strip() or "15")
+PLISIO_PENDING_MAX_AGE_MINUTES = int((os.getenv("PLISIO_PENDING_MAX_AGE_MINUTES") or "25").strip() or "25")
+PLISIO_PENDING_TTL_GRACE_SECONDS = int((os.getenv("PLISIO_PENDING_TTL_GRACE_SECONDS") or "120").strip() or "120")
 ACTIVATION_RETRY_MAX_ROWS_PER_TICK = 300
 JANITOR_LEADER_LOCK_RETRY_SECONDS = int((os.getenv("JANITOR_LEADER_LOCK_RETRY_SECONDS") or "5").strip() or "5")
+JANITOR_LEASE_SECONDS = int((os.getenv("JANITOR_LEASE_SECONDS") or "60").strip() or "60")
+DEFERRED_CANCELLATION_JANITOR_MIN_INTERVAL = int(
+    (os.getenv("DEFERRED_CANCELLATION_JANITOR_MIN_INTERVAL_SECONDS") or "300").strip() or "300"
+)
+DEFERRED_CANCELLATION_JANITOR_MAX_INTERVAL = int(
+    (os.getenv("DEFERRED_CANCELLATION_JANITOR_MAX_INTERVAL_SECONDS") or "3600").strip() or "3600"
+)
+PLISIO_RENEWAL_JANITOR_MIN_INTERVAL = int(
+    (os.getenv("PLISIO_RENEWAL_JANITOR_MIN_INTERVAL_SECONDS") or "900").strip() or "900"
+)
+PLISIO_RENEWAL_JANITOR_MAX_INTERVAL = int(
+    (os.getenv("PLISIO_RENEWAL_JANITOR_MAX_INTERVAL_SECONDS") or "1800").strip() or "1800"
+)
+WEBHOOK_WORKER_BATCH_SIZE = int((os.getenv("WEBHOOK_WORKER_BATCH_SIZE") or "25").strip() or "25")
+WEBHOOK_WORKER_LEASE_SECONDS = int((os.getenv("WEBHOOK_WORKER_LEASE_SECONDS") or "300").strip() or "300")
+WEBHOOK_WORKER_BUSY_SLEEP_SECONDS = float(
+    (os.getenv("WEBHOOK_WORKER_BUSY_SLEEP_SECONDS") or "0.25").strip() or "0.25"
+)
+WEBHOOK_WORKER_IDLE_SLEEP_MIN_SECONDS = float(
+    (os.getenv("WEBHOOK_WORKER_IDLE_SLEEP_MIN_SECONDS") or "1.5").strip() or "1.5"
+)
+WEBHOOK_WORKER_IDLE_SLEEP_MAX_SECONDS = float(
+    (os.getenv("WEBHOOK_WORKER_IDLE_SLEEP_MAX_SECONDS") or "12").strip() or "12"
+)
+WEBHOOK_WORKER_IDLE_BACKOFF_MULTIPLIER = float(
+    (os.getenv("WEBHOOK_WORKER_IDLE_BACKOFF_MULTIPLIER") or "1.8").strip() or "1.8"
+)
+WEBHOOK_WORKER_ERROR_SLEEP_SECONDS = float(
+    (os.getenv("WEBHOOK_WORKER_ERROR_SLEEP_SECONDS") or "5").strip() or "5"
+)
+
+_LEASE_RENEW_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+
+_LEASE_RELEASE_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 
-async def _acquire_janitor_tick_lock(lock_name: str, ttl_seconds: int) -> bool:
-    token = uuid.uuid4().hex
-    return bool(await CACHE_REDIS.set(f"janitor:leader:{lock_name}", token, nx=True, ex=ttl_seconds))
+def _jittered_interval(min_seconds: int, max_seconds: int) -> float:
+    lower = max(1, min_seconds)
+    upper = max(lower, max_seconds)
+    return random.uniform(lower, upper)
+
+
+class LeaseManager:
+    """Renewable Redis lease with token-safe renewal and release."""
+
+    def __init__(self, redis_client, lock_name: str, *, lease_seconds: int):
+        self.redis = redis_client
+        self.lock_name = lock_name
+        self.lease_seconds = max(15, lease_seconds)
+        self.heartbeat_seconds = max(5, self.lease_seconds // 2)
+        self.lock_key = f"janitor:leader:{lock_name}"
+        self.fencing_key = f"janitor:fence:{lock_name}"
+        self.token: str | None = None
+        self.fencing_token: int | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._lost = False
+
+    @property
+    def lease_value(self) -> str | None:
+        if not self.token or self.fencing_token is None:
+            return None
+        return f"{self.token}:{self.fencing_token}"
+
+    async def acquire(self) -> bool:
+        self._lost = False
+        self.token = uuid.uuid4().hex
+        self.fencing_token = int(await self.redis.incr(self.fencing_key))
+        lease_value = self.lease_value
+        acquired = bool(await self.redis.set(self.lock_key, lease_value, nx=True, ex=self.lease_seconds))
+        if acquired:
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        else:
+            self.token = None
+            self.fencing_token = None
+        return acquired
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.heartbeat_seconds)
+                if not await self.renew():
+                    self._lost = True
+                    logger.warning("[JANITOR] Lost renewable lease lock=%s fencing=%s", self.lock_name, self.fencing_token)
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._lost = True
+                logger.warning("[JANITOR] Lease heartbeat failed lock=%s err=%s", self.lock_name, exc)
+                return
+
+    async def renew(self) -> bool:
+        lease_value = self.lease_value
+        if not lease_value:
+            return False
+        renewed = await self.redis.eval(
+            _LEASE_RENEW_SCRIPT,
+            1,
+            self.lock_key,
+            lease_value,
+            str(self.lease_seconds),
+        )
+        return bool(renewed)
+
+    async def still_owner(self) -> bool:
+        lease_value = self.lease_value
+        if not lease_value or self._lost:
+            return False
+        current = await self.redis.get(self.lock_key)
+        return current == lease_value
+
+    async def release(self) -> None:
+        heartbeat_task = self._heartbeat_task
+        self._heartbeat_task = None
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        lease_value = self.lease_value
+        if lease_value:
+            try:
+                await self.redis.eval(_LEASE_RELEASE_SCRIPT, 1, self.lock_key, lease_value)
+            except Exception as exc:
+                logger.debug("[JANITOR] Lease release skipped lock=%s err=%s", self.lock_name, exc)
+        self.token = None
+        self.fencing_token = None
 
 
 def _parse_iso_datetime(raw_value: str) -> datetime:
@@ -86,6 +224,77 @@ def _has_pending_renewal_for_cycle(rows: list[dict], cycle_marker: str, order_nu
             return True
     return False
 
+
+async def _claim_ready_webhooks_batch() -> list[dict]:
+    supabase = get_supabase_client()
+    claim_response = await async_db(
+        lambda: supabase.rpc(
+            "claim_ready_webhooks",
+            {
+                "batch_size": WEBHOOK_WORKER_BATCH_SIZE,
+                "lease_seconds": WEBHOOK_WORKER_LEASE_SECONDS,
+            },
+        ).execute()
+    )
+    rows = getattr(claim_response, "data", None) or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+async def webhook_events_worker_loop(stop_event: asyncio.Event) -> None:
+    """Claims ready webhook rows via RPC and processes each claimed event."""
+    idle_sleep_seconds = max(0.1, WEBHOOK_WORKER_IDLE_SLEEP_MIN_SECONDS)
+    idle_sleep_max = max(idle_sleep_seconds, WEBHOOK_WORKER_IDLE_SLEEP_MAX_SECONDS)
+    idle_backoff_multiplier = max(1.1, WEBHOOK_WORKER_IDLE_BACKOFF_MULTIPLIER)
+
+    logger.info(
+        "[WEBHOOK WORKER] started batch_size=%s lease_seconds=%s busy_sleep=%ss idle_min=%ss idle_max=%ss backoff=%s",
+        WEBHOOK_WORKER_BATCH_SIZE,
+        WEBHOOK_WORKER_LEASE_SECONDS,
+        WEBHOOK_WORKER_BUSY_SLEEP_SECONDS,
+        idle_sleep_seconds,
+        idle_sleep_max,
+        idle_backoff_multiplier,
+    )
+
+    while not stop_event.is_set():
+        try:
+            claimed_rows = await _claim_ready_webhooks_batch()
+            if not claimed_rows:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=idle_sleep_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                idle_sleep_seconds = min(idle_sleep_max, idle_sleep_seconds * idle_backoff_multiplier)
+                continue
+
+            idle_sleep_seconds = max(0.1, WEBHOOK_WORKER_IDLE_SLEEP_MIN_SECONDS)
+
+            for event_row in claimed_rows:
+                if stop_event.is_set():
+                    break
+                try:
+                    await process_claimed_webhook_event(event_row)
+                except Exception as exc:
+                    logger.error("[WEBHOOK WORKER] event processing failed: %s", exc, exc_info=True)
+
+            if not stop_event.is_set() and WEBHOOK_WORKER_BUSY_SLEEP_SECONDS > 0:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=WEBHOOK_WORKER_BUSY_SLEEP_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[WEBHOOK WORKER] claim loop failed: %s", exc, exc_info=True)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=WEBHOOK_WORKER_ERROR_SLEEP_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    logger.info("[WEBHOOK WORKER] stopped")
+
 async def _run_deferred_cancellation_tick() -> int:
     """
     Checks the database for subscriptions that are flagged to cancel_at_period_end
@@ -96,12 +305,12 @@ async def _run_deferred_cancellation_tick() -> int:
         supabase = get_supabase_client()
         
         # 1. Fetch active subscriptions flagged for cancellation
-        query = supabase.table("user_subscriptions") \
+        query = await async_db(lambda: supabase.table("user_subscriptions") \
             .select("id, user_id, payment_provider, external_subscription_id, expires_at") \
             .eq("status", "active") \
             .eq("cancel_at_period_end", True) \
             .is_("cancelled_at", "null") \
-            .execute()
+            .execute())
             
         subscriptions = query.data
         if not subscriptions:
@@ -131,20 +340,20 @@ async def _run_deferred_cancellation_tick() -> int:
                     
                     if provider_name == "manual" or not external_id:
                         # Manual subscriptions are just cancelled internally
-                        supabase.table("user_subscriptions").update({
+                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
-                        }).eq("id", sub["id"]).execute()
+                        }).eq("id", sub["id"]).execute())
                         cancelled_count += 1
                         continue
 
                     if provider_name == "plisio":
                         # Plisio path is invoice-based in Phase 1; skip provider-side cancellation calls.
                         logger.info("[DEFERRED CANCEL] Plisio skip provider cancel for sub %s", sub["id"])
-                        supabase.table("user_subscriptions").update({
+                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
-                        }).eq("id", sub["id"]).execute()
+                        }).eq("id", sub["id"]).execute())
                         cancelled_count += 1
                         continue
                         
@@ -155,10 +364,10 @@ async def _run_deferred_cancellation_tick() -> int:
                     if success:
                         # Update DB
                         # Note: status is still 'active', expire_subscriptions cron will flip it to 'expired'
-                        supabase.table("user_subscriptions").update({
+                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
-                        }).eq("id", sub["id"]).execute()
+                        }).eq("id", sub["id"]).execute())
                         
                         logger.info(f"[DEFERRED CANCEL] Successfully executed provider cancellation for sub {sub['id']}")
                         cancelled_count += 1
@@ -177,10 +386,10 @@ async def _run_deferred_cancellation_tick() -> int:
 
 async def deferred_cancellation_janitor_loop(stop_event: asyncio.Event) -> None:
     logger.info("[JANITOR] Deferred cancellation janitor started")
+    lease_mgr = LeaseManager(CACHE_REDIS, "deferred_cancellation", lease_seconds=JANITOR_LEASE_SECONDS)
     while not stop_event.is_set():
         try:
-            leader_ttl = max(30, DEFERRED_CANCELLATION_JANITOR_INTERVAL_SECONDS - 5)
-            if not await _acquire_janitor_tick_lock("deferred_cancellation", leader_ttl):
+            if not await lease_mgr.acquire():
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
@@ -193,23 +402,45 @@ async def deferred_cancellation_janitor_loop(stop_event: asyncio.Event) -> None:
             cancelled = await _run_deferred_cancellation_tick()
             if cancelled > 0:
                 logger.info(f"[JANITOR] Deferred cancellation processed {cancelled} subscriptions")
+            if not await lease_mgr.still_owner():
+                logger.warning(
+                    "[JANITOR] Deferred cancellation janitor lost lease after cancellations fencing=%s",
+                    lease_mgr.fencing_token,
+                )
+                continue
 
             stale_transitioned = await _run_stale_pending_attempts_tick()
             if stale_transitioned > 0:
                 logger.info("[JANITOR] Stale pending attempts transitioned: %s", stale_transitioned)
+            if not await lease_mgr.still_owner():
+                logger.warning(
+                    "[JANITOR] Deferred cancellation janitor lost lease after stale-pending tick fencing=%s",
+                    lease_mgr.fencing_token,
+                )
+                continue
 
             retried_activations = await _run_subscription_activation_retry_tick()
             if retried_activations > 0:
                 logger.info("[JANITOR] Activation retries completed: %s", retried_activations)
+            if not await lease_mgr.still_owner():
+                logger.warning(
+                    "[JANITOR] Deferred cancellation janitor lost lease during tick fencing=%s",
+                    lease_mgr.fencing_token,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("[JANITOR] Deferred cancellation janitor tick failed: %s", exc, exc_info=True)
+        finally:
+            await lease_mgr.release()
 
         try:
             await asyncio.wait_for(
                 stop_event.wait(),
-                timeout=DEFERRED_CANCELLATION_JANITOR_INTERVAL_SECONDS,
+                timeout=_jittered_interval(
+                    DEFERRED_CANCELLATION_JANITOR_MIN_INTERVAL,
+                    DEFERRED_CANCELLATION_JANITOR_MAX_INTERVAL,
+                ),
             )
         except asyncio.TimeoutError:
             continue
@@ -225,12 +456,13 @@ async def _run_stale_pending_attempts_tick() -> int:
     try:
         supabase = get_supabase_client()
         now_utc = datetime.now(timezone.utc)
-        cutoff_dt = now_utc - timedelta(hours=STALE_PENDING_ATTEMPTS_MAX_AGE_HOURS)
+        provider_min_cutoff_seconds = max(60, PLISIO_PENDING_MAX_AGE_MINUTES * 60)
+        cutoff_dt = now_utc - timedelta(seconds=provider_min_cutoff_seconds)
         cutoff_iso = cutoff_dt.isoformat()
 
         stale_candidates = (
-            supabase.table("payment_transactions")
-            .select("id, provider, provider_payment_id, status, created_at, last_provider_event_time")
+            await async_db(lambda: supabase.table("payment_transactions")
+            .select("id, provider, provider_payment_id, status, created_at, last_provider_event_time, metadata")
             .in_(
                 "status",
                 [
@@ -241,10 +473,8 @@ async def _run_stale_pending_attempts_tick() -> int:
             .lt("created_at", cutoff_iso)
             .order("created_at", desc=False)
             .limit(STALE_PENDING_ATTEMPTS_MAX_ROWS_PER_TICK)
-            .execute()
-            .data
-            or []
-        )
+            .execute())
+        ).data or []
 
         if not stale_candidates:
             return 0
@@ -257,14 +487,41 @@ async def _run_stale_pending_attempts_tick() -> int:
             if not tx_id:
                 continue
 
-            # If provider emitted a fresh event recently, leave it for webhooks.
-            last_event_dt = _parse_optional_iso_datetime(tx.get("last_provider_event_time"))
-            if last_event_dt and last_event_dt > cutoff_dt:
-                continue
+            created_dt = _parse_optional_iso_datetime(tx.get("created_at"))
+            age_seconds = (now_utc - created_dt).total_seconds() if created_dt else None
 
             provider_name = str(tx.get("provider") or "").strip().lower()
             provider_payment_id = str(tx.get("provider_payment_id") or "")
             previous_status = str(tx.get("status") or "").strip().lower()
+            metadata = _coerce_metadata(tx.get("metadata"))
+
+            provider_stale_after_seconds = STALE_PENDING_ATTEMPTS_MAX_AGE_HOURS * 3600
+            if provider_name == "razorpay":
+                provider_stale_after_seconds = max(60, RAZORPAY_PENDING_MAX_AGE_MINUTES * 60)
+            if provider_name == "plisio":
+                provider_stale_after_seconds = max(60, PLISIO_PENDING_MAX_AGE_MINUTES * 60)
+                invoice_ttl_minutes = metadata.get("invoice_ttl_minutes")
+                if invoice_ttl_minutes is None:
+                    checkout_data = metadata.get("provider_checkout_data")
+                    if isinstance(checkout_data, dict):
+                        invoice_ttl_minutes = checkout_data.get("expire_min")
+                try:
+                    ttl_minutes = int(invoice_ttl_minutes) if invoice_ttl_minutes is not None else 0
+                except (TypeError, ValueError):
+                    ttl_minutes = 0
+                if ttl_minutes > 0:
+                    provider_stale_after_seconds = max(
+                        provider_stale_after_seconds,
+                        ttl_minutes * 60 + max(0, PLISIO_PENDING_TTL_GRACE_SECONDS),
+                    )
+
+            if age_seconds is not None and age_seconds < provider_stale_after_seconds:
+                continue
+
+            # If provider emitted a fresh event recently, leave it for webhooks.
+            last_event_dt = _parse_optional_iso_datetime(tx.get("last_provider_event_time"))
+            if last_event_dt and last_event_dt > cutoff_dt:
+                continue
 
             target_status = PaymentTransactionStatus.EXPIRED
             resolve_failed = False
@@ -306,7 +563,7 @@ async def _run_stale_pending_attempts_tick() -> int:
                 continue
 
             update_result = (
-                supabase.table("payment_transactions")
+                await async_db(lambda tx_id=tx_id, target_status=target_status, now_iso=now_iso: supabase.table("payment_transactions")
                 .update(
                     {
                         "status": target_status.value,
@@ -322,13 +579,13 @@ async def _run_stale_pending_attempts_tick() -> int:
                         PaymentTransactionStatus.PROCESSING.value,
                     ],
                 )
-                .execute()
+                .execute())
             )
 
             if not update_result.data:
                 continue
 
-            supabase.table("payment_audit_logs").insert(
+            await async_db(lambda tx_id=tx_id, previous_status=previous_status, target_status=target_status: supabase.table("payment_audit_logs").insert(
                 {
                     "transaction_id": tx_id,
                     "entity_type": "payment_transaction",
@@ -341,7 +598,7 @@ async def _run_stale_pending_attempts_tick() -> int:
                         "max_age_hours": STALE_PENDING_ATTEMPTS_MAX_AGE_HOURS,
                     },
                 }
-            ).execute()
+            ).execute())
 
             transitioned += 1
 
@@ -356,16 +613,14 @@ async def _run_subscription_activation_retry_tick() -> int:
     try:
         supabase = get_supabase_client()
         candidates = (
-            supabase.table("payment_transactions")
+            await async_db(lambda: supabase.table("payment_transactions")
             .select("id, user_id, provider, provider_payment_id, subscription_id, metadata, updated_at")
             .eq("status", PaymentTransactionStatus.SUCCEEDED.value)
             .contains("metadata", {"activation_retry_required": True})
             .order("updated_at", desc=True)
             .limit(ACTIVATION_RETRY_MAX_ROWS_PER_TICK)
-            .execute()
-            .data
-            or []
-        )
+            .execute())
+        ).data or []
         if not candidates:
             return 0
 
@@ -389,7 +644,7 @@ async def _run_subscription_activation_retry_tick() -> int:
             claimed_metadata["activation_retry_claimed_at"] = now_iso
 
             claim_result = (
-                supabase.table("payment_transactions")
+                await async_db(lambda tx_id=tx_id, claimed_metadata=claimed_metadata, now_iso=now_iso, tx_updated_at=tx_updated_at: supabase.table("payment_transactions")
                 .update(
                     {
                         "metadata": claimed_metadata,
@@ -400,7 +655,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                 .eq("status", PaymentTransactionStatus.SUCCEEDED.value)
                 .eq("updated_at", tx_updated_at)
                 .contains("metadata", {"activation_retry_required": True})
-                .execute()
+                .execute())
             )
             if not claim_result.data:
                 # Another worker already claimed or updated this row.
@@ -415,13 +670,13 @@ async def _run_subscription_activation_retry_tick() -> int:
                     if not subscription_id:
                         raise ValueError("renewal retry missing subscription_id")
 
-                    renew_response = supabase.rpc(
+                    renew_response = await async_db(lambda subscription_id=subscription_id, tx_id=tx_id: supabase.rpc(
                         "renew_subscription",
                         {
                             "p_subscription_id": subscription_id,
                             "p_payment_id": tx_id,
                         },
-                    ).execute()
+                    ).execute())
                     if renew_response.data is not True:
                         raise ValueError(f"renew_subscription returned non-true: {renew_response.data}")
                 else:
@@ -433,18 +688,18 @@ async def _run_subscription_activation_retry_tick() -> int:
                         uuid.UUID(str(plan_id))
                     except (ValueError, TypeError):
                         plan_lookup = (
-                            supabase.table("subscription_plans")
+                            await async_db(lambda plan_id=plan_id: supabase.table("subscription_plans")
                             .select("id")
                             .eq("name", plan_id)
                             .limit(1)
-                            .execute()
+                            .execute())
                         )
                         if plan_lookup.data:
                             plan_id = plan_lookup.data[0]["id"]
                         else:
                             raise ValueError(f"could not resolve plan name to UUID: {plan_id}")
 
-                    sub_response = supabase.rpc(
+                    sub_response = await async_db(lambda tx_user_id=tx_user_id, plan_id=plan_id, provider_name=provider_name, provider_payment_id=provider_payment_id: supabase.rpc(
                         "create_subscription",
                         {
                             "p_user_id": tx_user_id,
@@ -453,17 +708,17 @@ async def _run_subscription_activation_retry_tick() -> int:
                             "p_external_id": provider_payment_id,
                             "p_trial_days": 0,
                         },
-                    ).execute()
+                    ).execute())
 
                     new_sub_id = sub_response.data
                     if not new_sub_id:
                         raise ValueError("create_subscription returned empty result")
 
-                    supabase.table("payment_transactions").update(
+                    await async_db(lambda new_sub_id=new_sub_id, tx_id=tx_id: supabase.table("payment_transactions").update(
                         {
                             "subscription_id": new_sub_id,
                         }
-                    ).eq("id", tx_id).execute()
+                    ).eq("id", tx_id).execute())
 
                 from app.authn.session_store import update_all_sessions_for_user_perms
 
@@ -482,7 +737,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                 cleared_metadata.pop("activation_retry_claimed_at", None)
 
                 complete_update = (
-                    supabase.table("payment_transactions")
+                    await async_db(lambda tx_id=tx_id, cleared_metadata=cleared_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
                     .update(
                         {
                             "metadata": cleared_metadata,
@@ -492,13 +747,13 @@ async def _run_subscription_activation_retry_tick() -> int:
                     .eq("id", tx_id)
                     .eq("status", PaymentTransactionStatus.SUCCEEDED.value)
                     .contains("metadata", {"activation_retry_claim_token": claim_token})
-                    .execute()
+                    .execute())
                 )
                 if not complete_update.data:
                     logger.info("[ACTIVATION RETRY] Lost claim before completion tx=%s", tx_id)
                     continue
 
-                supabase.table("payment_audit_logs").insert(
+                await async_db(lambda tx_id=tx_id: supabase.table("payment_audit_logs").insert(
                     {
                         "transaction_id": tx_id,
                         "entity_type": "payment_transaction",
@@ -511,7 +766,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                             "retry_required": False,
                         },
                     }
-                ).execute()
+                ).execute())
 
                 retried += 1
             except Exception as exc:
@@ -523,7 +778,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                 failed_metadata.pop("activation_retry_claimed_at", None)
 
                 failed_update = (
-                    supabase.table("payment_transactions")
+                    await async_db(lambda tx_id=tx_id, failed_metadata=failed_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
                     .update(
                         {
                             "metadata": failed_metadata,
@@ -533,13 +788,13 @@ async def _run_subscription_activation_retry_tick() -> int:
                     .eq("id", tx_id)
                     .eq("status", PaymentTransactionStatus.SUCCEEDED.value)
                     .contains("metadata", {"activation_retry_claim_token": claim_token})
-                    .execute()
+                    .execute())
                 )
                 if not failed_update.data:
                     logger.info("[ACTIVATION RETRY] Lost claim before failure write tx=%s", tx_id)
                     continue
 
-                supabase.table("payment_audit_logs").insert(
+                await async_db(lambda tx_id=tx_id, exc=exc: supabase.table("payment_audit_logs").insert(
                     {
                         "transaction_id": tx_id,
                         "entity_type": "payment_transaction",
@@ -553,7 +808,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                             "error": str(exc)[:500],
                         },
                     }
-                ).execute()
+                ).execute())
 
                 logger.warning("[ACTIVATION RETRY] Failed tx=%s: %s", tx_id, exc)
 
@@ -574,13 +829,13 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
             try:
                 supabase = get_supabase_client()
                 query = (
-                    supabase.table("user_subscriptions")
+                    await async_db(lambda: supabase.table("user_subscriptions")
                     .select("id, user_id, plan_id, plan_snapshot, expires_at, payment_provider, auto_renew, status")
                     .eq("payment_provider", "plisio")
                     .eq("status", "active")
                     .eq("auto_renew", True)
                     .is_("cancel_at_period_end", False)
-                    .execute()
+                    .execute())
                 )
                 candidates = query.data or []
                 break
@@ -634,7 +889,7 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
             marker = f"plisio:renewal:{sub_id}:{cycle_marker}"
 
             pending_rows = (
-                supabase.table("payment_transactions")
+                await async_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
                 .select("id, provider_payment_id, metadata")
                 .eq("provider", "plisio")
                 .eq("payment_type", "subscription")
@@ -646,22 +901,21 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                         PaymentTransactionStatus.PROCESSING.value,
                     ],
                 )
-                .execute()
-                .data
-                or []
-            )
+                .execute())
+            ).data or []
             if _has_pending_renewal_for_cycle(pending_rows, cycle_marker, order_number):
                 continue
 
             lock_key = f"janitor:{marker}"
-            lock_acquired = await CACHE_REDIS.set(lock_key, "1", nx=True, ex=7 * 24 * 3600)
+            lock_token = uuid.uuid4().hex
+            lock_acquired = await CACHE_REDIS.set(lock_key, lock_token, nx=True, ex=7 * 24 * 3600)
             if not lock_acquired:
                 continue
 
             try:
                 # Double-check after lock to avoid duplicate inserts when workers race.
                 pending_rows_post_lock = (
-                    supabase.table("payment_transactions")
+                    await async_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
                     .select("id, provider_payment_id, metadata")
                     .eq("provider", "plisio")
                     .eq("payment_type", "subscription")
@@ -673,10 +927,8 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                             PaymentTransactionStatus.PROCESSING.value,
                         ],
                     )
-                    .execute()
-                    .data
-                    or []
-                )
+                    .execute())
+                ).data or []
                 if _has_pending_renewal_for_cycle(pending_rows_post_lock, cycle_marker, order_number):
                     continue
 
@@ -720,7 +972,16 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                     },
                 }
 
-                supabase.table("payment_transactions").insert(tx_data).execute()
+                if tx_data.get("provider_payment_id"):
+                    await async_db(
+                        lambda tx_data=tx_data: supabase.table("payment_transactions")
+                        .upsert(tx_data, on_conflict="provider,provider_payment_id")
+                        .execute()
+                    )
+                else:
+                    await async_db(
+                        lambda tx_data=tx_data: supabase.table("payment_transactions").insert(tx_data).execute()
+                    )
                 created_count += 1
                 logger.info(
                     "[PLISIO RENEWAL] Created renewal invoice user=%s sub=%s cycle=%s order=%s",
@@ -735,7 +996,7 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                     continue
 
                 # Release Redis marker on hard failures so the next janitor tick can retry.
-                await CACHE_REDIS.delete(lock_key)
+                await safe_unlock(CACHE_REDIS, lock_key, lock_token)
                 logger.error("[PLISIO RENEWAL] Failed sub=%s cycle=%s: %s", sub_id, cycle_marker, exc, exc_info=True)
                 continue
 
@@ -747,10 +1008,10 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
 
 async def plisio_renewal_invoice_janitor_loop(stop_event: asyncio.Event) -> None:
     logger.info("[JANITOR] Plisio renewal invoice janitor started")
+    lease_mgr = LeaseManager(CACHE_REDIS, "plisio_renewal", lease_seconds=JANITOR_LEASE_SECONDS)
     while not stop_event.is_set():
         try:
-            leader_ttl = max(30, PLISIO_RENEWAL_JANITOR_INTERVAL_SECONDS - 5)
-            if not await _acquire_janitor_tick_lock("plisio_renewal", leader_ttl):
+            if not await lease_mgr.acquire():
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
@@ -763,15 +1024,25 @@ async def plisio_renewal_invoice_janitor_loop(stop_event: asyncio.Event) -> None
             prepared = await _run_plisio_renewal_invoice_janitor_tick()
             if prepared > 0:
                 logger.info("[JANITOR] Plisio renewal janitor marked %s candidate(s)", prepared)
+            if not await lease_mgr.still_owner():
+                logger.warning(
+                    "[JANITOR] Plisio renewal janitor lost lease during tick fencing=%s",
+                    lease_mgr.fencing_token,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("[JANITOR] Plisio renewal janitor tick failed: %s", exc, exc_info=True)
+        finally:
+            await lease_mgr.release()
 
         try:
             await asyncio.wait_for(
                 stop_event.wait(),
-                timeout=PLISIO_RENEWAL_JANITOR_INTERVAL_SECONDS,
+                timeout=_jittered_interval(
+                    PLISIO_RENEWAL_JANITOR_MIN_INTERVAL,
+                    PLISIO_RENEWAL_JANITOR_MAX_INTERVAL,
+                ),
             )
         except asyncio.TimeoutError:
             continue

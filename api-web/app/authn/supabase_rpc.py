@@ -7,7 +7,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ADMIN_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 
 class SupabaseRpcError(RuntimeError):
@@ -17,13 +17,12 @@ class SupabaseRpcError(RuntimeError):
 async def rpc_get_active_subscription(user_id: str) -> Optional[dict[str, Any]]:
     if not SUPABASE_URL:
         raise SupabaseRpcError("SUPABASE_URL is not set")
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise SupabaseRpcError("SUPABASE_SERVICE_ROLE_KEY is not set")
+    if not SUPABASE_ADMIN_KEY:
+        raise SupabaseRpcError("SUPABASE_SECRET_KEY is not set")
 
     url = SUPABASE_URL.rstrip("/") + "/rest/v1/rpc/get_active_subscription"
     headers = {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_ADMIN_KEY,
         "content-type": "application/json",
     }
 

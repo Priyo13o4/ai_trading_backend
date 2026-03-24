@@ -1,11 +1,12 @@
 import json, asyncio, logging, os, hmac, uuid, fcntl
 from datetime import datetime, timezone
 from typing import Optional
+import psycopg
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .auth import REDIS, log_redis_connection_health
-from .authn.deps import optional_session, require_session
+from .authn.deps import require_session
 from .authn.authz import require_permission
 from .authn.csrf import enforce_csrf
 from .authn.routes import router as auth_router
@@ -14,9 +15,14 @@ from .payments.webhook_handler import webhook_router
 from .authn.session_store import (
     CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
+    SESSION_REDIS,
     prune_stale_session_indexes_scan,
 )
 from .db import (
+    POSTGRES_DSN,
+    async_db,
+    get_supabase_client,
+    shutdown_db_executor,
     get_latest_signal_from_db, 
     get_old_signal_from_db,
     get_news_preview_from_db,
@@ -37,6 +43,7 @@ from .db import (
     insert_trade_outcome,
     update_trade_outcome
 )
+from .redis_pool import RedisPool
 from .utils import json_dumps
 from trading_common.market_data import (
     TIMEFRAME_MAP,
@@ -58,6 +65,7 @@ from .cache import (
 from .payments.tasks import (
     deferred_cancellation_janitor_loop,
     plisio_renewal_invoice_janitor_loop,
+    webhook_events_worker_loop,
 )
 
 # Configure logging with UTC
@@ -141,6 +149,8 @@ _deferred_cancellation_janitor_task: Optional[asyncio.Task] = None
 _deferred_cancellation_janitor_stop: Optional[asyncio.Event] = None
 _plisio_renewal_janitor_task: Optional[asyncio.Task] = None
 _plisio_renewal_janitor_stop: Optional[asyncio.Event] = None
+_webhook_events_worker_task: Optional[asyncio.Task] = None
+_webhook_events_worker_stop: Optional[asyncio.Event] = None
 _janitor_leader_lock_handle = None
 _janitor_is_leader = False
 _events_singleflight_local_locks: dict[str, asyncio.Lock] = {}
@@ -623,6 +633,7 @@ async def startup_event():
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
     global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
     global _plisio_renewal_janitor_stop, _plisio_renewal_janitor_task
+    global _webhook_events_worker_stop, _webhook_events_worker_task
 
     janitor_leader = _try_acquire_janitor_leader_lock()
 
@@ -674,6 +685,12 @@ async def startup_event():
             _plisio_renewal_janitor_task = asyncio.create_task(
                 plisio_renewal_invoice_janitor_loop(_plisio_renewal_janitor_stop)
             )
+
+        if _webhook_events_worker_task is None:
+            _webhook_events_worker_stop = asyncio.Event()
+            _webhook_events_worker_task = asyncio.create_task(
+                webhook_events_worker_loop(_webhook_events_worker_stop)
+            )
     else:
         logger.info("[JANITOR] Skipping janitor task startup on non-leader worker pid=%s", os.getpid())
 
@@ -683,6 +700,7 @@ async def shutdown_event():
     global _session_index_prune_janitor_stop, _session_index_prune_janitor_task
     global _deferred_cancellation_janitor_stop, _deferred_cancellation_janitor_task
     global _plisio_renewal_janitor_stop, _plisio_renewal_janitor_task
+    global _webhook_events_worker_stop, _webhook_events_worker_task
 
     if _strategy_expiry_janitor_task is None:
         pass
@@ -763,11 +781,45 @@ async def shutdown_event():
             _plisio_renewal_janitor_task = None
             _plisio_renewal_janitor_stop = None
 
+    if _webhook_events_worker_stop is not None:
+        _webhook_events_worker_stop.set()
+
+    if _webhook_events_worker_task is not None:
+        try:
+            await asyncio.wait_for(_webhook_events_worker_task, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("[WEBHOOK WORKER] Timed out waiting for worker to stop, cancelling task")
+            _webhook_events_worker_task.cancel()
+            try:
+                await _webhook_events_worker_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as exc:
+            logger.error("[WEBHOOK WORKER] Shutdown failed: %s", exc, exc_info=True)
+        finally:
+            _webhook_events_worker_task = None
+            _webhook_events_worker_stop = None
+
     _release_janitor_leader_lock()
+
+    try:
+        await RedisPool.close_all()
+    except Exception as exc:
+        logger.error("[SHUTDOWN] Redis pool shutdown failed: %s", exc, exc_info=True)
+
+    try:
+        await SESSION_REDIS.aclose()
+    except Exception as exc:
+        logger.error("[SHUTDOWN] Session redis shutdown failed: %s", exc, exc_info=True)
+
+    try:
+        shutdown_db_executor()
+    except Exception as exc:
+        logger.error("[SHUTDOWN] DB executor shutdown failed: %s", exc, exc_info=True)
 
 
 # Include routers
-app.include_router(historical_router)
+app.include_router(historical_router, dependencies=[Depends(require_signals_context)])
 app.include_router(auth_router)
 app.include_router(payments_router)
 app.include_router(webhook_router)
@@ -811,9 +863,89 @@ async def get_symbols():
 # HEALTH CHECK
 # ============================================================================
 
+
+async def _postgres_health_check() -> dict:
+    started_at = time.perf_counter()
+
+    def _probe():
+        with psycopg.connect(POSTGRES_DSN, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+
+    try:
+        await asyncio.to_thread(_probe)
+        return {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        return {"status": "unhealthy", "error": str(exc)[:160]}
+
+
+async def _supabase_health_check() -> dict:
+    project_url = (os.getenv("SUPABASE_PROJECT_URL") or "").strip()
+    service_key = (os.getenv("SUPABASE_SECRET_KEY") or "").strip()
+    if not project_url or not service_key:
+        return {"status": "skipped", "reason": "not_configured"}
+
+    started_at = time.perf_counter()
+    try:
+        supabase = get_supabase_client()
+        await async_db(
+            lambda: supabase.table("subscription_plans").select("id").limit(1).execute(),
+            timeout=2.0,
+        )
+        return {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        return {"status": "unhealthy", "error": str(exc)[:160]}
+
+
 @app.get("/api/health")
-async def health(): 
-    return {"status": "ok", "version": "2.0.0"}
+async def health():
+    checks = {}
+
+    redis_started_at = time.perf_counter()
+    try:
+        await REDIS.ping()
+        checks["redis_app"] = {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - redis_started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        checks["redis_app"] = {"status": "unhealthy", "error": str(exc)[:160]}
+
+    session_started_at = time.perf_counter()
+    try:
+        await SESSION_REDIS.ping()
+        checks["redis_session"] = {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - session_started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        checks["redis_session"] = {"status": "unhealthy", "error": str(exc)[:160]}
+
+    checks["postgres"] = await _postgres_health_check()
+    checks["supabase"] = await _supabase_health_check()
+
+    required_checks = {
+        name: check
+        for name, check in checks.items()
+        if check.get("status") != "skipped"
+    }
+    all_healthy = all(check.get("status") == "healthy" for check in required_checks.values())
+    payload = {
+        "status": "healthy" if all_healthy else "degraded",
+        "version": "2.0.0",
+        "checks": checks,
+    }
+
+    if all_healthy:
+        return payload
+    return JSONResponse(status_code=503, content=payload)
 
 # ============================================================================
 # STRATEGY ENDPOINTS (AI-Generated Trading Recommendations)
@@ -933,8 +1065,7 @@ async def get_news_preview(request: Request):
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/strategies")
-
-async def get_all_active_strategies(pair: str = None, ctx=Depends(require_session)):
+async def get_all_active_strategies(pair: str = None, ctx=Depends(require_signals_context)):
     """Get all active strategies, optionally filtered by pair"""
     logger.info(f"[API] GET /api/strategies?pair={pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1507,7 +1638,7 @@ async def get_current_news(
     response: Response, 
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    ctx=Depends(require_session)
+    ctx=Depends(require_signals_context)
 ):
     """Get current/recent high-impact forex news with pagination"""
     logger.info(f"[API] GET /api/news/current - User: {ctx.get('user_id', 'anonymous')}, limit={limit}, offset={offset}")
@@ -1554,7 +1685,7 @@ async def get_current_news(
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/upcoming")
-async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session)):
+async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_signals_context)):
     """Get upcoming high-impact forex events"""
     logger.info(f"[API] GET /api/news/upcoming - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1743,7 +1874,12 @@ async def get_news_events(
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/markers/{symbol}")
-async def get_news_markers(symbol: str, hours: int = None, min_importance: int = 3):
+async def get_news_markers(
+    symbol: str,
+    hours: int = None,
+    min_importance: int = 3,
+    ctx=Depends(require_signals_context),
+):
     """Get news markers for chart annotations
     
     Args:
@@ -1765,7 +1901,13 @@ async def get_news_markers(symbol: str, hours: int = None, min_importance: int =
     if hours is None:
         hours = 8760  # 365 days
     
-    logger.info(f"GET /api/news/markers/{symbol}?hours={hours}&min_importance={min_importance}")
+    logger.info(
+        "GET /api/news/markers/%s?hours=%s&min_importance=%s - User: %s",
+        symbol,
+        hours,
+        min_importance,
+        ctx.get("user_id", "anonymous"),
+    )
     
     # Try cache first (cache key includes importance filter)
     cache_key = f"{symbol}_{hours}h_imp{min_importance}"

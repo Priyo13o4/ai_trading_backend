@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import logging
 import os
+import time
 import uuid
 from typing import Any
 
@@ -27,14 +28,20 @@ from .session_store import (
     SESSION_COOKIE_NAME,
     delete_session,
     get_session,
+    persist_session,
     refresh_session_activity,
 )
+from .supabase_rpc import rpc_get_active_subscription
 
 logger = logging.getLogger(__name__)
 
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
 SESSION_BINDING_MODE = (os.getenv("SESSION_BINDING_MODE") or "ua_only").strip().lower()
 AUTHDBG_ENABLED = os.getenv("AUTHDBG_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+SESSION_ENTITLEMENT_SYNC_SECONDS = max(
+    30,
+    int(os.getenv("SESSION_ENTITLEMENT_SYNC_SECONDS", "120") or "120"),
+)
 
 
 def _rid(request: Request) -> str:
@@ -56,19 +63,6 @@ def _authdbg(message: str, *args: Any) -> None:
         logger.info("AUTHDBG " + message, *args)
 
 
-def _request_client_ip(request: Request) -> str:
-    if TRUST_PROXY_HEADERS:
-        cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
-        if cf_connecting_ip:
-            return cf_connecting_ip
-        forwarded = (request.headers.get("x-forwarded-for") or "").strip()
-        if forwarded:
-            return forwarded.split(",", 1)[0].strip()
-    if request.client and request.client.host:
-        return request.client.host
-    return ""
-
-
 def _ua_hash(user_agent: str) -> str:
     normalized = (user_agent or "").strip()
     if not normalized:
@@ -87,6 +81,18 @@ def _device_matches(session: dict[str, Any], request: Request) -> bool:
         _ua_hash(request.headers.get("user-agent") or ""), expected_ua
     )
     return ua_ok
+
+
+def _derive_plan_and_permissions_from_subscription(sub: dict[str, Any] | None) -> tuple[str, list[str]]:
+    if sub and sub.get("is_current") and (sub.get("status") in ("active", "trial")):
+        return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+    return ("free", ["dashboard"])
+
+
+def _should_resync_entitlements(session: dict[str, Any]) -> bool:
+    now = int(time.time())
+    last_synced_at = int(session.get("entitlements_synced_at") or 0)
+    return (now - last_synced_at) >= SESSION_ENTITLEMENT_SYNC_SECONDS
 
 
 async def require_session(request: Request) -> dict[str, Any]:
@@ -192,6 +198,33 @@ async def require_session(request: Request) -> dict[str, Any]:
         logger.debug("auth.require_session.refresh_failed sid=%s path=%s", sid, request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # Periodically re-sync entitlements from Supabase so long-lived sessions
+    # naturally pick up trial/subscription expiry without requiring re-login.
+    if _should_resync_entitlements(refreshed) and refreshed.get("user_id"):
+        try:
+            sub = await rpc_get_active_subscription(str(refreshed.get("user_id")))
+            next_plan, next_permissions = _derive_plan_and_permissions_from_subscription(sub)
+            has_drift = (
+                str(refreshed.get("plan") or "free") != str(next_plan)
+                or list(refreshed.get("permissions") or []) != list(next_permissions)
+            )
+
+            refreshed["entitlements_synced_at"] = int(time.time())
+            if has_drift:
+                refreshed["plan"] = next_plan
+                refreshed["permissions"] = next_permissions
+
+            persisted = await persist_session(sid, refreshed)
+            if persisted:
+                refreshed = persisted
+        except Exception:
+            logger.warning(
+                "auth.session.entitlement_resync_failed sid=%s user_id=%s",
+                sid,
+                refreshed.get("user_id") or "",
+                exc_info=True,
+            )
+
     _authdbg(
         "event=session.refresh rid=%s result=ok sid=%s ttl_hint=%s user_tail=%s",
         rid,
@@ -203,17 +236,3 @@ async def require_session(request: Request) -> dict[str, Any]:
     return refreshed
 
 
-async def optional_session(request: Request) -> dict[str, Any] | None:
-    """Best-effort session check. Returns None when not authenticated. Never raises."""
-    sid = request.cookies.get(SESSION_COOKIE_NAME)
-    if not sid:
-        return None
-
-    session = await get_session(sid)
-    if not session:
-        return None
-
-    if not _device_matches(session, request):
-        return None
-
-    return await refresh_session_activity(sid, session)

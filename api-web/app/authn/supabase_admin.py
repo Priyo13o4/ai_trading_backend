@@ -7,7 +7,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ADMIN_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 
 class SupabaseAdminError(RuntimeError):
@@ -19,12 +19,11 @@ class SupabaseAdminError(RuntimeError):
 def _base_headers() -> dict[str, str]:
     if not SUPABASE_URL:
         raise SupabaseAdminError("SUPABASE_URL is not set")
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise SupabaseAdminError("SUPABASE_SERVICE_ROLE_KEY is not set")
+    if not SUPABASE_ADMIN_KEY:
+        raise SupabaseAdminError("SUPABASE_SECRET_KEY is not set")
 
     return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_ADMIN_KEY,
         "content-type": "application/json",
     }
 

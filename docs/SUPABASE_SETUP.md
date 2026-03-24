@@ -158,7 +158,6 @@ Create/update `ai-trading_frontend/.env.development`:
 ```bash
 # Supabase Configuration
 VITE_SUPABASE_URL=https://xxxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJhbG...your-anon-key
 
 # API Configuration
 VITE_API_BASE_URL=http://localhost:8080
@@ -169,7 +168,6 @@ Create `ai-trading_frontend/.env.production`:
 ```bash
 # Production Supabase Configuration
 VITE_SUPABASE_URL=https://xxxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJhbG...your-anon-key
 
 # Production API
 VITE_API_BASE_URL=https://api.pipfactor.com
@@ -182,7 +180,6 @@ Create/update `ai_trading_bot/.env`:
 ```bash
 # Supabase Configuration (NEVER commit service_role key!)
 SUPABASE_URL=https://xxxxx.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=eyJhbG...your-service-role-key
 SUPABASE_ANON_KEY=eyJhbG...your-anon-key
 
 # Database (if using direct connection)

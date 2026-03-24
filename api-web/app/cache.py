@@ -4,6 +4,7 @@ Creates service-specific Redis client using shared utilities.
 Provides cache utilities for web service needs.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -177,10 +178,33 @@ class PubSubManager:
         return pubsub
 
 
+class MutationGatedPublisher:
+    """Skip duplicate SSE publishes when the payload has not changed."""
+
+    def __init__(self):
+        self._last_hashes: Dict[str, str] = {}
+
+    @staticmethod
+    def _compute_hash(data: str) -> str:
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    def publish_if_changed(self, channel: str, payload: Dict[str, Any]) -> bool:
+        serialized = json_dumps(payload)
+        payload_hash = self._compute_hash(serialized)
+        if self._last_hashes.get(channel) == payload_hash:
+            return False
+
+        self._last_hashes[channel] = payload_hash
+        redis_client.publish(channel, serialized)
+        return True
+
+
+_mutation_gated_publisher = MutationGatedPublisher()
+
+
 def _publish_payload(channel: str, payload: Dict[str, Any]) -> bool:
     try:
-        redis_client.publish(channel, json_dumps(payload))
-        return True
+        return _mutation_gated_publisher.publish_if_changed(channel, payload)
     except Exception as e:
         logger.error(f"PubSub publish error: {e}")
         return False

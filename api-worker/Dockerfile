@@ -16,9 +16,12 @@ COPY api-worker/app/ /app/app/
 # Worker scripts
 COPY api-worker/scripts/ /app/scripts/
 COPY api-worker/worker_start.sh /app/worker_start.sh
+COPY api-web/startup_check.py /app/startup_check.py
+COPY api-web/docker_entrypoint.sh /app/docker_entrypoint.sh
 
-RUN chmod +x /app/worker_start.sh
+RUN chmod +x /app/worker_start.sh /app/docker_entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1
 
+ENTRYPOINT ["/app/docker_entrypoint.sh"]
 CMD ["/app/worker_start.sh"]

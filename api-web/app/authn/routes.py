@@ -27,6 +27,7 @@ from .session_store import (
     list_active_sessions_for_user,
     public_session_id,
     refresh_session_activity,
+    persist_session,
     invalidate_perms,
     invalidate_profile_cache,
     put_replay_guard_once,
@@ -129,6 +130,10 @@ COOKIE_SAMESITE = _env_cookie_samesite("COOKIE_SAMESITE", "lax")
 COOKIE_DOMAIN = (os.getenv("COOKIE_DOMAIN") or "").strip().lstrip(".")
 TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", False)
 SESSION_BINDING_MODE = (os.getenv("SESSION_BINDING_MODE") or "ua_only").strip().lower()
+SESSION_ENTITLEMENT_SYNC_SECONDS = max(
+    30,
+    int(os.getenv("SESSION_ENTITLEMENT_SYNC_SECONDS", "120") or "120"),
+)
 AUTHDBG_ENABLED = _env_bool("AUTHDBG_ENABLED", False)
 # Secure-by-default: require signed invalidation webhooks unless explicitly disabled.
 AUTH_INVALIDATION_USE_SIGNED = _env_bool("AUTH_INVALIDATION_USE_SIGNED", True)
@@ -458,6 +463,18 @@ def _parse_remember_me_flag(body: dict[str, Any]) -> bool:
     return False
 
 
+def _derive_plan_and_permissions_from_subscription(sub: dict[str, Any] | None) -> tuple[str, list[str]]:
+    if sub and sub.get("is_current") and (sub.get("status") in ("active", "trial")):
+        return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+    return ("free", ["dashboard"])
+
+
+def _should_resync_entitlements(session: dict[str, Any]) -> bool:
+    now = int(time.time())
+    last_synced_at = int(session.get("entitlements_synced_at") or 0)
+    return (now - last_synced_at) >= SESSION_ENTITLEMENT_SYNC_SECONDS
+
+
 async def _require_session(request: Request) -> dict[str, Any]:
     rid = _rid(request)
     sid = request.cookies.get(SESSION_COOKIE_NAME)
@@ -525,6 +542,31 @@ async def _require_session(request: Request) -> dict[str, Any]:
             _sid_hash(sid),
         )
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    if _should_resync_entitlements(refreshed) and refreshed.get("user_id"):
+        try:
+            sub = await rpc_get_active_subscription(str(refreshed.get("user_id")))
+            next_plan, next_permissions = _derive_plan_and_permissions_from_subscription(sub)
+            has_drift = (
+                str(refreshed.get("plan") or "free") != str(next_plan)
+                or list(refreshed.get("permissions") or []) != list(next_permissions)
+            )
+
+            refreshed["entitlements_synced_at"] = int(time.time())
+            if has_drift:
+                refreshed["plan"] = next_plan
+                refreshed["permissions"] = next_permissions
+
+            persisted = await persist_session(sid, refreshed)
+            if persisted:
+                refreshed = persisted
+        except Exception:
+            logger.warning(
+                "auth.session.entitlement_resync_failed sid=%s user_id=%s",
+                sid,
+                refreshed.get("user_id") or "",
+                exc_info=True,
+            )
 
     _authdbg(
         "event=routes.require_session.allowed rid=%s sid=%s user_tail=%s",
@@ -689,12 +731,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
                 exc,
             )
 
-        if sub and sub.get("is_current") and (sub.get("status") in ("active", "trial")):
-            plan = sub.get("plan_name") or "unknown"
-            permissions = ["dashboard", "signals"]
-        else:
-            plan = (sub.get("plan_name") if sub else None) or "free"
-            permissions = ["dashboard"]
+        plan, permissions = _derive_plan_and_permissions_from_subscription(sub)
 
         await set_cached_perms(
             user_id,
@@ -1095,8 +1132,7 @@ async def auth_invalidate_user(request: Request) -> dict[str, Any]:
         # Graceful refresh
         try:
             sub = await rpc_get_active_subscription(user_id)
-            plan = sub.get("plan_id") or "free"
-            permissions = sub.get("permissions") or []
+            plan, permissions = _derive_plan_and_permissions_from_subscription(sub)
             
             updated = await update_all_sessions_for_user_perms(user_id, plan, permissions)
             logger.info("auth.invalidated event=graceful_refresh user=%s sessions_updated=%s plan=%s", user_id, updated, plan)

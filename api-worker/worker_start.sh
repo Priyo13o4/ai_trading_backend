@@ -8,6 +8,13 @@ echo "================================"
 echo "AI Trading Bot Worker - Starting"
 echo "================================"
 
+if [[ "${STARTUP_GATE_COMPLETED:-0}" != "1" ]]; then
+	export STARTUP_CHECK_ROLE="${STARTUP_CHECK_ROLE:-api-worker}"
+	echo "[WORKER_START] Startup gate not marked as completed; running fallback gate for role: ${STARTUP_CHECK_ROLE}"
+	python /app/startup_check.py
+	export STARTUP_GATE_COMPLETED=1
+fi
+
 ENABLE_SCHEDULER="${WORKER_ENABLE_SCHEDULER:-true}"
 SCHEDULER_REQUIRED="${WORKER_SCHEDULER_REQUIRED:-true}"
 SCHEDULER_PID=""

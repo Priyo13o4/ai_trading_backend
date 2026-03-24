@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from plisio import PlisioAioClient
 import plisio as plisio_sdk
 
-from app.db import get_supabase_client
+from app.db import get_supabase_client, async_db
 from app.payments.constants import PaymentTransactionStatus
 from app.payments.payment_providers.base import PaymentProvider
 
@@ -164,26 +164,26 @@ class PlisioProvider(PaymentProvider):
         except (ValueError, TypeError):
             plan_query = plan_query.eq("name", plan_id)
 
-        plan_res = plan_query.execute()
+        plan_res = await async_db(lambda: plan_query.execute())
         if not plan_res.data:
             raise HTTPException(status_code=404, detail=f"Active subscription plan not found: {plan_id}")
         plan_row = plan_res.data[0]
         resolved_plan_name = str(plan_row.get("name") or plan_id)
 
-        profile_res = (
+        profile_res = await async_db(lambda user_id=user_id: (
             supabase.table("profiles")
             .select("email")
             .eq("id", user_id)
             .limit(1)
             .execute()
-        )
+        ))
         user_email = profile_res.data[0].get("email") if profile_res.data else None
 
         plan_amount_usd = float(Decimal(str(plan_row.get("price_usd") or 0)).quantize(Decimal("0.01")))
         if plan_amount_usd <= 0:
             raise ValueError(f"Invalid USD amount configured for plan {plan_id}")
 
-        effective_source_amount_usd = self.default_source_amount_usd
+        effective_source_amount_usd = plan_amount_usd
 
         base_callback = self.callback_url or (os.getenv("API_BASE_URL", "").rstrip("/") + "/api/webhooks/plisio")
         if not base_callback or not self._is_absolute_http_url(base_callback):

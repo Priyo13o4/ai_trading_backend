@@ -9,7 +9,7 @@ from dateutil import parser
 from typing import Dict, Any, Optional
 from fastapi import HTTPException
 
-from app.db import get_supabase_client
+from app.db import get_supabase_client, async_db
 from app.payments.payment_providers.base import PaymentProvider
 from app.payments.constants import PaymentTransactionStatus
 
@@ -37,16 +37,15 @@ class RazorpayProvider(PaymentProvider):
         try:
             supabase = get_supabase_client()
             now_iso = datetime.utcnow().isoformat()
-            sub_rows = (
+            result = await async_db(lambda user_id=user_id, now_iso=now_iso: (
                 supabase.table("user_subscriptions")
                 .select("status, expires_at, cancel_at_period_end")
                 .eq("user_id", user_id)
                 .in_("status", ["trial", "active"])
                 .gt("expires_at", now_iso)
                 .execute()
-                .data
-                or []
-            )
+            ))
+            sub_rows = result.data or []
 
             trial_start_at: Optional[int] = None
             resubscribe_start_at: Optional[int] = None
@@ -110,8 +109,9 @@ class RazorpayProvider(PaymentProvider):
             target_plan_id = rzp_plan_id 
             plan_details = self.client.plan.fetch(target_plan_id)
             currency = plan_details.get("item", {}).get("currency", "INR")
-            # Razorpay amount is in paise, so 50000 = INR 500.00
-            raw_amount = plan_details.get("item", {}).get("amount", 0)
+            # Razorpay amount is in minor units (paise for INR).
+            raw_amount = int(plan_details.get("item", {}).get("amount", 0) or 0)
+            decimal_amount = float(raw_amount) / 100.0
         except Exception as e:
             logger.error(f"Could not fetch Razorpay plan details: {e}")
             raise HTTPException(status_code=500, detail="Failed to fetch Razorpay plan configuration")
@@ -143,10 +143,11 @@ class RazorpayProvider(PaymentProvider):
                     "subscription_id": subscription["id"],
                     "key_id": self.key_id,
                     "currency": currency,
+                    "amount_minor": raw_amount,
                     "short_url": short_url,
                 },
                 "provider_payment_id": subscription["id"],
-                "amount": raw_amount,
+                "amount": decimal_amount,
                 "currency": currency,
             }
         except Exception as e:

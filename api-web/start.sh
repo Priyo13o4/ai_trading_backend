@@ -1,16 +1,25 @@
 #!/bin/bash
 # Startup script for trading bot API (web only)
 
+set -euo pipefail
+
 echo "================================"
 echo "AI Trading Bot API - Starting"
 echo "================================"
 
-# Default to MT5-only ingestion unless explicitly overridden.
-if [ -z "$DATA_SOURCE" ]; then
-	export DATA_SOURCE="MT5"
+if [[ "${STARTUP_GATE_COMPLETED:-0}" != "1" ]]; then
+    export STARTUP_CHECK_ROLE="${STARTUP_CHECK_ROLE:-api-web}"
+    echo "[START] Startup gate not marked as completed; running fallback gate for role: ${STARTUP_CHECK_ROLE}"
+    python /app/startup_check.py
+    export STARTUP_GATE_COMPLETED=1
 fi
-if [ -z "$MT5_INGEST_ENABLE" ]; then
-	export MT5_INGEST_ENABLE="true"
+
+# Default to MT5-only ingestion unless explicitly overridden.
+if [ -z "${DATA_SOURCE:-}" ]; then
+    export DATA_SOURCE="MT5"
+fi
+if [ -z "${MT5_INGEST_ENABLE:-}" ]; then
+    export MT5_INGEST_ENABLE="true"
 fi
 
 # Write a gunicorn config that suppresses noisy health-check access log lines.
@@ -56,6 +65,7 @@ echo "Starting FastAPI server (web only)..."
 # short-lived REST requests. (2 x cores) + 1 is the gunicorn-recommended rule.
 # We default to 4 which is safe on a 2-core machine.
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-4}"
+GUNICORN_LOG_LEVEL="${GUNICORN_LOG_LEVEL:-info}"
 
 exec gunicorn -w "$GUNICORN_WORKERS" -k uvicorn.workers.UvicornWorker \
 	--bind 0.0.0.0:8080 \

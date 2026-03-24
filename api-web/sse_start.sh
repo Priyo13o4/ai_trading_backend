@@ -3,9 +3,18 @@
 # Uses raw Uvicorn — no Gunicorn needed because the entire workload is I/O-bound async.
 # A single Uvicorn process can hold 10,000+ concurrent SSE connections.
 
+set -euo pipefail
+
 echo "================================"
 echo "PipFactor SSE Service - Starting"
 echo "================================"
+
+if [[ "${STARTUP_GATE_COMPLETED:-0}" != "1" ]]; then
+    export STARTUP_CHECK_ROLE="${STARTUP_CHECK_ROLE:-api-sse}"
+    echo "[SSE_START] Startup gate not marked as completed; running fallback gate for role: ${STARTUP_CHECK_ROLE}"
+    python /app/startup_check.py
+    export STARTUP_GATE_COMPLETED=1
+fi
 
 # How many Uvicorn processes to run.
 # Default: 1 (pure async I/O; scale up only when connection count demands it).

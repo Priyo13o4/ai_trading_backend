@@ -22,10 +22,14 @@ import os
 import time
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from .authn.session_store import SESSION_REDIS
 from .authn.deps import require_session
-from .sse import router as sse_router, _sse_auth
+from .redis_cache import CACHE_REDIS
+from .redis_pool import RedisPool
+from .sse import router as sse_router, _sse_auth, startup_sse_resources, shutdown_sse_resources
 
 logging.Formatter.converter = time.gmtime
 logging.basicConfig(
@@ -112,7 +116,37 @@ app.include_router(sse_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "api-sse"}
+    checks = {}
+
+    app_redis_started_at = time.perf_counter()
+    try:
+        await CACHE_REDIS.ping()
+        checks["redis_app"] = {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - app_redis_started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        checks["redis_app"] = {"status": "unhealthy", "error": str(exc)[:160]}
+
+    session_started_at = time.perf_counter()
+    try:
+        await SESSION_REDIS.ping()
+        checks["redis_session"] = {
+            "status": "healthy",
+            "latency_ms": round((time.perf_counter() - session_started_at) * 1000, 2),
+        }
+    except Exception as exc:
+        checks["redis_session"] = {"status": "unhealthy", "error": str(exc)[:160]}
+
+    all_healthy = all(check.get("status") == "healthy" for check in checks.values())
+    payload = {
+        "status": "healthy" if all_healthy else "degraded",
+        "service": "api-sse",
+        "checks": checks,
+    }
+    if all_healthy:
+        return payload
+    return JSONResponse(status_code=503, content=payload)
 
 
 @app.on_event("startup")
@@ -120,3 +154,27 @@ async def startup():
     logger.info("=" * 60)
     logger.info("api-sse SSE service starting (PID %s)", os.getpid())
     logger.info("=" * 60)
+    await startup_sse_resources()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    try:
+        await shutdown_sse_resources()
+    except Exception as exc:
+        logger.error("api-sse SSE resource shutdown failed: %s", exc, exc_info=True)
+
+    try:
+        await RedisPool.close_all()
+    except Exception as exc:
+        logger.error("api-sse Redis pool shutdown failed: %s", exc, exc_info=True)
+
+    try:
+        await CACHE_REDIS.aclose()
+    except Exception as exc:
+        logger.error("api-sse cache redis shutdown failed: %s", exc, exc_info=True)
+
+    try:
+        await SESSION_REDIS.aclose()
+    except Exception as exc:
+        logger.error("api-sse session redis shutdown failed: %s", exc, exc_info=True)

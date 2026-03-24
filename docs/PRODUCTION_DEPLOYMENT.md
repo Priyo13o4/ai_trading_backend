@@ -44,7 +44,6 @@ VITE_API_BASE_URL=https://api.pipfactor.com
 
 # Supabase
 VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key-here
 
 # Optional: Analytics
 VITE_GA_TRACKING_ID=G-XXXXXXXXXX
@@ -57,7 +56,6 @@ Create in `ai_trading_bot/`:
 ```bash
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_JWT_SECRET=your-jwt-secret
 
