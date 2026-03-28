@@ -1,0 +1,65 @@
+# ---- OS / Editor ----
+.DS_Store
+.AppleDouble
+.LSOverride
+
+.vscode/
+.idea/
+
+# ---- Secrets / Env files ----
+# Ignore all env files everywhere...
+.env
+**/.env
+.env.*
+**/.env.*
+# ...but keep template examples tracked
+!.env.example
+!**/.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+ENV/
+
+build/
+dist/
+*.egg-info/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+.ipynb_checkpoints/
+
+# ---- Logs / PIDs ----
+*.log
+*.pid
+uvicorn.pid
+
+# ---- Docker / Local runtime data ----
+# Postgres/TimescaleDB & Redis data volumes (must never be committed)
+volumes/
+redisdata/
+pgdata/
+
+# ---- Scraper outputs / generated data ----
+**/scraped_data/
+
+# ---- Local databases ----
+*.sqlite
+*.sqlite3
+*.db
+
+# ---- Node (occasionally present in subprojects) ----
+node_modules/
+*.tsbuildinfo
+
+# ---- Misc ----
+.DS_Store?
