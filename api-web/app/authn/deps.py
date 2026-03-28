@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -84,8 +85,24 @@ def _device_matches(session: dict[str, Any], request: Request) -> bool:
 
 
 def _derive_plan_and_permissions_from_subscription(sub: dict[str, Any] | None) -> tuple[str, list[str]]:
-    if sub and sub.get("is_current") and (sub.get("status") in ("active", "trial")):
+    if not sub:
+        return ("free", ["dashboard"])
+
+    if sub.get("is_current") and (sub.get("status") in ("active", "trial")):
         return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+
+    free_access_until_raw = sub.get("free_access_until")
+    pause_confirmed = bool(sub.get("pause_confirmed"))
+    if pause_confirmed and free_access_until_raw:
+        try:
+            free_access_until = datetime.fromisoformat(str(free_access_until_raw).replace("Z", "+00:00"))
+            if free_access_until.tzinfo is None:
+                free_access_until = free_access_until.replace(tzinfo=timezone.utc)
+            if free_access_until > datetime.now(timezone.utc):
+                return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+        except ValueError:
+            pass
+
     return ("free", ["dashboard"])
 
 

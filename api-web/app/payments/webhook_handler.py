@@ -14,6 +14,8 @@ from app.notifications.dead_letter import notify_dead_letter
 from app.redis_cache import CACHE_REDIS
 from app.payments.payment_providers.router import get_provider
 from app.payments.constants import PaymentTransactionStatus
+from app.referrals.reward_evaluator import evaluate_referral_reward
+from app.referrals.reward_revocation import revoke_referral_reward_on_refund
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +27,6 @@ WEBHOOK_PROCESSING_LEASE_SECONDS = int((os.getenv("WEBHOOK_PROCESSING_LEASE_SECO
 def _plisio_debug(msg: str, *args: object) -> None:
     if AUTHDBG_ENABLED:
         logger.info(msg, *args)
-
-
-def _is_unique_webhook_event_error(exc: Exception) -> bool:
-    code = getattr(exc, "code", None)
-    if code is not None and str(code) == "23505":
-        return True
-
-    msg = str(exc).lower()
-    if "23505" in msg or "duplicate key" in msg or "already exists" in msg:
-        return True
-
-    args = getattr(exc, "args", ()) or ()
-    for arg in args:
-        if "23505" in str(arg):
-            return True
-    return False
 
 
 def _normalize_upper(value: Any) -> str:
@@ -431,6 +417,10 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
             and previous_status == PaymentTransactionStatus.EXPIRED.value
             and new_status == PaymentTransactionStatus.SUCCEEDED
         )
+        allow_refund_on_terminal = (
+            new_status == PaymentTransactionStatus.REFUNDED
+            and previous_status != PaymentTransactionStatus.REFUNDED.value
+        )
         terminal_statuses = {
             PaymentTransactionStatus.SUCCEEDED.value,
             PaymentTransactionStatus.FAILED.value,
@@ -441,7 +431,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
         status_updated = False
         latest_status = previous_status
 
-        if is_recurring_charge or allow_plisio_late_success or previous_status not in terminal_statuses:
+        if is_recurring_charge or allow_plisio_late_success or allow_refund_on_terminal or previous_status not in terminal_statuses:
             update_result = await async_db(
                 lambda: supabase.table("payment_transactions")
                 .update(
@@ -504,6 +494,15 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                         }
                     ).execute()
                 )
+
+            effective_succeeded = (
+                new_status == PaymentTransactionStatus.SUCCEEDED
+                and latest_status == PaymentTransactionStatus.SUCCEEDED.value
+            )
+            effective_refunded = (
+                new_status == PaymentTransactionStatus.REFUNDED
+                and latest_status == PaymentTransactionStatus.REFUNDED.value
+            )
 
             if new_status == PaymentTransactionStatus.SUCCEEDED and status_updated:
                 tx_metadata = transaction.get("metadata", {})
@@ -683,6 +682,67 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                             ).execute()
                         )
 
+            if effective_succeeded and tx_id and tx_user_id:
+                try:
+                    referral_eval_result = await evaluate_referral_reward(
+                        referred_user_id=tx_user_id,
+                        trigger_payment_id=tx_id,
+                    )
+                    referral_outcome = str(getattr(referral_eval_result, "outcome", "") or "")
+                    referral_id_value = getattr(referral_eval_result, "referral_id", None)
+                    if referral_outcome == "fraud_blocked_duplicate_identity":
+                        logger.warning(
+                            "event=referral_fraud_gate_blocked provider=%s event_id=%s tx_id=%s user_id=%s outcome=%s referral_id=%s",
+                            provider_name,
+                            event_id,
+                            tx_id,
+                            tx_user_id,
+                            referral_outcome,
+                            referral_id_value,
+                        )
+                    logger.info(
+                        "event=referral_reward_evaluation_result provider=%s event_id=%s tx_id=%s user_id=%s outcome=%s referral_id=%s",
+                        provider_name,
+                        event_id,
+                        tx_id,
+                        tx_user_id,
+                        referral_outcome,
+                        referral_id_value,
+                    )
+                except Exception as referral_err:
+                    logger.warning(
+                        "event=referral_reward_evaluation_failed provider=%s event_id=%s tx_id=%s user_id=%s error=%s",
+                        provider_name,
+                        event_id,
+                        tx_id,
+                        tx_user_id,
+                        str(referral_err)[:500],
+                    )
+
+            if effective_refunded and tx_id:
+                try:
+                    refund_revocation_result = await revoke_referral_reward_on_refund(
+                        trigger_payment_id=tx_id,
+                        refund_trigger_event_id=event_id,
+                    )
+                    logger.info(
+                        "event=refund_revocation_result provider=%s event_id=%s tx_id=%s outcome=%s reward_id=%s previous_status=%s",
+                        provider_name,
+                        event_id,
+                        tx_id,
+                        refund_revocation_result.outcome,
+                        refund_revocation_result.reward_id,
+                        refund_revocation_result.previous_status,
+                    )
+                except Exception as revoke_err:
+                    logger.warning(
+                        "event=refund_revocation_failed provider=%s event_id=%s tx_id=%s error=%s",
+                        provider_name,
+                        event_id,
+                        tx_id,
+                        str(revoke_err)[:500],
+                    )
+
         await _mark_webhook_processed(supabase, provider_name, event_id)
         await _set_webhook_cache_hint(redis_key)
 
@@ -718,60 +778,6 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
             exc,
         )
 
-
-async def _claim_webhook_event(
-    supabase,
-    provider_name: str,
-    event_id: str,
-    *,
-    lease_seconds: int,
-) -> tuple[str, Optional[dict]]:
-    now_iso = _webhook_now().isoformat()
-    claim_result = await async_db(
-        lambda: supabase.table("webhook_events")
-        .update(
-            {
-                "processing": True,
-                "processing_started_at": now_iso,
-            }
-        )
-        .eq("provider", provider_name)
-        .eq("event_id", event_id)
-        .eq("processed", False)
-        .eq("processing", False)
-        .execute()
-    )
-    if claim_result.data:
-        return "claimed", claim_result.data[0]
-
-    existing_event = await _fetch_webhook_event(supabase, provider_name, event_id)
-    if not existing_event:
-        return "missing", None
-    if existing_event.get("processed"):
-        return "processed", existing_event
-    if not _is_webhook_processing_stale(existing_event, lease_seconds):
-        return "busy", existing_event
-
-    reclaim_result = await async_db(
-        lambda: supabase.table("webhook_events")
-        .update(
-            {
-                "processing": True,
-                "processing_started_at": now_iso,
-            }
-        )
-        .eq("provider", provider_name)
-        .eq("event_id", event_id)
-        .eq("processed", False)
-        .eq("processing", True)
-        .lt("processing_started_at", (_webhook_now() - timedelta(seconds=lease_seconds)).isoformat())
-        .execute()
-    )
-    if reclaim_result.data:
-        return "claimed", reclaim_result.data[0]
-
-    existing_event = await _fetch_webhook_event(supabase, provider_name, event_id)
-    return "busy", existing_event
 
 webhook_router = APIRouter()
 

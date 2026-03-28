@@ -119,3 +119,74 @@ class RoutesTurnstileAndIpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("remoteip", payload)
         self.assertEqual(payload["remoteip"], "198.51.100.7")
+
+    async def test_auth_exchange_attempts_referral_capture_with_session_fingerprint_values(self):
+        routes = self._load_routes()
+        request = _make_request({"access_token": "fake-access-token", "remember_me": False})
+        response = Response()
+
+        with mock.patch.object(routes, "rate_limit", new=mock.AsyncMock()):
+            with mock.patch.object(
+                routes,
+                "verify_supabase_access_token",
+                new=mock.AsyncMock(
+                    return_value={
+                        "sub": "11111111-1111-1111-1111-111111111111",
+                        "exp": 1_900_000_000,
+                    }
+                ),
+            ):
+                with mock.patch.object(
+                    routes,
+                    "get_cached_perms",
+                    new=mock.AsyncMock(return_value={"plan": "free", "permissions": []}),
+                ):
+                    with mock.patch.object(routes, "create_session", new=mock.AsyncMock(return_value={"sid": "sid-1", "ttl": 3600, "evicted_count": 0})):
+                        with mock.patch.object(routes, "_session_binding_components", return_value=("ua-hash-1", "203.0.113")):
+                            with mock.patch.object(
+                                routes,
+                                "capture_referral_attribution_from_exchange",
+                                new=mock.AsyncMock(return_value="skip:no_referral_code"),
+                            ) as capture_mock:
+                                result = await routes.auth_exchange(request, response)
+
+        self.assertTrue(result["ok"])
+        capture_mock.assert_awaited_once()
+        _, kwargs = capture_mock.await_args
+        self.assertEqual(kwargs["referred_user_id"], "11111111-1111-1111-1111-111111111111")
+        self.assertEqual(kwargs["user_agent"], "")
+        self.assertEqual(kwargs["ip_address"], "127.0.0.1")
+
+    async def test_auth_exchange_referral_capture_failure_does_not_break_login(self):
+        routes = self._load_routes()
+        request = _make_request({"access_token": "fake-access-token", "remember_me": True})
+        response = Response()
+
+        with mock.patch.object(routes, "rate_limit", new=mock.AsyncMock()):
+            with mock.patch.object(
+                routes,
+                "verify_supabase_access_token",
+                new=mock.AsyncMock(
+                    return_value={
+                        "sub": "22222222-2222-2222-2222-222222222222",
+                        "exp": 1_900_000_000,
+                    }
+                ),
+            ):
+                with mock.patch.object(
+                    routes,
+                    "get_cached_perms",
+                    new=mock.AsyncMock(return_value={"plan": "free", "permissions": []}),
+                ):
+                    with mock.patch.object(routes, "create_session", new=mock.AsyncMock(return_value={"sid": "sid-2", "ttl": 7200, "evicted_count": 0})):
+                        with mock.patch.object(routes, "_session_binding_components", return_value=("ua-hash-2", "198.51.100")):
+                            with mock.patch.object(
+                                routes,
+                                "capture_referral_attribution_from_exchange",
+                                new=mock.AsyncMock(side_effect=RuntimeError("db down")),
+                            ) as capture_mock:
+                                result = await routes.auth_exchange(request, response)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["user_id"], "22222222-2222-2222-2222-222222222222")
+        capture_mock.assert_awaited_once()

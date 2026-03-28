@@ -27,6 +27,8 @@ import redis
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 INDICATOR_SCRIPT = os.path.join(SCRIPTS_ROOT, "calculate_recent_indicators_v2.py")  # v2.0 - DST-safe with HTF checks
+REFERRAL_TRANSITIONS_SCRIPT = os.path.join(SCRIPT_DIR, "referral_reward_transitions.py")
+REFERRAL_PAUSE_RESUME_SCRIPT = os.path.join(SCRIPT_DIR, "referral_pause_resume_worker.py")
 UPDATE_INTERVAL = 300  # 5 minutes in seconds
 _LOCAL_SCHEDULER_LOCK = threading.Lock()
 
@@ -315,6 +317,106 @@ def _sleep_cycle_jitter() -> None:
         time.sleep(jitter)
 
 
+def run_referral_reward_transitions() -> bool:
+    """
+    Run referral reward state transitions (Scope C).
+    
+    Executes as a subprocess to avoid blocking the scheduler.
+    Non-fatal errors are logged but don't disrupt the scheduler.
+    
+    Returns True if successful or skipped, False if critical failure.
+    """
+    log("🎁 Starting referral reward transitions task...")
+    
+    # Check if referral transitions are enabled
+    if not (os.getenv("REFERRAL_REWARD_TRANSITIONS_ENABLED") or "").strip().lower() in {"1", "true", "yes"}:
+        log("⏸️  Referral reward transitions disabled (REFERRAL_REWARD_TRANSITIONS_ENABLED not set)")
+        return True
+    
+    timeout_seconds = int(os.getenv("REFERRAL_TRANSITIONS_TIMEOUT_SECONDS", "60"))
+    
+    try:
+        cmd = [sys.executable, REFERRAL_TRANSITIONS_SCRIPT]
+        proc = subprocess.Popen(cmd)
+        
+        start_time = time.monotonic()
+        while True:
+            if proc.poll() is not None:
+                break
+            
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout_seconds:
+                log(f"⏱️  Referral transitions timed out after {timeout_seconds}s; terminating")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                return False
+            
+            time.sleep(0.5)
+        
+        if proc.returncode == 0:
+            log("✓ Referral reward transitions completed successfully")
+            return True
+        else:
+            log(f"⚠️  Referral transitions exited with code {proc.returncode}")
+            return False
+            
+    except Exception as e:
+        log(f"⚠️  Error running referral transitions: {e}")
+        return False
+
+
+def run_referral_pause_resume_worker() -> bool:
+    """Run Scope E referral pause/resume worker as a subprocess.
+
+    This helper is intentionally non-fatal: scheduler continues even if this
+    task fails so market processing remains uninterrupted.
+    """
+    log("🎁 Starting referral pause/resume task...")
+
+    if not (os.getenv("REFERRAL_PAUSE_RESUME_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes"}:
+        log("⏸️  Referral pause/resume worker disabled (REFERRAL_PAUSE_RESUME_WORKER_ENABLED not set)")
+        return True
+
+    timeout_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_TIMEOUT_SECONDS", "120"))
+
+    try:
+        cmd = [sys.executable, REFERRAL_PAUSE_RESUME_SCRIPT]
+        proc = subprocess.Popen(cmd)
+
+        start_time = time.monotonic()
+        while True:
+            if proc.poll() is not None:
+                break
+
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout_seconds:
+                log(f"⏱️  Referral pause/resume worker timed out after {timeout_seconds}s; terminating")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                return False
+
+            time.sleep(0.5)
+
+        if proc.returncode == 0:
+            log("✓ Referral pause/resume worker completed successfully")
+            return True
+
+        log(f"⚠️  Referral pause/resume worker exited with code {proc.returncode}")
+        return False
+
+    except Exception as e:
+        log(f"⚠️  Error running referral pause/resume worker: {e}")
+        return False
+
+
 def wait_for_next_5min_mark():
     """
     Wait until 1 second after the next 5-minute mark.
@@ -482,6 +584,9 @@ def main():
     log("Waiting for next 5-minute mark before first cycle...")
 
     run_count = 0
+    pause_resume_interval_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_INTERVAL_SECONDS", "21600"))
+    pause_resume_retry_delay_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_RETRY_DELAY_SECONDS", "100"))
+    last_pause_resume_run_monotonic = 0.0
 
     while True:
         try:
@@ -519,6 +624,30 @@ def main():
                 cycle_success = run_indicator_updater(active_lock=cycle_lock, phase="scheduled")
                 if _record_updater_result(cycle_success, f"scheduled cycle #{run_count}"):
                     return 2
+                
+                # Run referral reward transitions after indicator updates (non-blocking)
+                run_referral_reward_transitions()
+
+                # Scope E pause/resume worker executes on slower cadence (default 6h).
+                now_monotonic = time.monotonic()
+                if now_monotonic - last_pause_resume_run_monotonic >= pause_resume_interval_seconds:
+                    worker_ok = run_referral_pause_resume_worker()
+                    if worker_ok:
+                        last_pause_resume_run_monotonic = now_monotonic
+                    else:
+                        retry_delay = max(1, pause_resume_retry_delay_seconds)
+                        if retry_delay >= pause_resume_interval_seconds:
+                            # Run again on the next scheduler cycle when retry delay >= cadence.
+                            last_pause_resume_run_monotonic = now_monotonic - pause_resume_interval_seconds
+                        else:
+                            # Shift last-run backward so next due time is sooner than full cadence.
+                            elapsed_for_retry = pause_resume_interval_seconds - retry_delay
+                            last_pause_resume_run_monotonic = now_monotonic - elapsed_for_retry
+                        log(
+                            "⚠️  Referral pause/resume worker failed; "
+                            f"next retry in ~{retry_delay}s instead of full {pause_resume_interval_seconds}s cadence"
+                        )
+                
             finally:
                 if cycle_lock is not None:
                     try:

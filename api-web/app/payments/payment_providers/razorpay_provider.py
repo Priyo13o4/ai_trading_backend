@@ -1,9 +1,13 @@
+import asyncio
 import hmac
 import hashlib
 import json
 import logging
 import os
+from functools import partial
+
 import razorpay
+import requests
 from datetime import datetime
 from dateutil import parser
 from typing import Dict, Any, Optional
@@ -28,6 +32,109 @@ class RazorpayProvider(PaymentProvider):
             self.client = razorpay.Client(auth=(self.key_id, self.key_secret))
         else:
             self.client = None
+
+    async def _request_subscription_action(
+        self,
+        *,
+        subscription_id: str,
+        action: str,
+        payload: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a direct Razorpay subscription action with optional idempotency key.
+
+        Runs the blocking requests.post call in a thread pool executor to avoid
+        blocking the asyncio event loop (new finding from payment provider audit).
+        """
+        if not self.key_id or not self.key_secret:
+            raise ValueError("Razorpay credentials not configured")
+
+        url = f"https://api.razorpay.com/v1/subscriptions/{subscription_id}/{action}"
+        headers = {"Content-Type": "application/json"}
+        if idempotency_key:
+            headers["X-Razorpay-Idempotency"] = idempotency_key
+
+        # Run the blocking HTTP call in a thread pool to avoid blocking the event loop.
+        loop = asyncio.get_event_loop()
+        _blocking_call = partial(
+            requests.post,
+            url,
+            auth=(self.key_id, self.key_secret),
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+        response = await loop.run_in_executor(None, _blocking_call)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"razorpay_subscription_{action}_failed status={response.status_code} body={response.text[:500]}"
+            )
+
+        return response.json() if response.content else {}
+
+    async def pause_subscription(
+        self,
+        subscription_id: str,
+        pause_at_timestamp: int,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pause a Razorpay subscription and return provider pause metadata."""
+        body = await self._request_subscription_action(
+            subscription_id=subscription_id,
+            action="pause",
+            payload={"pause_at": int(pause_at_timestamp)},
+            idempotency_key=idempotency_key,
+        )
+        pause_payload = body.get("pause") if isinstance(body.get("pause"), dict) else {}
+        pause_id = body.get("pause_id") or body.get("id") or pause_payload.get("id")
+        status = str(body.get("status") or "paused")
+
+        logger.info(
+            "event=referral_pause_attempt outcome=provider_success subscription_id=%s pause_id=%s status=%s",
+            subscription_id,
+            pause_id,
+            status,
+        )
+
+        return {
+            "pause_id": str(pause_id) if pause_id else None,
+            "status": status,
+            "raw": body,
+        }
+
+    async def resume_subscription(
+        self,
+        subscription_id: str,
+        pause_id: Optional[str],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resume a Razorpay subscription and return provider status payload."""
+        payload: Dict[str, Any] = {"resume_at": "now"}
+        if pause_id:
+            payload["pause_id"] = pause_id
+
+        body = await self._request_subscription_action(
+            subscription_id=subscription_id,
+            action="resume",
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+        status = str(body.get("status") or "active")
+
+        logger.info(
+            "event=referral_resume_attempt outcome=provider_success subscription_id=%s pause_id=%s status=%s",
+            subscription_id,
+            pause_id,
+            status,
+        )
+
+        return {
+            "status": status,
+            "raw": body,
+        }
 
     async def _resolve_deferred_start_at(self, user_id: str) -> Optional[int]:
         """

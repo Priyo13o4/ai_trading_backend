@@ -8,12 +8,14 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response
 
 from .csrf import generate_csrf_token
 from .rate_limit_auth import rate_limit
+from .disposable_email import is_disposable_email
 from .session_store import (
     CSRF_COOKIE_NAME,
     SERVER_SESSION_MAX_PER_USER,
@@ -36,8 +38,10 @@ from .session_store import (
     update_all_sessions_for_user_perms,
 )
 from .supabase_admin import SupabaseAdminError, admin_get_user, admin_update_user
+from .supabase_referrals import capture_referral_attribution_from_exchange
 from .supabase_rpc import rpc_get_active_subscription
 from .token_verify import verify_supabase_access_token
+from .trial_policy import apply_trial_policy_for_exchange, extract_device_id
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +353,21 @@ def _request_client_ip(request: Request) -> str:
     return ""
 
 
+def _sanitize_ip_for_debug(raw_ip: str) -> str:
+    ip_text = (raw_ip or "").strip()
+    if not ip_text:
+        return "missing"
+
+    try:
+        parsed_ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return "invalid_[IP redacted for privacy]"
+
+    if parsed_ip.version == 4:
+        return "ipv4_[IP redacted for privacy]"
+    return "ipv6_[IP redacted for privacy]"
+
+
 def _ip_prefix_for_storage(request: Request) -> str:
     raw_ip = _request_client_ip(request)
     if not raw_ip:
@@ -464,8 +483,24 @@ def _parse_remember_me_flag(body: dict[str, Any]) -> bool:
 
 
 def _derive_plan_and_permissions_from_subscription(sub: dict[str, Any] | None) -> tuple[str, list[str]]:
-    if sub and sub.get("is_current") and (sub.get("status") in ("active", "trial")):
+    if not sub:
+        return ("free", ["dashboard"])
+
+    if sub.get("is_current") and (sub.get("status") in ("active", "trial")):
         return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+
+    free_access_until_raw = sub.get("free_access_until")
+    pause_confirmed = bool(sub.get("pause_confirmed"))
+    if pause_confirmed and free_access_until_raw:
+        try:
+            free_access_until = datetime.fromisoformat(str(free_access_until_raw).replace("Z", "+00:00"))
+            if free_access_until.tzinfo is None:
+                free_access_until = free_access_until.replace(tzinfo=timezone.utc)
+            if free_access_until > datetime.now(timezone.utc):
+                return (sub.get("plan_name") or "free", ["dashboard", "signals"])
+        except ValueError:
+            pass
+
     return ("free", ["dashboard"])
 
 
@@ -615,6 +650,8 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         int(enforce_turnstile),
         int(remember_me),
     )
+    cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    xff_first_hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     logger.debug(
         "auth.exchange.start host=%s origin=%s referer=%s enforce_turnstile=%s token_present=%s secure_cookie=%s cookie_domain=%s samesite=%s xf_proto=%s cf_connecting_ip=%s xff=%s",
         _request_host(request),
@@ -626,8 +663,8 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         _cookie_domain_for_request(request) or "<host-only>",
         COOKIE_SAMESITE,
         (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower(),
-        request.headers.get("cf-connecting-ip") or "",
-        (request.headers.get("x-forwarded-for") or "").split(",")[0].strip(),
+        _sanitize_ip_for_debug(cf_connecting_ip),
+        _sanitize_ip_for_debug(xff_first_hop),
     )
     if enforce_turnstile and not turnstile_token:
         logger.warning(
@@ -640,6 +677,53 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    claim_email = claims.get("email") if isinstance(claims.get("email"), str) else ""
+    email_for_disposable_check = claim_email.strip().lower()
+    if not email_for_disposable_check:
+        try:
+            admin_user = await admin_get_user(user_id)
+            admin_email = admin_user.get("email") if isinstance(admin_user, dict) else ""
+            if isinstance(admin_email, str):
+                email_for_disposable_check = admin_email.strip().lower()
+        except SupabaseAdminError:
+            logger.warning(
+                "auth.exchange.disposable_check_skipped user_id=%s reason=admin_user_unavailable",
+                user_id,
+            )
+
+    if email_for_disposable_check and is_disposable_email(email_for_disposable_check):
+        raise HTTPException(
+            status_code=400,
+            detail="Please enter your permanent email address.",
+        )
+
+    device_id = extract_device_id(
+        body=body,
+        header_value=request.headers.get("x-device-id"),
+    )
+    trial_policy_outcome = None
+    try:
+        trial_policy_outcome = await apply_trial_policy_for_exchange(
+            user_id=user_id,
+            device_id=device_id,
+            user_agent=request.headers.get("user-agent") or "",
+            ip_address=_request_client_ip(request),
+        )
+    except Exception as exc:
+        logger.warning(
+            "auth.exchange.trial_policy user_id=%s failed reason=%s",
+            user_id,
+            str(exc)[:200],
+        )
+
+    skip_cached_perms = bool(
+        trial_policy_outcome
+        and trial_policy_outcome.had_active_trial
+        and not trial_policy_outcome.trial_allowed
+    )
+    if skip_cached_perms:
+        await invalidate_perms(user_id)
 
     supabase_exp = int(claims.get("exp") or 0)
     now = int(time.time())
@@ -714,7 +798,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
             _request_host(request),
         )
 
-    perms_cached = await get_cached_perms(user_id)
+    perms_cached = None if skip_cached_perms else await get_cached_perms(user_id)
     if perms_cached:
         plan = perms_cached.get("plan") or "free"
         permissions = perms_cached.get("permissions") or []
@@ -767,6 +851,34 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         int(bool(ua_hash)),
         int(bool(ip_prefix)),
     )
+
+    # Best-effort and idempotent: do not impact auth/session issuance if attribution fails.
+    try:
+        referral_capture_result = await capture_referral_attribution_from_exchange(
+            referred_user_id=str(user_id),
+            claims=claims,
+            user_agent=request.headers.get("user-agent") or "",
+            ip_address=_request_client_ip(request),
+        )
+        if referral_capture_result.startswith("success:"):
+            logger.info(
+                "auth.exchange.referral_capture user_id=%s result=%s",
+                user_id,
+                referral_capture_result,
+            )
+        elif referral_capture_result.startswith("skip:"):
+            logger.info(
+                "auth.exchange.referral_capture user_id=%s %s",
+                user_id,
+                referral_capture_result,
+            )
+    except Exception as exc:
+        logger.warning(
+            "auth.exchange.referral_capture user_id=%s failed reason=%s",
+            user_id,
+            str(exc)[:200],
+        )
+
     _authdbg(
         "event=exchange.session rid=%s user_tail=%s sid=%s ttl=%s rotated_from=%s",
         rid,

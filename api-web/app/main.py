@@ -12,6 +12,7 @@ from .authn.csrf import enforce_csrf
 from .authn.routes import router as auth_router
 from .payments.routes import payments_router
 from .payments.webhook_handler import webhook_router
+from .routes.referrals import referrals_router
 from .authn.session_store import (
     CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -823,6 +824,7 @@ app.include_router(historical_router, dependencies=[Depends(require_signals_cont
 app.include_router(auth_router)
 app.include_router(payments_router)
 app.include_router(webhook_router)
+app.include_router(referrals_router)
 
 # ============================================================================
 # SYMBOLS ENDPOINT (Dynamic symbol list for frontend)
