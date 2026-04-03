@@ -12,26 +12,46 @@ from fastapi import HTTPException
 from plisio import PlisioAioClient
 import plisio as plisio_sdk
 
+from app.observability.debug import debug_log
 from app.db import get_supabase_client, async_db
 from app.payments.constants import PaymentTransactionStatus
 from app.payments.payment_providers.base import PaymentProvider
 
 logger = logging.getLogger(__name__)
 
-AUTHDBG_ENABLED = (os.getenv("AUTHDBG_ENABLED") or "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _plisio_debug(msg: str, *args: object) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info(msg, *args)
+    debug_log(logger, "payments.plisio", msg, *args)
 
 class PlisioProvider(PaymentProvider):
     def __init__(self):
         self.api_key = (os.getenv("PLISIO_API_KEY") or "").strip()
         self.callback_url = (os.getenv("PLISIO_CALLBACK_URL") or "").strip()
+        self.callback_url_local = (os.getenv("PLISIO_CALLBACK_URL_LOCAL") or "").strip()
+        self.callback_url_prod = (os.getenv("PLISIO_CALLBACK_URL_PROD") or "").strip()
         self.crypto_currency = (os.getenv("PLISIO_CRYPTO_CURRENCY") or "USDT").strip().upper()
         self.default_source_amount_usd = self._resolve_default_source_amount_usd()
         self.client = PlisioAioClient(api_key=self.api_key) if self.api_key else None
+
+    @staticmethod
+    def _runtime_environment_name() -> str:
+        for env_name in ("APP_ENV", "AUTH_ENV", "ENVIRONMENT", "FASTAPI_ENV", "ENV"):
+            raw = (os.getenv(env_name) or "").strip()
+            if raw:
+                return raw.lower()
+        return "production"
+
+    def _resolve_callback_base_url(self) -> str:
+        runtime_env = self._runtime_environment_name()
+
+        env_specific_callback = ""
+        if runtime_env in {"local", "development", "dev"}:
+            env_specific_callback = self.callback_url_local
+        elif runtime_env in {"production", "prod"}:
+            env_specific_callback = self.callback_url_prod
+
+        return env_specific_callback or self.callback_url or (
+            os.getenv("API_BASE_URL", "").rstrip("/") + "/api/webhooks/plisio"
+        )
 
     @staticmethod
     def _resolve_default_source_amount_usd() -> float:
@@ -185,9 +205,12 @@ class PlisioProvider(PaymentProvider):
 
         effective_source_amount_usd = plan_amount_usd
 
-        base_callback = self.callback_url or (os.getenv("API_BASE_URL", "").rstrip("/") + "/api/webhooks/plisio")
+        base_callback = self._resolve_callback_base_url()
         if not base_callback or not self._is_absolute_http_url(base_callback):
-            raise ValueError("PLISIO_CALLBACK_URL or API_BASE_URL must be configured")
+            raise ValueError(
+                "Configure one of PLISIO_CALLBACK_URL_LOCAL / PLISIO_CALLBACK_URL_PROD / "
+                "PLISIO_CALLBACK_URL, or set API_BASE_URL"
+            )
         callback_with_json = self._append_json_true(base_callback)
 
         invoice_payload = {

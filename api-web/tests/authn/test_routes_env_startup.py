@@ -16,6 +16,7 @@ class RoutesEnvStartupTests(unittest.TestCase):
         env = {
             "SESSION_REDIS_URL": "redis://localhost:6379/0",
             "REDIS_PASSWORD": "test-password",
+            "APP_ENV": "development",
             "AUTH_ENV": "development",
             "COOKIE_SECURE": "not-a-bool",
             "COOKIE_SAMESITE": "sideways",
@@ -43,6 +44,7 @@ class RoutesEnvStartupTests(unittest.TestCase):
         env = {
             "SESSION_REDIS_URL": "redis://localhost:6379/0",
             "REDIS_PASSWORD": "test-password",
+            "APP_ENV": "production",
             "AUTH_ENV": "production",
             "AUTH_INVALIDATION_USE_SIGNED": "0",
         }
@@ -55,6 +57,7 @@ class RoutesEnvStartupTests(unittest.TestCase):
         env = {
             "SESSION_REDIS_URL": "redis://localhost:6379/0",
             "REDIS_PASSWORD": "test-password",
+            "APP_ENV": "development",
             "AUTH_ENV": "development",
             "AUTH_INVALIDATION_USE_SIGNED": "0",
         }
@@ -63,3 +66,16 @@ class RoutesEnvStartupTests(unittest.TestCase):
             routes = _reload_routes_module()
 
         self.assertFalse(routes.AUTH_INVALIDATION_USE_SIGNED)
+
+    def test_app_env_is_canonical_over_auth_env(self):
+        env = {
+            "SESSION_REDIS_URL": "redis://localhost:6379/0",
+            "REDIS_PASSWORD": "test-password",
+            "APP_ENV": "production",
+            "AUTH_ENV": "development",
+            "AUTH_INVALIDATION_USE_SIGNED": "0",
+        }
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(RuntimeError):
+                _reload_routes_module()

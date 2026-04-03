@@ -10,24 +10,19 @@ All functions are idempotent and safe for repeated polling.
 """
 
 import logging
-import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.db import async_db, get_supabase_client
+from app.observability.debug import debug_log
 
 logger = logging.getLogger(__name__)
 
 
-def _is_debug_enabled() -> bool:
-    return os.getenv("AUTHDBG_ENABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def _debug_log(message: str) -> None:
-    if _is_debug_enabled():
-        logger.info("[REFERRAL_PAUSE_RESUME] %s", message)
+    debug_log(logger, "referrals.pause_resume", "[REFERRAL_PAUSE_RESUME] %s", message)
 
 
 def _now_utc() -> datetime:

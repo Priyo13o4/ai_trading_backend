@@ -8,14 +8,18 @@ import os
 import re
 import time
 import uuid
+import base64
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response
 
+from app.observability.debug import debug_log, is_debug_enabled
+
 from .csrf import generate_csrf_token
 from .rate_limit_auth import rate_limit
-from .disposable_email import is_disposable_email
+from .allowed_email import is_email_allowed
 from .session_store import (
     CSRF_COOKIE_NAME,
     SERVER_SESSION_MAX_PER_USER,
@@ -118,7 +122,8 @@ def _env_cookie_samesite(name: str, default: str = "lax") -> str:
 
 
 def _runtime_environment_name() -> str:
-    for env_name in ("AUTH_ENV", "APP_ENV", "ENVIRONMENT", "FASTAPI_ENV", "ENV"):
+    # APP_ENV is canonical. AUTH_ENV remains as backward-compatible fallback.
+    for env_name in ("APP_ENV", "AUTH_ENV", "ENVIRONMENT", "FASTAPI_ENV", "ENV"):
         raw = (os.getenv(env_name) or "").strip()
         if raw:
             return raw.lower()
@@ -138,7 +143,6 @@ SESSION_ENTITLEMENT_SYNC_SECONDS = max(
     30,
     int(os.getenv("SESSION_ENTITLEMENT_SYNC_SECONDS", "120") or "120"),
 )
-AUTHDBG_ENABLED = _env_bool("AUTHDBG_ENABLED", False)
 # Secure-by-default: require signed invalidation webhooks unless explicitly disabled.
 AUTH_INVALIDATION_USE_SIGNED = _env_bool("AUTH_INVALIDATION_USE_SIGNED", True)
 AUTH_INVALIDATION_TOLERANCE_SECONDS = _env_int(
@@ -146,10 +150,35 @@ AUTH_INVALIDATION_TOLERANCE_SECONDS = _env_int(
     300,
     minimum=1,
 )
+BEFORE_USER_CREATED_HOOK_SECRETS = (
+    os.getenv("BEFORE_USER_CREATED_HOOK_SECRETS")
+    or os.getenv("BEFORE_USER_CREATED_HOOK_SECRET")
+    or ""
+)
+BEFORE_USER_CREATED_HOOK_TOLERANCE_SECONDS = _env_int(
+    "BEFORE_USER_CREATED_HOOK_TOLERANCE_SECONDS",
+    300,
+    minimum=1,
+)
+BEFORE_USER_CREATED_HOOK_RATE_LIMIT_PER_MIN = _env_int(
+    "BEFORE_USER_CREATED_HOOK_RATE_LIMIT_PER_MIN",
+    600,
+    minimum=1,
+)
+
+BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV = _env_bool(
+    "BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV",
+    False,
+)
 
 if not AUTH_INVALIDATION_USE_SIGNED and not _is_development_environment():
     raise RuntimeError(
         "AUTH_INVALIDATION_USE_SIGNED=0 is only allowed in development/test environments"
+    )
+
+if BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV and not _is_development_environment():
+    raise RuntimeError(
+        "BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV=1 is only allowed in development/test environments"
     )
 
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -158,6 +187,12 @@ AUTH_EXCHANGE_TURNSTILE_ENFORCE = _env_bool("AUTH_EXCHANGE_TURNSTILE_ENFORCE", F
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 SESSION_PUBLIC_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
+
+if AUTH_EXCHANGE_TURNSTILE_ENFORCE and not _is_development_environment():
+    raise RuntimeError(
+        "AUTH_EXCHANGE_TURNSTILE_ENFORCE=1 is not supported in non-development environments. "
+        "Use AUTH_EXCHANGE_TURNSTILE_ENFORCE=0 for /auth/exchange flows."
+    )
 
 
 def _rid(request: Request) -> str:
@@ -175,8 +210,13 @@ def _sid_hash(sid: str | None) -> str:
 
 
 def _authdbg(message: str, *args: Any) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info("AUTHDBG " + message, *args)
+    debug_log(logger, "auth", message, *args)
+
+
+def _authdbg_raw(message: str, *args: Any) -> None:
+    if not is_debug_enabled("auth"):
+        return
+    logger.debug(message, *args)
 
 
 def _request_host(request: Request) -> str:
@@ -224,6 +264,121 @@ def _trim_sha256_prefix(signature: str) -> str:
     if signature.startswith("sha256="):
         return signature[len("sha256=") :]
     return signature
+
+
+def _parse_supabase_hook_secret(secret: str) -> bytes:
+    # Supabase provides secrets as: v1,whsec_<base64-secret>
+    normalized = (secret or "").strip()
+    if not normalized:
+        return b""
+    if normalized.startswith("v1,whsec_"):
+        normalized = normalized[len("v1,whsec_") :]
+    elif normalized.startswith("whsec_"):
+        normalized = normalized[len("whsec_") :]
+
+    # Standard webhook secrets are base64 and may omit padding.
+    padding = "=" * ((4 - len(normalized) % 4) % 4)
+    normalized_padded = normalized + padding
+    try:
+        return base64.urlsafe_b64decode(normalized_padded)
+    except Exception:
+        return b""
+
+
+def _parse_webhook_signature_candidates(header_value: str) -> list[str]:
+    # Standard Webhooks uses values like: "v1,base64sig" and may include multiple values.
+    value = (header_value or "").strip()
+    if not value:
+        return []
+
+    candidates: list[str] = []
+    tokens = [token.strip() for token in value.split(" ") if token.strip()]
+    for token in tokens:
+        if token.startswith("v1,"):
+            _, sig = token.split(",", 1)
+            if sig:
+                candidates.append(sig.strip())
+            continue
+        if token.startswith("v1="):
+            _, sig = token.split("=", 1)
+            if sig:
+                candidates.append(sig.strip())
+            continue
+        # Tolerate raw signature values if upstream formatting changes.
+        candidates.append(token)
+
+    return candidates
+
+
+async def _verify_before_user_created_hook_request(request: Request, raw_body: bytes) -> None:
+    secrets_raw = (BEFORE_USER_CREATED_HOOK_SECRETS or "").strip()
+    if not secrets_raw:
+        if (
+            _is_development_environment()
+            and BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV
+            and _is_local_host(request)
+        ):
+            logger.warning(
+                "auth.before_user_created unsigned dev mode enabled (missing hook secret)"
+            )
+            return
+        logger.error("before-user-created hook secret is not configured")
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+    webhook_id = (request.headers.get("webhook-id") or request.headers.get("x-webhook-id") or "").strip()
+    webhook_ts_raw = (
+        request.headers.get("webhook-timestamp")
+        or request.headers.get("x-webhook-timestamp")
+        or ""
+    ).strip()
+    webhook_sig_header = (
+        request.headers.get("webhook-signature")
+        or request.headers.get("x-webhook-signature")
+        or ""
+    ).strip()
+
+    if not webhook_id or not webhook_ts_raw or not webhook_sig_header:
+        if (
+            _is_development_environment()
+            and BEFORE_USER_CREATED_HOOK_ALLOW_UNSIGNED_DEV
+            and _is_local_host(request)
+        ):
+            logger.warning(
+                "auth.before_user_created unsigned dev mode enabled (missing signature headers)"
+            )
+            return
+        raise HTTPException(status_code=401, detail="Missing webhook signature headers")
+
+    try:
+        webhook_ts = int(webhook_ts_raw)
+    except ValueError as err:
+        raise HTTPException(status_code=401, detail="Invalid webhook timestamp") from err
+
+    now = int(time.time())
+    if abs(now - webhook_ts) > BEFORE_USER_CREATED_HOOK_TOLERANCE_SECONDS:
+        raise HTTPException(status_code=401, detail="Stale webhook timestamp")
+
+    signed_payload = f"{webhook_id}.{webhook_ts_raw}.".encode("utf-8") + raw_body
+    provided_candidates = _parse_webhook_signature_candidates(webhook_sig_header)
+    if not provided_candidates:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    accepted = False
+    for secret_token in [part.strip() for part in secrets_raw.split("|") if part.strip()]:
+        key = _parse_supabase_hook_secret(secret_token)
+        if not key:
+            continue
+
+        expected_sig = base64.b64encode(
+            hmac.new(key, signed_payload, digestmod=hashlib.sha256).digest()
+        ).decode("utf-8")
+
+        if any(hmac.compare_digest(candidate, expected_sig) for candidate in provided_candidates):
+            accepted = True
+            break
+
+    if not accepted:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
 
 async def _verify_signed_invalidation(request: Request, secret: str, raw_body: bytes) -> None:
@@ -282,7 +437,7 @@ def _set_cookie(request: Request, response: Response, name: str, value: str, max
         domain or "<host-only>",
         max_age,
     )
-    logger.debug(
+    _authdbg_raw(
         "auth.cookie.set name=%s host=%s domain=%s secure=%s samesite=%s max_age=%s httponly=%s",
         name,
         _request_host(request),
@@ -610,6 +765,10 @@ async def _require_session(request: Request) -> dict[str, Any]:
         str(refreshed.get("user_id") or "")[-6:],
     )
 
+    user_id = str(refreshed.get("user_id") or "").strip()
+    if user_id:
+        request.state.user_id = user_id
+
     return refreshed
 
 
@@ -652,7 +811,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     )
     cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
     xff_first_hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    logger.debug(
+    _authdbg_raw(
         "auth.exchange.start host=%s origin=%s referer=%s enforce_turnstile=%s token_present=%s secure_cookie=%s cookie_domain=%s samesite=%s xf_proto=%s cf_connecting_ip=%s xff=%s",
         _request_host(request),
         request.headers.get("origin") or "",
@@ -692,10 +851,10 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
                 user_id,
             )
 
-    if email_for_disposable_check and is_disposable_email(email_for_disposable_check):
+    if email_for_disposable_check and not is_email_allowed(email_for_disposable_check):
         raise HTTPException(
             status_code=400,
-            detail="Please enter your permanent email address.",
+            detail="Please use a supported email provider (e.g., Gmail, Outlook).",
         )
 
     device_id = extract_device_id(
@@ -755,7 +914,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
                     data=turnstile_payload,
                 )
             ts_result = ts_response.json()
-            logger.debug(
+            _authdbg_raw(
                 "auth.exchange.turnstile.result status=%s success=%s hostname=%s action=%s error_codes=%s remoteip_included=%s",
                 getattr(ts_response, "status_code", "unknown"),
                 int(bool(ts_result.get("success"))),
@@ -842,7 +1001,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         ua_summary=_user_agent_summary(request.headers.get("user-agent") or ""),
         country=_extract_country_code(request),
     )
-    logger.debug(
+    _authdbg_raw(
         "auth.exchange.session.created user_id=%s sid=%s ttl=%s remember_me=%s ua_bound=%s ip_bound=%s",
         user_id,
         created["sid"],
@@ -904,7 +1063,7 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     _delete_cookie_both_scopes(request, response, CSRF_COOKIE_NAME)
     _set_cookie(request, response, SESSION_COOKIE_NAME, created["sid"], max_age=created["ttl"])
     _set_cookie(request, response, CSRF_COOKIE_NAME, csrf_token, max_age=created["ttl"])
-    logger.debug(
+    _authdbg_raw(
         "auth.exchange.cookies_set user_id=%s secure=%s domain=%s samesite=%s ttl=%s",
         user_id,
         int(_should_use_secure_cookie(request)),
@@ -1049,7 +1208,7 @@ async def auth_validate(request: Request) -> dict[str, Any]:
             int(bool(request.cookies.get(SESSION_COOKIE_NAME))),
             _request_host(request),
         )
-        logger.debug(
+        _authdbg_raw(
             "auth.validate.denied host=%s sid_present=%s",
             _request_host(request),
             int(bool(request.cookies.get(SESSION_COOKIE_NAME))),
@@ -1252,3 +1411,75 @@ async def auth_invalidate_user(request: Request) -> dict[str, Any]:
         except Exception as e:
             logger.error("auth.invalidated event=refresh_failed user=%s error=%s", user_id, str(e))
             return {"ok": True, "error": str(e), "mode": "failed_refresh"}
+
+
+@router.post("/hooks/before-user-created")
+async def auth_before_user_created(request: Request) -> Response:
+    """Supabase Before User Created HTTP hook endpoint."""
+    try:
+        await rate_limit(
+            request,
+            "auth_before_user_created",
+            limit_per_minute=BEFORE_USER_CREATED_HOOK_RATE_LIMIT_PER_MIN,
+        )
+
+        raw_body = await request.body()
+        await _verify_before_user_created_hook_request(request, raw_body)
+
+        payload = _parse_json_body(raw_body)
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        email_raw = user.get("email") if isinstance(user.get("email"), str) else ""
+        email = email_raw.strip().lower()
+
+        if not email:
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "http_code": 400,
+                            "message": "Invalid signup payload: email is missing.",
+                        }
+                    }
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
+
+        is_allowed = is_email_allowed(email)
+        
+        if not is_allowed:
+            logger.info("auth.before_user_created.blocked email=%s", email)
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "http_code": 400,
+                            "message": "Please use a supported email provider (e.g., Gmail, Outlook).",
+                        }
+                    }
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
+
+        return Response(content="{}", status_code=200, media_type="application/json")
+    except HTTPException as exc:
+        response_headers = None
+        if exc.status_code == 429:
+            response_headers = {"Retry-After": "60"}
+        elif exc.status_code == 503:
+            response_headers = {"Retry-After": "30"}
+
+        return Response(
+            content=json.dumps(
+                {
+                    "error": {
+                        "http_code": exc.status_code,
+                        "message": str(exc.detail or "Hook request failed."),
+                    }
+                }
+            ),
+            status_code=exc.status_code,
+            media_type="application/json",
+            headers=response_headers,
+        )

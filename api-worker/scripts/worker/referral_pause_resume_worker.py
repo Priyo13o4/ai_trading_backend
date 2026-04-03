@@ -16,7 +16,10 @@ SCRIPTS_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 APP_ROOT = os.path.abspath(os.path.join(SCRIPTS_ROOT, ".."))
 sys.path.insert(0, APP_ROOT)
 
-from app.referrals.pause_resume import run_referral_pause_resume_cycle
+from app.referrals.pause_resume import (
+    ReferralPauseResumeConfigurationError,
+    run_referral_pause_resume_cycle,
+)
 
 
 def _is_truthy(name: str) -> bool:
@@ -51,6 +54,9 @@ def main() -> int:
             f"failed_marked={stats.failed_marked}"
         )
         return 0
+    except ReferralPauseResumeConfigurationError as exc:
+        _log(f"Blocking configuration error during run: {exc}")
+        return 2
     except Exception as exc:
         _log(f"Fatal error during run: {exc}")
         return 1

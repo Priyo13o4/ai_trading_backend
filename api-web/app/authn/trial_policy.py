@@ -98,11 +98,11 @@ def _rest_url(path: str) -> str:
     return SUPABASE_URL.rstrip("/") + path
 
 
-async def _has_active_trial_subscription(user_id: str) -> bool:
+async def _get_active_trial_subscription(user_id: str) -> dict[str, object] | None:
     now_iso = datetime.now(timezone.utc).isoformat()
     url = _rest_url(
         "/rest/v1/user_subscriptions"
-        f"?select=id&user_id=eq.{user_id}&status=eq.trial&expires_at=gt.{now_iso}&limit=1"
+        f"?select=id,metadata,expires_at&user_id=eq.{user_id}&status=eq.trial&expires_at=gt.{now_iso}&order=expires_at.asc&limit=1"
     )
 
     try:
@@ -119,7 +119,29 @@ async def _has_active_trial_subscription(user_id: str) -> bool:
     except ValueError as exc:
         raise TrialPolicyError("active trial lookup malformed response") from exc
 
-    return isinstance(payload, list) and len(payload) > 0
+    if not isinstance(payload, list) or not payload:
+        return None
+
+    first = payload[0]
+    if not isinstance(first, dict):
+        return None
+
+    return first
+
+
+def _is_same_email_reclaim_trial(subscription: dict[str, object] | None) -> bool:
+    if not isinstance(subscription, dict):
+        return False
+
+    metadata = subscription.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+
+    source = metadata.get("trial_source")
+    if not isinstance(source, str):
+        return False
+
+    return source.strip().lower() == "same_email_reclaim_resume"
 
 
 async def _mark_device_trial_first_use(
@@ -195,7 +217,8 @@ async def apply_trial_policy_for_exchange(
             had_active_trial=False,
         )
 
-    had_active_trial = await _has_active_trial_subscription(user_id)
+    active_trial = await _get_active_trial_subscription(user_id)
+    had_active_trial = bool(active_trial)
     if not had_active_trial:
         return TrialPolicyOutcome(
             trial_allowed=True,
@@ -215,6 +238,18 @@ async def apply_trial_policy_for_exchange(
         return TrialPolicyOutcome(
             trial_allowed=True,
             reason="allow_first_device_trial",
+            device_id_hash=device_hash,
+            had_active_trial=True,
+        )
+
+    if _is_same_email_reclaim_trial(active_trial):
+        logger.info(
+            "auth.trial_policy outcome=allow_trial user_id=%s reason=same_email_reclaim",
+            user_id,
+        )
+        return TrialPolicyOutcome(
+            trial_allowed=True,
+            reason="allow_same_email_reclaim",
             device_id_hash=device_hash,
             had_active_trial=True,
         )

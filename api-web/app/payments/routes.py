@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.observability.debug import debug_log
 from app.authn.deps import require_session
 from app.db import get_supabase_client, async_db
 from app.payments.payment_providers.router import get_provider
@@ -16,7 +17,6 @@ from app.authn.rate_limit_auth import rate_limit
 
 logger = logging.getLogger(__name__)
 
-AUTHDBG_ENABLED = (os.getenv("AUTHDBG_ENABLED") or "0").strip().lower() in {"1", "true", "yes", "on"}
 ACTIVE_CHECKOUT_STATUSES = [
     PaymentTransactionStatus.PENDING.value,
     PaymentTransactionStatus.PROCESSING.value,
@@ -25,8 +25,7 @@ ACTIVE_CHECKOUT_STATUSES = [
 
 
 def _plisio_debug(msg: str, *args: object) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info(msg, *args)
+    debug_log(logger, "payments.plisio", msg, *args)
 
 
 def _parse_optional_iso_datetime(raw_value: Optional[str]) -> Optional[datetime]:

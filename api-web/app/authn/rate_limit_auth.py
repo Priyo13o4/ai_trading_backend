@@ -8,15 +8,30 @@ from ..redis_cache import CACHE_REDIS
 
 logger = logging.getLogger(__name__)
 
-TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "0") == "1"
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", False)
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if TRUST_PROXY_HEADERS and forwarded:
-        return forwarded.split(",")[0].strip()
+    if TRUST_PROXY_HEADERS:
+        cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+        if cf_connecting_ip:
+            return cf_connecting_ip
+
+        forwarded = (request.headers.get("x-forwarded-for") or "").strip()
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
     if request.client:
         return request.client.host
+
     return "unknown"
 
 

@@ -1,22 +1,17 @@
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from app.db import async_db, get_supabase_client
+from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
 logger = logging.getLogger(__name__)
 
 
-def _is_debug_enabled() -> bool:
-    return os.getenv("AUTHDBG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _authdbg(msg: str, *args: object) -> None:
-    if _is_debug_enabled():
-        logger.info(msg, *args)
+    debug_log(logger, "referrals", msg, *args)
 
 
 @dataclass(frozen=True)

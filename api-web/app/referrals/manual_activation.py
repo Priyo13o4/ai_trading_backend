@@ -7,27 +7,23 @@ months once users cross the configured threshold.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from app.db import async_db, get_supabase_client
+from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
 logger = logging.getLogger(__name__)
 
-
-def _is_debug_enabled() -> bool:
-    return os.getenv("AUTHDBG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 REFERRAL_MANUAL_ACTIVATION_RPC_ENV = "REFERRAL_REWARD_MANUAL_ACTIVATION_RPC_NAME"
 DEFAULT_REFERRAL_MANUAL_ACTIVATION_RPC_NAME = "activate_referral_reward_manual"
 
 
 def _authdbg(msg: str, *args: object) -> None:
-    if _is_debug_enabled():
-        logger.info("AUTHDBG " + msg, *args)
+    debug_log(logger, "referrals", msg, *args)
 
 
 # H1: _validate_uuid removed — use validate_uuid from app.referrals.utils

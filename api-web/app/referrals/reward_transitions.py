@@ -5,28 +5,21 @@ Provides functions to:
 2. Transition available -> applied
 
 All functions are idempotent and safe to call repeatedly.
-Debug logging is tied to AUTHDBG_ENABLED environment variable.
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from app.db import async_db, get_supabase_client
+from app.observability.debug import debug_log
 
 logger = logging.getLogger(__name__)
 
 
-def _is_debug_enabled() -> bool:
-    """Check if AUTHDBG_ENABLED is set."""
-    return os.getenv("AUTHDBG_ENABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def _debug_log(message: str) -> None:
-    """Log info message if AUTHDBG_ENABLED is set."""
-    if _is_debug_enabled():
-        logger.info("[REFERRAL_REWARDS] %s", message)
+    """Debug log helper for referral reward transitions."""
+    debug_log(logger, "referrals.transitions", "[REFERRAL_REWARDS] %s", message)
 
 
 @dataclass(frozen=True)

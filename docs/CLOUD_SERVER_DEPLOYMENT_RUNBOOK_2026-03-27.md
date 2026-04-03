@@ -431,6 +431,24 @@ Each environment must own its own URLs.
 
 ---
 
+## Phase 2 Execution Checklist
+
+- [ ] Build frontend artifact
+  - `cd ../ai-trading_frontend && npm ci && npm run build`
+- [ ] Copy artifacts to server
+  - `scp -r ../ai-trading_frontend/dist <user>@<server>:/opt/pipfactor/frontend/dist`
+- [ ] Run backend with compose prod overlay
+  - `docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
+- [ ] Start cloudflared on server
+  - `sudo systemctl enable --now cloudflared`
+  - `sudo systemctl status cloudflared --no-pager`
+- [ ] Validate hostnames and health endpoints
+  - `curl -fsS https://pipfactor.com >/dev/null`
+  - `curl -fsS https://api.pipfactor.com/api/health`
+  - `curl -fsS https://sse.pipfactor.com/health`
+
+---
+
 ## Smoke Test Checklist After Deployment
 
 ## Frontend

@@ -1,10 +1,10 @@
 import logging
-import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from app.db import async_db, get_supabase_client
+from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
 logger = logging.getLogger(__name__)
@@ -14,11 +14,6 @@ REFERRAL_REWARD_RPC_ENV = "REFERRAL_REWARD_EVALUATION_RPC_NAME"
 DEFAULT_REFERRAL_REWARD_RPC_NAME = "qualify_referral_reward"
 DEFAULT_FRAUD_IDENTITY_RPC_NAME = "check_duplicate_payment_identity"
 REFERRAL_REWARD_FIXED_HOLD_DAYS = 7
-
-
-def _is_debug_enabled() -> bool:
-    """Per-call AUTHDBG check. Reads env each call so hot-reload works."""
-    return os.getenv("AUTHDBG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class ReferralRewardEvaluationError(RuntimeError):
@@ -75,8 +70,7 @@ def _normalize_rpc_result(data: Any) -> dict[str, Any] | None:
 
 
 def _authdbg(message: str, *args: object) -> None:
-    if _is_debug_enabled():
-        logger.info(message, *args)
+    debug_log(logger, "referrals", message, *args)
 
 
 def _extract_security_value(

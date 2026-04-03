@@ -24,6 +24,7 @@ sys.path.insert(0, APP_ROOT)
 
 # Import after path setup
 from app.referrals.reward_transitions import (
+    ReferralTransitionConfigurationError,
     transition_rewards_on_hold_to_available,
     apply_available_rewards,
 )
@@ -50,41 +51,19 @@ async def run_referral_reward_transitions() -> bool:
     Returns True if successful, False otherwise.
     """
     log("Starting referral reward transitions orchestration...")
-    
-    try:
-        # Step 1: Transition expired on_hold to available
-        log("Step 1: Transitioning expired on_hold rewards to available...")
-        hold_result = await transition_rewards_on_hold_to_available()
-        
-        if hold_result.outcome == 'success':
-            log(f"✓ Transitioned {hold_result.transitioned_count} on_hold rewards to available")
-        elif hold_result.outcome == 'error_controlled':
-            log(f"⚠️  on_hold -> available transition failed (controlled): {hold_result.error_message}")
-            # Don't fail the whole orchestration; continue to step 2
-        else:
-            log(f"⚠️  on_hold -> available transition: unknown outcome {hold_result.outcome}")
-        
-        # Step 2: Apply available rewards
-        log("Step 2: Applying available rewards...")
-        apply_result = await apply_available_rewards()
-        
-        if apply_result.outcome == 'success':
-            log(f"✓ Applied {apply_result.transitioned_count} available rewards")
-        elif apply_result.outcome == 'error_controlled':
-            log(f"⚠️  available -> applied transition failed (controlled): {apply_result.error_message}")
-        else:
-            log(f"⚠️  available -> applied transition: unknown outcome {apply_result.outcome}")
-        
-        log("Referral reward transitions orchestration completed")
-        
-        # Success if at least one step succeeded, or if both were no-ops
-        return hold_result.outcome == 'success' or apply_result.outcome == 'success'
-        
-    except Exception as e:
-        log(f"✗ Unexpected error during referral reward transitions: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+
+    # Step 1: Transition expired on_hold to available
+    log("Step 1: Transitioning expired on_hold rewards to available...")
+    hold_result = await transition_rewards_on_hold_to_available()
+    log(f"✓ Transitioned {hold_result.transitioned_count} on_hold rewards to available")
+
+    # Step 2: Apply available rewards
+    log("Step 2: Applying available rewards...")
+    apply_result = await apply_available_rewards()
+    log(f"✓ Applied {apply_result.transitioned_count} available rewards")
+
+    log("Referral reward transitions orchestration completed")
+    return True
 
 
 def main() -> int:
@@ -98,13 +77,14 @@ def main() -> int:
     
     try:
         success = asyncio.run(run_referral_reward_transitions())
-        
         if success:
             log("Orchestration completed successfully")
             return 0
-        else:
-            log("Orchestration completed with warnings")
-            return 0  # Non-zero would cause scheduler to restart; treat as success for now
+        log("Orchestration failed")
+        return 1
+    except ReferralTransitionConfigurationError as e:
+        log(f"✗ Blocking configuration error: {e}")
+        return 2
     except Exception as e:
         log(f"✗ Fatal error: {e}")
         import traceback

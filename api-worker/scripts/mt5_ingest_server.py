@@ -27,6 +27,7 @@ sys.path.insert(0, parent_dir)
 from app.mt5_ingest import mt5_ingest_server
 from app.mt5_symbol_notify import start_symbol_notify_listener
 from app.mt5_wire import TF_M1, TF_D1, TF_W1, TF_MN1
+from app.error_alerts import report_runtime_error
 
 # Configure logging with UTC timestamps
 logging.Formatter.converter = time.gmtime
@@ -205,5 +206,16 @@ if __name__ == "__main__":
         logger.info("MT5 ingest server stopped by user")
         logger.info("=" * 80)
     except Exception as e:
+        report_runtime_error(
+            path="/worker/mt5-ingest",
+            method="PROCESS",
+            status_code=500,
+            message_safe="Worker runtime error",
+            message_internal=f"{e.__class__.__name__}: {e}",
+            context={
+                "script": "mt5_ingest_server.py",
+                "phase": "entrypoint",
+            },
+        )
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)

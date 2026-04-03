@@ -91,7 +91,7 @@ class Scope2RoutesTests(unittest.IsolatedAsyncioTestCase):
                     await routes.auth_exchange(request, response)
 
         self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.detail, "Please enter your permanent email address.")
+        self.assertEqual(ctx.exception.detail, "Please use a supported email provider (e.g., Gmail, Outlook).")
 
     async def test_upstream_disposable_domain_fun4k_is_rejected(self):
         routes = self._load_routes()
@@ -114,7 +114,7 @@ class Scope2RoutesTests(unittest.IsolatedAsyncioTestCase):
                     await routes.auth_exchange(request, response)
 
         self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.detail, "Please enter your permanent email address.")
+        self.assertEqual(ctx.exception.detail, "Please use a supported email provider (e.g., Gmail, Outlook).")
 
     async def test_second_signup_same_device_disables_trial_but_exchange_succeeds(self):
         routes = self._load_routes()
@@ -136,7 +136,7 @@ class Scope2RoutesTests(unittest.IsolatedAsyncioTestCase):
                     return_value={
                         "sub": "22222222-2222-2222-2222-222222222222",
                         "exp": 1_900_000_000,
-                        "email": "real.user@example.com",
+                        "email": "real.user@gmail.com",
                     }
                 ),
             ):
@@ -204,11 +204,16 @@ class Scope2TrialPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_device_gets_trial(self):
         trial_policy = self._load_trial_policy()
+        active_trial = {
+            "id": "sub-1",
+            "metadata": {"trial_source": "signup"},
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
 
         with mock.patch.object(
             trial_policy,
-            "_has_active_trial_subscription",
-            new=mock.AsyncMock(return_value=True),
+            "_get_active_trial_subscription",
+            new=mock.AsyncMock(return_value=active_trial),
         ):
             with mock.patch.object(
                 trial_policy,
@@ -229,11 +234,16 @@ class Scope2TrialPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ip_and_ua_do_not_deny_trial_when_device_differs(self):
         trial_policy = self._load_trial_policy()
+        active_trial = {
+            "id": "sub-2",
+            "metadata": {"trial_source": "signup"},
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
 
         with mock.patch.object(
             trial_policy,
-            "_has_active_trial_subscription",
-            new=mock.AsyncMock(return_value=True),
+            "_get_active_trial_subscription",
+            new=mock.AsyncMock(return_value=active_trial),
         ):
             with mock.patch.object(
                 trial_policy,
@@ -250,3 +260,63 @@ class Scope2TrialPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.trial_allowed)
         self.assertEqual(result.reason, "allow_first_device_trial")
         first_use_mock.assert_awaited_once()
+
+    async def test_same_email_reclaim_does_not_disable_trial_on_repeat_device(self):
+        trial_policy = self._load_trial_policy()
+        reclaim_trial = {
+            "id": "sub-3",
+            "metadata": {"trial_source": "same_email_reclaim_resume"},
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+
+        with mock.patch.object(
+            trial_policy,
+            "_get_active_trial_subscription",
+            new=mock.AsyncMock(return_value=reclaim_trial),
+        ):
+            with mock.patch.object(
+                trial_policy,
+                "_mark_device_trial_first_use",
+                new=mock.AsyncMock(return_value=False),
+            ):
+                with mock.patch.object(trial_policy, "_disable_trial_entitlement", new=mock.AsyncMock()) as disable_mock:
+                    result = await trial_policy.apply_trial_policy_for_exchange(
+                        user_id="55555555-5555-5555-5555-555555555555",
+                        device_id="reclaim-device",
+                        user_agent="Mozilla/5.0",
+                        ip_address="203.0.113.10",
+                    )
+
+        self.assertTrue(result.trial_allowed)
+        self.assertEqual(result.reason, "allow_same_email_reclaim")
+        disable_mock.assert_not_awaited()
+
+    async def test_repeat_device_non_reclaim_still_disables_trial(self):
+        trial_policy = self._load_trial_policy()
+        normal_trial = {
+            "id": "sub-4",
+            "metadata": {"trial_source": "signup"},
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+
+        with mock.patch.object(
+            trial_policy,
+            "_get_active_trial_subscription",
+            new=mock.AsyncMock(return_value=normal_trial),
+        ):
+            with mock.patch.object(
+                trial_policy,
+                "_mark_device_trial_first_use",
+                new=mock.AsyncMock(return_value=False),
+            ):
+                with mock.patch.object(trial_policy, "_disable_trial_entitlement", new=mock.AsyncMock()) as disable_mock:
+                    result = await trial_policy.apply_trial_policy_for_exchange(
+                        user_id="66666666-6666-6666-6666-666666666666",
+                        device_id="repeat-device",
+                        user_agent="Mozilla/5.0",
+                        ip_address="203.0.113.11",
+                    )
+
+        self.assertFalse(result.trial_allowed)
+        self.assertEqual(result.reason, "deny_same_device")
+        disable_mock.assert_awaited_once()

@@ -2,7 +2,10 @@
 
 Date: 2026-03-28
 Source Plan: ENVIRONMENT_SEGREGATION_MIGRATION_PLAN_2026-03-27.md
-Status: Ready for execution
+Status: Phase 1 implementation complete; Phase 2 execution in progress
+
+Caveat (2026-04-03): Tunnel split and ingress isolation are intentionally deferred until server cutover.
+Current local/prod overlap in tunnel routing is temporary and accepted for pre-server rollout.
 
 ---
 
@@ -179,25 +182,25 @@ Exit gate:
 
 ### Backend tasks
 
-- [ ] Add `.env.local` and wire local-safe defaults:
+- [x] Add `.env.local` and wire local-safe defaults:
   - blank `COOKIE_DOMAIN`
   - `COOKIE_SECURE=0`
   - `TRUST_PROXY_HEADERS=0`
   - local-only CORS allowlist and regex
-- [ ] Remove production-forced defaults from base compose (`AUTH_ENV=production` and forced proxy trust).
-- [ ] Standardize canonical env detection around `APP_ENV` first, fallback only for compatibility.
-- [ ] Ensure cookie-domain logic remains host-only for localhost and IP hosts.
-- [ ] Ensure rate-limit and auth IP extraction honor proxy trust only when enabled.
-- [ ] Align CORS behavior between REST and SSE entrypoints from one env contract.
+- [x] Remove production-forced defaults from base compose (`AUTH_ENV=production` and forced proxy trust).
+- [x] Standardize canonical env detection around `APP_ENV` first, fallback only for compatibility.
+- [x] Ensure cookie-domain logic remains host-only for localhost and IP hosts.
+- [x] Ensure rate-limit and auth IP extraction honor proxy trust only when enabled.
+- [x] Align CORS behavior between REST and SSE entrypoints from one env contract.
 
 ### Frontend tasks
 
-- [ ] Add `.env.local` and point to `http://localhost:8080` + `http://localhost:8081`.
-- [ ] Remove hostname-based production API override logic from `src/services/api.ts`.
-- [ ] Keep SSE resolution explicit via `VITE_API_SSE_URL` and remove cross-env implicit behavior.
-- [ ] Update Vite `allowedHosts` so local does not depend on production hostnames.
-- [ ] Make CSP `connect-src` environment-aware (local must allow localhost only for local mode).
-- [ ] Keep Turnstile disabled locally or use test/site-dev key only.
+- [x] Add `.env.local` and point to `http://localhost:8080` + `http://localhost:8081`.
+- [x] Remove hostname-based production API override logic from `src/services/api.ts`.
+- [x] Keep SSE resolution explicit via `VITE_API_SSE_URL` and remove cross-env implicit behavior.
+- [x] Update Vite `allowedHosts` so local does not depend on production hostnames.
+- [x] Make CSP `connect-src` environment-aware (local must allow localhost only for local mode).
+- [x] Keep Turnstile disabled locally or use test/site-dev key only.
 
 ### Verification tasks
 
@@ -228,6 +231,28 @@ Exit gate:
 - [ ] Validate callback URLs are production-only for real providers.
 - [ ] Validate n8n base/editor/webhook URLs are production-correct.
 
+### Phase 2 command snippets (`.env.prod` + `docker-compose.prod.yml`)
+
+```bash
+# Build frontend artifact (run from ../ai-trading_frontend)
+npm ci
+npm run build
+tar -czf pipfactor-frontend-dist.tgz dist
+
+# Copy artifact to cloud server
+scp pipfactor-frontend-dist.tgz <user>@<server>:/opt/pipfactor/frontend/
+
+# Run backend stack on cloud server (run from ai_trading_bot)
+docker compose --env-file .env.prod \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml up -d --build
+
+# Verify backend services started with prod overlay
+docker compose --env-file .env.prod \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml ps
+```
+
 ### Verification tasks
 
 - [ ] `pipfactor.com` and `api.pipfactor.com` are served by cloud server.
@@ -240,6 +265,9 @@ Exit gate:
 ## Phase 3 - Remote Dev on Same Apex (`*.dev.pipfactor.com`)
 
 ### DNS + tunnel tasks
+
+Interim decision (2026-04-03): Do not modify tunnel topology before cloud server cutover.
+Keep existing tunnel behavior for now, and execute this block only during server migration.
 
 - [ ] Create DNS for:
   - `dev.pipfactor.com`

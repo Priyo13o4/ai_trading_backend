@@ -1,6 +1,6 @@
 import json, asyncio, logging, os, hmac, uuid, fcntl
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 import psycopg
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -9,6 +9,7 @@ from .auth import REDIS, log_redis_connection_health
 from .authn.deps import require_session
 from .authn.authz import require_permission
 from .authn.csrf import enforce_csrf
+from .cors_env import cors_origin_regex_from_env, parse_cors_origins_from_env
 from .authn.routes import router as auth_router
 from .payments.routes import payments_router
 from .payments.webhook_handler import webhook_router
@@ -68,6 +69,8 @@ from .payments.tasks import (
     plisio_renewal_invoice_janitor_loop,
     webhook_events_worker_loop,
 )
+from .notifications.error_alerts import notify_runtime_error_event
+from .observability.debug import debug_log
 
 # Configure logging with UTC
 import time
@@ -81,7 +84,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info("logging.configured level=%s", LOG_LEVEL_NAME)
-AUTHDBG_ENABLED = (os.getenv("AUTHDBG_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
+TRUST_PROXY_HEADERS = (os.getenv("TRUST_PROXY_HEADERS") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: Optional[int] = None) -> int:
@@ -173,34 +176,6 @@ AUTH_CSRF_EXEMPT_PATHS = {
 }
 
 
-def _parse_cors_origins() -> list[str]:
-    raw = (os.getenv("ALLOWED_ORIGINS") or "").strip()
-    if not raw:
-        return [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            "https://pipfactor.com",
-            "https://www.pipfactor.com",
-        ]
-
-    try:
-        if raw.startswith("["):
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return [str(x) for x in parsed]
-    except Exception:
-        pass
-
-    return [o.strip() for o in raw.split(",") if o.strip()]
-
-
-def _cors_origin_regex() -> str:
-    raw = (os.getenv("ALLOWED_ORIGIN_REGEX") or "").strip()
-    return raw or r"^https://([a-zA-Z0-9_-]+\.)*(pipfactor\.com|pages\.dev)$"
-
-
 def _cors_allow_headers() -> list[str]:
     required_headers = {
         "Content-Type",
@@ -222,8 +197,97 @@ def _cors_allow_headers() -> list[str]:
 
 
 def _authdbg(message: str, *args) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info("AUTHDBG " + message, *args)
+    debug_log(logger, "cors", message, *args)
+
+
+def _request_id_from_request(request: Request) -> str:
+    from_state = (getattr(request.state, "request_id", "") or "").strip()
+    if from_state:
+        return from_state
+
+    return (
+        (request.headers.get("x-request-id") or "").strip()
+        or (request.headers.get("x-correlation-id") or "").strip()
+        or uuid.uuid4().hex[:12]
+    )
+
+
+def _request_user_id_from_request(request: Request) -> Optional[str]:
+    state_user_id = (getattr(request.state, "user_id", "") or "").strip()
+    if state_user_id:
+        return state_user_id
+    return None
+
+
+def _request_latency_ms_from_request(request: Request) -> Optional[float]:
+    raw_latency = getattr(request.state, "latency_ms", None)
+    if raw_latency is not None:
+        try:
+            return max(0.0, round(float(raw_latency), 2))
+        except Exception:
+            pass
+
+    start = getattr(request.state, "request_started_monotonic", None)
+    if start is None:
+        return None
+
+    try:
+        return max(0.0, round((time.perf_counter() - float(start)) * 1000.0, 2))
+    except Exception:
+        return None
+
+
+def _runtime_error_context_from_request(request: Request) -> dict[str, Any]:
+    client_ip = request.client.host if request.client else ""
+    context = {
+        "request_id": _request_id_from_request(request),
+        "query": request.url.query,
+        "client_ip": client_ip,
+        "user_agent": (request.headers.get("user-agent") or "")[:200],
+        "referer": (request.headers.get("referer") or "")[:200],
+    }
+    latency_ms = _request_latency_ms_from_request(request)
+    if latency_ms is not None:
+        context["latency_ms"] = latency_ms
+    return context
+
+
+async def _emit_runtime_error_alert(
+    *,
+    request: Request,
+    error_id: str,
+    request_id: str,
+    status_code: int,
+    message_safe: str,
+    message_internal: str,
+    extra_context: Optional[dict[str, Any]] = None,
+) -> None:
+    context = _runtime_error_context_from_request(request)
+    if extra_context:
+        context.update(extra_context)
+
+    latency_ms = _request_latency_ms_from_request(request)
+
+    try:
+        await notify_runtime_error_event(
+            error_id=error_id,
+            request_id=request_id,
+            path=request.url.path,
+            method=request.method,
+            status_code=status_code,
+            user_id=_request_user_id_from_request(request),
+            message_safe=message_safe,
+            message_internal=message_internal,
+            latency_ms=latency_ms,
+            context=context,
+        )
+    except Exception as alert_exc:
+        logger.error(
+            "Runtime error alert dispatch failed error_id=%s request_id=%s reason=%s",
+            error_id,
+            request_id,
+            alert_exc,
+        )
 
 
 def _normalize_optional_query_value(value: Optional[str], *, lowercase: bool = False) -> Optional[str]:
@@ -235,6 +299,20 @@ def _normalize_optional_query_value(value: Optional[str], *, lowercase: bool = F
         return None
 
     return normalized.lower() if lowercase else normalized
+
+
+def _http_exception_message(detail: Any, *, fallback: str) -> str:
+    if isinstance(detail, str):
+        text = detail.strip()
+        if text:
+            return text[:220]
+
+    if isinstance(detail, dict):
+        candidate = detail.get("message")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:220]
+
+    return fallback
 
 
 def _cache_key_token(value) -> str:
@@ -514,6 +592,25 @@ async def require_signals_context(ctx=Depends(require_session)):
 
 
 @app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = _request_id_from_request(request)
+    request.state.request_id = request_id
+    request.state.request_started_monotonic = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        request.state.latency_ms = _request_latency_ms_from_request(request)
+        raise
+
+    request.state.latency_ms = _request_latency_ms_from_request(request)
+    response.headers.setdefault("X-Request-ID", request_id)
+    if request.state.latency_ms is not None:
+        response.headers.setdefault("X-Response-Time-Ms", f"{request.state.latency_ms:.2f}")
+    return response
+
+
+@app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
     # Enforce CSRF for cookie-authenticated state-changing requests.
     try:
@@ -542,7 +639,9 @@ async def security_headers_middleware(request: Request, call_next):
         "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:",
     )
 
-    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    forwarded_proto = ""
+    if TRUST_PROXY_HEADERS:
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
     is_https = request.url.scheme == "https" or forwarded_proto == "https"
     if is_https:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -550,8 +649,8 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 # Add CORS middleware
-CORS_ALLOW_ORIGINS = _parse_cors_origins()
-CORS_ALLOW_ORIGIN_REGEX = _cors_origin_regex()
+CORS_ALLOW_ORIGINS = parse_cors_origins_from_env()
+CORS_ALLOW_ORIGIN_REGEX = cors_origin_regex_from_env()
 CORS_ALLOW_HEADERS = _cors_allow_headers()
 
 app.add_middleware(
@@ -587,6 +686,87 @@ async def cors_debug_middleware(request: Request, call_next):
         response.headers.get("access-control-allow-credentials") or "",
     )
     return response
+
+
+@app.exception_handler(HTTPException)
+async def global_http_exception_handler(request: Request, exc: HTTPException):
+    status_code = int(getattr(exc, "status_code", 500) or 500)
+    request_id = _request_id_from_request(request)
+
+    if status_code < 500:
+        message = _http_exception_message(exc.detail, fallback="Request could not be completed")
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "message": message,
+                "detail": exc.detail,
+            },
+            headers=getattr(exc, "headers", None),
+        )
+
+    error_id = f"runtime-{uuid.uuid4().hex[:20]}"
+    detail_text = str(getattr(exc, "detail", ""))[:800]
+    message = "Internal server error"
+
+    logger.warning(
+        "runtime.http_exception.expected error_id=%s request_id=%s method=%s path=%s status=%s detail=%s",
+        error_id,
+        request_id,
+        request.method,
+        request.url.path,
+        status_code,
+        detail_text,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "message": message,
+            "detail": message,
+            "error_id": error_id,
+            "request_id": request_id,
+        },
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(Exception)
+async def global_unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = _request_id_from_request(request)
+    error_id = f"runtime-{uuid.uuid4().hex[:20]}"
+    message_internal = f"{exc.__class__.__name__}: {str(exc)[:800]}"
+    message = "Internal server error"
+
+    logger.error(
+        "runtime.unhandled_exception error_id=%s request_id=%s method=%s path=%s",
+        error_id,
+        request_id,
+        request.method,
+        request.url.path,
+        exc_info=True,
+    )
+
+    asyncio.create_task(
+        _emit_runtime_error_alert(
+            request=request,
+            error_id=error_id,
+            request_id=request_id,
+            status_code=500,
+            message_safe="Internal server error",
+            message_internal=message_internal,
+            extra_context={"exception_type": exc.__class__.__name__},
+        )
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": message,
+            "detail": message,
+            "error_id": error_id,
+            "request_id": request_id,
+        },
+    )
 
 
 # ============================================================================

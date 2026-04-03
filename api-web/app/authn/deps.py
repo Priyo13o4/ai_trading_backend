@@ -24,6 +24,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from app.observability.debug import debug_log, is_debug_enabled
+
 from .session_store import (
     CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -38,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
 SESSION_BINDING_MODE = (os.getenv("SESSION_BINDING_MODE") or "ua_only").strip().lower()
-AUTHDBG_ENABLED = os.getenv("AUTHDBG_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_ENTITLEMENT_SYNC_SECONDS = max(
     30,
     int(os.getenv("SESSION_ENTITLEMENT_SYNC_SECONDS", "120") or "120"),
@@ -60,8 +61,13 @@ def _sid_hash(sid: str | None) -> str:
 
 
 def _authdbg(message: str, *args: Any) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info("AUTHDBG " + message, *args)
+    debug_log(logger, "auth", message, *args)
+
+
+def _authdbg_raw(message: str, *args: Any) -> None:
+    if not is_debug_enabled("auth"):
+        return
+    logger.debug(message, *args)
 
 
 def _ua_hash(user_agent: str) -> str:
@@ -130,7 +136,7 @@ async def require_session(request: Request) -> dict[str, Any]:
             request.url.path,
             request.method,
         )
-        logger.debug("auth.require_session.missing_sid path=%s method=%s", request.url.path, request.method)
+        _authdbg_raw("auth.require_session.missing_sid path=%s method=%s", request.url.path, request.method)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     session = await get_session(sid)
@@ -141,7 +147,7 @@ async def require_session(request: Request) -> dict[str, Any]:
             _sid_hash(sid),
             request.url.path,
         )
-        logger.debug("auth.require_session.sid_not_found sid=%s path=%s", sid, request.url.path)
+        _authdbg_raw("auth.require_session.sid_not_found sid=%s path=%s", sid, request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     # 🛡️ CSRF PROTECTION: Enforce for all mutating methods (POST, PATCH, DELETE, etc.)
@@ -212,7 +218,7 @@ async def require_session(request: Request) -> dict[str, Any]:
             _sid_hash(sid),
             request.url.path,
         )
-        logger.debug("auth.require_session.refresh_failed sid=%s path=%s", sid, request.url.path)
+        _authdbg_raw("auth.require_session.refresh_failed sid=%s path=%s", sid, request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Periodically re-sync entitlements from Supabase so long-lived sessions
@@ -249,6 +255,10 @@ async def require_session(request: Request) -> dict[str, Any]:
         int(refreshed.get("exp") or 0),
         str(refreshed.get("user_id") or "")[-6:],
     )
+
+    user_id = str(refreshed.get("user_id") or "").strip()
+    if user_id:
+        request.state.user_id = user_id
 
     return refreshed
 

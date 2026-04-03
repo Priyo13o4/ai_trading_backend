@@ -11,8 +11,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    env_file:
-      - .env
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql
       # Init scripts run only on FIRST init of an empty PGDATA.
@@ -53,8 +51,6 @@ services:
       --appendfsync everysec
       --maxmemory 512mb
       --maxmemory-policy noeviction
-    env_file:
-      - .env
     volumes:
       - ./volumes/redis-queue-data:/data
     healthcheck:
@@ -76,8 +72,6 @@ services:
       --appendfsync everysec
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
-    env_file:
-      - .env
     volumes:
       - ./volumes/redis-app-data:/data
     healthcheck:
@@ -93,14 +87,12 @@ services:
     container_name: redis-sessions
     command: >-
       redis-server
-      --requirepass ${REDIS_PASSWORD}
+      --requirepass ${SESSION_REDIS_PASSWORD:-${REDIS_PASSWORD}}
       --save ""
       --appendonly no
       --maxmemory-policy noeviction
-    env_file:
-      - .env
     healthcheck:
-      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${SESSION_REDIS_PASSWORD:-${REDIS_PASSWORD}}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -110,15 +102,11 @@ services:
     image: n8nio/n8n:2.14.2
     restart: always
     container_name: ai_trading_bot
-    ports:
-      - "5678:5678"
     depends_on:
       postgres:
         condition: service_healthy
       redis-queue:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -135,16 +123,16 @@ services:
       QUEUE_BULL_REDIS_PORT: 6379
       QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
       OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
-      N8N_EDITOR_BASE_URL: ${N8N_BASE_URL}
-      WEBHOOK_URL: ${N8N_BASE_URL}
-      N8N_SECURE_COOKIE: "true"
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-${N8N_BASE_URL}}
+      WEBHOOK_URL: ${WEBHOOK_URL:-${N8N_BASE_URL}}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true
       N8N_PROXY_HOPS: 1
     volumes:
       - n8n_data:/home/node/.n8n
 
   n8n-worker:
-    image: n8nio/n8n:2.6.0
+    image: n8nio/n8n:2.14.2
     restart: always
     container_name: n8n-worker
     depends_on:
@@ -152,8 +140,6 @@ services:
         condition: service_healthy
       redis-queue:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
       EXECUTIONS_MODE: queue
       DB_TYPE: postgresdb
@@ -179,10 +165,8 @@ services:
     restart: always
     entrypoint: ["/app/docker_entrypoint.sh"]
     command: ["/app/start.sh"]
-    ports:
-      - "8080:8080"
     env_file:
-      - .env
+      - ${API_WEB_ENV_FILE:-./.env}
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Redis configuration (app/cache/pubsub): redis-app
@@ -196,16 +180,16 @@ services:
       SESSION_REDIS_HOST: redis-sessions
       SESSION_REDIS_PORT: 6379
       SESSION_REDIS_DB: 0
-      SESSION_REDIS_PASSWORD: ${REDIS_PASSWORD}
-      AUTH_ENV: production
-      TRUST_PROXY_HEADERS: "1"
+      SESSION_REDIS_PASSWORD: ${SESSION_REDIS_PASSWORD:-${REDIS_PASSWORD}}
+      APP_ENV: ${APP_ENV:-production}
+      AUTH_ENV: ${AUTH_ENV:-${APP_ENV:-production}}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-0}
       SESSION_BINDING_MODE: ${SESSION_BINDING_MODE:-off}
       AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
       AUTHDBG_ENABLED: ${AUTHDBG_ENABLED:-0}
-      # Explicit origin list for credentialed browser requests.
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173,https://pipfactor.com,https://www.pipfactor.com}
-      # Covers subdomain forwarding/preview hosts under pipfactor.com.
-      ALLOWED_ORIGIN_REGEX: ${ALLOWED_ORIGIN_REGEX:-^https://([a-zA-Z0-9_-]+\.)*pipfactor\.com$}
+      # Non-local deployments must set explicit CORS values.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://pipfactor.com,https://www.pipfactor.com}
+      ALLOWED_ORIGIN_REGEX: ${ALLOWED_ORIGIN_REGEX:-^https://(www\.)?pipfactor\.com$}
       STRATEGY_EXPIRY_JANITOR_INTERVAL_SECONDS: "30"
       STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK: "5"
       # SSE connections live in api-sse; api-web only serves short-lived REST requests.
@@ -219,6 +203,8 @@ services:
         condition: service_healthy
       redis-sessions:
         condition: service_healthy
+    ports:
+      - "8080:8080"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request as u; r=u.urlopen('http://localhost:8080/api/health', timeout=5); raise SystemExit(0 if r.getcode()==200 else 1)\""]
       interval: 60s
@@ -233,23 +219,28 @@ services:
     container_name: tradingbot-api-sse
     restart: always
     entrypoint: ["/app/docker_entrypoint.sh"]
-    ports:
-      - "8081:8081"
     command: ["/app/sse_start.sh"]
     env_file:
-      - .env
+      - ${API_SSE_ENV_FILE:-./.env}
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Redis configuration (app/cache/pubsub): redis-app
       REDIS_HOST: redis-app
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${TRADING_BOT_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SESSION_REDIS_HOST: redis-sessions
       SESSION_REDIS_PORT: 6379
       SESSION_REDIS_DB: 0
-      SESSION_REDIS_PASSWORD: ${REDIS_PASSWORD}
-      AUTH_ENV: production
-      TRUST_PROXY_HEADERS: "1"
+      SESSION_REDIS_PASSWORD: ${SESSION_REDIS_PASSWORD:-${REDIS_PASSWORD}}
+      APP_ENV: ${APP_ENV:-production}
+      AUTH_ENV: ${AUTH_ENV:-${APP_ENV:-production}}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-0}
       SESSION_BINDING_MODE: ${SESSION_BINDING_MODE:-off}
       AUTHDBG_ENABLED: ${AUTHDBG_ENABLED:-0}
       # Number of Uvicorn workers. 2 is enough for a pure-async SSE service.
@@ -274,11 +265,9 @@ services:
     container_name: tradingbot-api-worker
     restart: always
     entrypoint: ["/app/docker_entrypoint.sh"]
-    ports:
-      - "9001:9001"
     command: ["/app/worker_start.sh"]
     env_file:
-      - .env
+      - ${API_WORKER_ENV_FILE:-./.env}
     environment:
       DATA_SOURCE: MT5
       MT5_INGEST_ENABLE: "true"
@@ -290,9 +279,19 @@ services:
       REDIS_HOST: redis-app
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${TRADING_BOT_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SUPABASE_URL: ${SUPABASE_PROJECT_URL}
+      SUPABASE_PROJECT_URL: ${SUPABASE_PROJECT_URL}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      REFERRAL_REWARD_TRANSITIONS_ENABLED: ${REFERRAL_REWARD_TRANSITIONS_ENABLED:-false}
+      REFERRAL_PAUSE_RESUME_WORKER_ENABLED: ${REFERRAL_PAUSE_RESUME_WORKER_ENABLED:-false}
       USE_TIMESCALE_CAGGS: "true"
       MT5_HEARTBEAT_FILE: /tmp/mt5_ingest_heartbeat
       MT5_HEARTBEAT_INTERVAL_SECONDS: 15
@@ -337,8 +336,6 @@ services:
       - PAGE_LOAD_TIMEOUT=30
       - HOST=0.0.0.0
       - PORT=8000
-    env_file:
-      - .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -367,10 +364,8 @@ services:
         condition: service_healthy
       scraper:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/ai_trading_bot_data
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${TRADING_BOT_DB}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - SCRAPER_BASE_URL=${SCRAPER_BASE_URL:-http://tradingbot-scraper:8000}
       - SCRAPER_TIMEOUT=${SCRAPER_TIMEOUT:-300}

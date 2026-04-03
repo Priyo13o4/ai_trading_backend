@@ -26,6 +26,10 @@ import redis
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+APP_ROOT = os.path.abspath(os.path.join(SCRIPTS_ROOT, ".."))
+sys.path.insert(0, APP_ROOT)
+from app.error_alerts import report_runtime_error
+
 INDICATOR_SCRIPT = os.path.join(SCRIPTS_ROOT, "calculate_recent_indicators_v2.py")  # v2.0 - DST-safe with HTF checks
 REFERRAL_TRANSITIONS_SCRIPT = os.path.join(SCRIPT_DIR, "referral_reward_transitions.py")
 REFERRAL_PAUSE_RESUME_SCRIPT = os.path.join(SCRIPT_DIR, "referral_pause_resume_worker.py")
@@ -60,6 +64,27 @@ def log(message):
     """Print timestamped log message"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {message}", flush=True)
+
+
+def _emit_worker_runtime_alert(
+    *,
+    path: str,
+    message_internal: str,
+    message_safe: str = "Worker runtime error",
+    status_code: int = 500,
+    context: Optional[dict] = None,
+) -> None:
+    try:
+        report_runtime_error(
+            path=path,
+            method="PROCESS",
+            status_code=status_code,
+            message_safe=message_safe,
+            message_internal=message_internal,
+            context=context or {},
+        )
+    except Exception as exc:
+        log(f"⚠️  Failed to dispatch runtime alert: {exc}")
 
 
 def _get_redis_client() -> Optional[redis.Redis]:
@@ -321,10 +346,8 @@ def run_referral_reward_transitions() -> bool:
     """
     Run referral reward state transitions (Scope C).
     
-    Executes as a subprocess to avoid blocking the scheduler.
-    Non-fatal errors are logged but don't disrupt the scheduler.
-    
-    Returns True if successful or skipped, False if critical failure.
+    Executes as a subprocess to isolate referral transition execution.
+    Returns True if successful or disabled, False if execution failed.
     """
     log("🎁 Starting referral reward transitions task...")
     
@@ -360,21 +383,20 @@ def run_referral_reward_transitions() -> bool:
         if proc.returncode == 0:
             log("✓ Referral reward transitions completed successfully")
             return True
-        else:
-            log(f"⚠️  Referral transitions exited with code {proc.returncode}")
+        if proc.returncode == 2:
+            log("🛑 Referral transitions blocked due to missing Supabase credentials or required RPC contract")
             return False
+
+        log(f"🛑 Referral transitions exited with code {proc.returncode}")
+        return False
             
     except Exception as e:
-        log(f"⚠️  Error running referral transitions: {e}")
+        log(f"🛑 Error running referral transitions: {e}")
         return False
 
 
 def run_referral_pause_resume_worker() -> bool:
-    """Run Scope E referral pause/resume worker as a subprocess.
-
-    This helper is intentionally non-fatal: scheduler continues even if this
-    task fails so market processing remains uninterrupted.
-    """
+    """Run Scope E referral pause/resume worker as a subprocess."""
     log("🎁 Starting referral pause/resume task...")
 
     if not (os.getenv("REFERRAL_PAUSE_RESUME_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes"}:
@@ -408,12 +430,15 @@ def run_referral_pause_resume_worker() -> bool:
         if proc.returncode == 0:
             log("✓ Referral pause/resume worker completed successfully")
             return True
+        if proc.returncode == 2:
+            log("🛑 Referral pause/resume worker blocked due to missing Supabase schema contract or credentials")
+            return False
 
-        log(f"⚠️  Referral pause/resume worker exited with code {proc.returncode}")
+        log(f"🛑 Referral pause/resume worker exited with code {proc.returncode}")
         return False
 
     except Exception as e:
-        log(f"⚠️  Error running referral pause/resume worker: {e}")
+        log(f"🛑 Error running referral pause/resume worker: {e}")
         return False
 
 
@@ -504,6 +529,7 @@ def main():
     log_mode_banner()
 
     strict_lock_mode = _env_bool("WORKER_LOCK_STRICT_MODE", True)
+    referral_failure_fatal = _env_bool("WORKER_REFERRAL_FAILURE_FATAL", False)
     if not _validate_lock_ttl(strict_lock_mode):
         return 1
 
@@ -531,6 +557,18 @@ def main():
             log(
                 "🛑 Consecutive indicator updater failure threshold reached; "
                 "exiting scheduler with non-zero status for supervision"
+            )
+            _emit_worker_runtime_alert(
+                path="/worker/scheduler/indicator-updater",
+                message_internal=(
+                    "Consecutive indicator updater failure threshold reached "
+                    f"(phase={phase}, failures={consecutive_failures}, threshold={failure_threshold})"
+                ),
+                context={
+                    "phase": phase,
+                    "consecutive_failures": consecutive_failures,
+                    "failure_threshold": failure_threshold,
+                },
             )
             return True
         return False
@@ -585,7 +623,6 @@ def main():
 
     run_count = 0
     pause_resume_interval_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_INTERVAL_SECONDS", "21600"))
-    pause_resume_retry_delay_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_RETRY_DELAY_SECONDS", "100"))
     last_pause_resume_run_monotonic = 0.0
 
     while True:
@@ -625,8 +662,18 @@ def main():
                 if _record_updater_result(cycle_success, f"scheduled cycle #{run_count}"):
                     return 2
                 
-                # Run referral reward transitions after indicator updates (non-blocking)
-                run_referral_reward_transitions()
+                transitions_ok = run_referral_reward_transitions()
+                if not transitions_ok:
+                    log("🛑 Blocking scheduler execution due to referral transitions failure")
+                    _emit_worker_runtime_alert(
+                        path="/worker/scheduler/referral-transitions",
+                        message_internal="Scheduler blocked due to referral transitions failure",
+                        context={"run_count": run_count},
+                    )
+                    if referral_failure_fatal:
+                        return 3
+                    log("⚠️  Continuing scheduler loop because WORKER_REFERRAL_FAILURE_FATAL=0")
+                    continue
 
                 # Scope E pause/resume worker executes on slower cadence (default 6h).
                 now_monotonic = time.monotonic()
@@ -635,18 +682,16 @@ def main():
                     if worker_ok:
                         last_pause_resume_run_monotonic = now_monotonic
                     else:
-                        retry_delay = max(1, pause_resume_retry_delay_seconds)
-                        if retry_delay >= pause_resume_interval_seconds:
-                            # Run again on the next scheduler cycle when retry delay >= cadence.
-                            last_pause_resume_run_monotonic = now_monotonic - pause_resume_interval_seconds
-                        else:
-                            # Shift last-run backward so next due time is sooner than full cadence.
-                            elapsed_for_retry = pause_resume_interval_seconds - retry_delay
-                            last_pause_resume_run_monotonic = now_monotonic - elapsed_for_retry
-                        log(
-                            "⚠️  Referral pause/resume worker failed; "
-                            f"next retry in ~{retry_delay}s instead of full {pause_resume_interval_seconds}s cadence"
+                        log("🛑 Blocking scheduler execution due to referral pause/resume failure")
+                        _emit_worker_runtime_alert(
+                            path="/worker/scheduler/referral-pause-resume",
+                            message_internal="Scheduler blocked due to referral pause/resume failure",
+                            context={"run_count": run_count},
                         )
+                        if referral_failure_fatal:
+                            return 4
+                        log("⚠️  Continuing scheduler loop because WORKER_REFERRAL_FAILURE_FATAL=0")
+                        continue
                 
             finally:
                 if cycle_lock is not None:
@@ -662,6 +707,11 @@ def main():
             break
         except Exception as e:
             log(f"\n✗ Unexpected error: {e}")
+            _emit_worker_runtime_alert(
+                path="/worker/scheduler/outer-loop",
+                message_internal=f"Unexpected scheduler exception: {e.__class__.__name__}: {e}",
+                context={"run_count": run_count},
+            )
             if _record_updater_result(False, "outer scheduler loop exception"):
                 return 2
             log("Continuing after 60 seconds...")

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Header, HTTPException
 from typing import Optional, Any
 
+from app.observability.debug import debug_log
 from app.db import get_supabase_client, async_db
 from app.config.retry_policies import get_provider_webhook_policy
 from app.notifications.dead_letter import notify_dead_letter
@@ -19,14 +20,12 @@ from app.referrals.reward_revocation import revoke_referral_reward_on_refund
 
 logger = logging.getLogger(__name__)
 
-AUTHDBG_ENABLED = (os.getenv("AUTHDBG_ENABLED") or "0").strip().lower() in {"1", "true", "yes", "on"}
 WEBHOOK_CACHE_HINT_TTL_SECONDS = int((os.getenv("WEBHOOK_CACHE_HINT_TTL_SECONDS") or "86400").strip() or "86400")
 WEBHOOK_PROCESSING_LEASE_SECONDS = int((os.getenv("WEBHOOK_PROCESSING_LEASE_SECONDS") or "300").strip() or "300")
 
 
 def _plisio_debug(msg: str, *args: object) -> None:
-    if AUTHDBG_ENABLED:
-        logger.info(msg, *args)
+    debug_log(logger, "payments.plisio", msg, *args)
 
 
 def _normalize_upper(value: Any) -> str:
