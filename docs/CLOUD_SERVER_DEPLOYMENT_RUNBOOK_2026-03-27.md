@@ -41,6 +41,8 @@ Your laptop should no longer be the runtime for:
 
 Local development remains local.
 
+For local testing, do not route production hostnames to laptop ports.
+
 Remote dev, if you add it, should use either:
 
 - a separate dev server
@@ -83,8 +85,11 @@ Public hosts:
 - `api.pipfactor.com`
 - `sse.pipfactor.com`
 - `n8n.pipfactor.com`
-- optional:
-  - `mt5.pipfactor.com`
+
+Default for MT5 ingress:
+
+- keep `9001` internal-only
+- do not publish `mt5.pipfactor.com` unless an explicit external requirement is validated
 
 Internal service ports on the server:
 
@@ -102,10 +107,10 @@ Use the same internal ports as production if it is a separate machine.
 
 Example public hosts:
 
-- `app.pipfactor-dev.com`
-- `api.pipfactor-dev.com`
-- `sse.pipfactor-dev.com`
-- `n8n.pipfactor-dev.com`
+- `dev.pipfactor.com`
+- `api.dev.pipfactor.com`
+- `sse.dev.pipfactor.com`
+- `n8n.dev.pipfactor.com`
 
 ## Dev on the same server
 
@@ -205,16 +210,16 @@ Use separate tunnels for dev and production.
   - `api.pipfactor.com`
   - `sse.pipfactor.com`
   - `n8n.pipfactor.com`
-  - optional `mt5.pipfactor.com`
+  - `mt5.pipfactor.com` only if an explicit external MT5 requirement is validated
 
 ### Dev tunnel
 
 - tunnel name: `pipfactor-dev`
 - hostnames:
-  - `app.pipfactor-dev.com`
-  - `api.pipfactor-dev.com`
-  - `sse.pipfactor-dev.com`
-  - `n8n.pipfactor-dev.com`
+  - `dev.pipfactor.com`
+  - `api.dev.pipfactor.com`
+  - `sse.dev.pipfactor.com`
+  - `n8n.dev.pipfactor.com`
 
 Why separate tunnels:
 
@@ -233,6 +238,8 @@ One tunnel can serve both environments, but only if:
 
 This is still more error-prone than separate tunnels.
 
+For this project, single-tunnel mode is unsupported for production rollout and is documented only as a legacy fallback.
+
 ---
 
 ## DNS Plan
@@ -246,27 +253,30 @@ Create or keep proxied CNAMEs pointing to the production tunnel target:
 - `api.pipfactor.com`
 - `sse.pipfactor.com`
 - `n8n.pipfactor.com`
-- optional `mt5.pipfactor.com`
+- `mt5.pipfactor.com` only if an explicit external MT5 requirement is validated
 
-## Preferred dev DNS
+## Dev DNS (Canonical For This Project)
 
-In the dev zone, create proxied CNAMEs pointing to the dev tunnel target:
-
-- `app.pipfactor-dev.com`
-- `api.pipfactor-dev.com`
-- `sse.pipfactor-dev.com`
-- `n8n.pipfactor-dev.com`
-
-## Same-apex fallback dev DNS
-
-If you stay under the production apex:
+Under the existing `pipfactor.com` zone, create proxied CNAMEs pointing to the dev tunnel target:
 
 - `dev.pipfactor.com`
 - `api.dev.pipfactor.com`
 - `sse.dev.pipfactor.com`
 - `n8n.dev.pipfactor.com`
 
-Use this only if your cookie strategy also isolates dev from prod.
+Required cookie isolation with this topology:
+
+- `SESSION_COOKIE_NAME=dev_session`
+- `CSRF_COOKIE_NAME=dev_csrf_token`
+
+## Alternative Dev DNS (Separate Apex)
+
+If you later move to a separate dev apex:
+
+- `app.pipfactor-dev.com`
+- `api.pipfactor-dev.com`
+- `sse.pipfactor-dev.com`
+- `n8n.pipfactor-dev.com`
 
 ---
 
@@ -289,9 +299,14 @@ ingress:
     service: http://127.0.0.1:8081
   - hostname: n8n.pipfactor.com
     service: http://127.0.0.1:5678
+  - service: http_status:404
+```
+
+Add MT5 ingress only if explicitly required:
+
+```yaml
   - hostname: mt5.pipfactor.com
     service: http://127.0.0.1:9001
-  - service: http_status:404
 ```
 
 ## Example Dev Tunnel Config
@@ -303,13 +318,13 @@ tunnel: <dev-tunnel-id>
 credentials-file: /etc/cloudflared/<dev-tunnel-id>.json
 
 ingress:
-  - hostname: app.pipfactor-dev.com
+  - hostname: dev.pipfactor.com
     service: http://127.0.0.1:4300
-  - hostname: api.pipfactor-dev.com
+  - hostname: api.dev.pipfactor.com
     service: http://127.0.0.1:48080
-  - hostname: sse.pipfactor-dev.com
+  - hostname: sse.dev.pipfactor.com
     service: http://127.0.0.1:48081
-  - hostname: n8n.pipfactor-dev.com
+  - hostname: n8n.dev.pipfactor.com
     service: http://127.0.0.1:45678
   - service: http_status:404
 ```
@@ -334,6 +349,8 @@ Decide which of these is true:
 2. MT5 traffic can remain internal or tunnelled only
 
 If option 2 is true, do not leave `9001` internet-exposed.
+
+Default decision for this project: option 2.
 
 ## Special note on `5678`
 
@@ -410,6 +427,17 @@ Each environment must own its own URLs.
 - Razorpay webhook endpoint
 - Plisio webhook/callback endpoint
 
+Single-operator policy (accepted trade-off for this project):
+
+- Supabase project values may remain production-only across environments
+- Razorpay and Plisio callback ownership remains production-only unless sandbox mode is explicitly introduced
+- local/dev must not route production hostnames through the laptop during tests
+
+Clarification for Supabase in this model:
+
+- production-only means one shared project/credential set
+- callback/redirect allowlists can still include local, dev, and production hosts
+
 ---
 
 ## Suggested Bring-Up Order For Production
@@ -431,7 +459,7 @@ Each environment must own its own URLs.
 
 ---
 
-## Phase 2 Execution Checklist
+## Production Cutover Checklist
 
 - [ ] Build frontend artifact
   - `cd ../ai-trading_frontend && npm ci && npm run build`
@@ -446,6 +474,9 @@ Each environment must own its own URLs.
   - `curl -fsS https://pipfactor.com >/dev/null`
   - `curl -fsS https://api.pipfactor.com/api/health`
   - `curl -fsS https://sse.pipfactor.com/health`
+- [ ] Verify direct port exposure is blocked
+  - confirm `8080`, `8081`, `5678`, and `9001` (if present) are loopback-only
+  - confirm cloud firewall/security group denies public direct access to these ports
 
 ---
 
@@ -533,6 +564,10 @@ This is why Phase 0 inventory is important.
 
 If you want the shortest path to a safe production deployment:
 
+Precondition:
+
+- local testing should still run on localhost-only endpoints without production hostname routing
+
 1. keep dev local for now
 2. move only production to the cloud server
 3. use separate production tunnel credentials on that server
@@ -550,6 +585,6 @@ For the next deployment milestone, do this:
 2. run production Cloudflare Tunnel from the server
 3. remove laptop-based production hostname routing
 4. keep local on plain localhost
-5. add remote dev only after that, preferably under a separate dev domain
+5. add remote dev under `*.dev.pipfactor.com` with dev-specific cookie names
 
 That gives you a stable deployment path now without forcing a giant multi-environment rewrite in one shot.

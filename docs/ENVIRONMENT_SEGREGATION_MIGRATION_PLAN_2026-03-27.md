@@ -147,7 +147,7 @@ This matters because the project uses:
 
 ### Rule 4: Public callback URLs are environment-scoped
 
-Anything external must point to the right environment only:
+Anything external must point to the right environment only, or be explicitly documented as production-only by policy:
 
 - payment webhooks
 - referral links
@@ -179,19 +179,22 @@ Do not trust proxy headers while also leaving `8080` and `8081` openly reachable
 
 ### Dev
 
-Preferred design:
+Canonical design for this project:
 
-- use a separate public zone from production
+- use same-apex dev subdomains under `pipfactor.com`
 - example:
-  - `app.pipfactor-dev.com`
-  - `api.pipfactor-dev.com`
-  - `sse.pipfactor-dev.com`
-  - `n8n.pipfactor-dev.com`
-- Cookie domain: `.pipfactor-dev.com`
+   - `dev.pipfactor.com`
+   - `api.dev.pipfactor.com`
+   - `sse.dev.pipfactor.com`
+   - `n8n.dev.pipfactor.com`
+- Cookie domain: `.dev.pipfactor.com`
+- Cookie names:
+   - `SESSION_COOKIE_NAME=dev_session`
+   - `CSRF_COOKIE_NAME=dev_csrf_token`
 - Cookie secure: on
 - Tunnel: separate dev tunnel
 - Turnstile: dev widget and dev secret
-- Billing: optional sandbox-only callbacks
+- Billing: production credentials/callbacks may remain production-only if you intentionally avoid sandbox split
 
 ### Production
 
@@ -208,53 +211,37 @@ Preferred design:
 
 ---
 
-## Why I Am Recommending A Separate Dev Zone
+## Why Same-Apex Dev Is Chosen Here
 
-The safest dev architecture is not `dev.pipfactor.com`.
+For this project, the most practical operator model is same-apex dev under `*.dev.pipfactor.com`.
 
-The safest dev architecture is a separate apex/zone such as:
+This avoids managing a second zone while still keeping dev and prod logically separated.
 
-- `pipfactor-dev.com`
-- `pipfactor.app`
-- `pipfactor-staging.com`
-- any second domain you control for non-production traffic
+Mandatory safeguard for same-apex dev:
 
-Reason:
+- dev and prod cookie names must differ
+   - prod: `session`, `csrf_token`
+   - dev: `dev_session`, `dev_csrf_token`
 
-- production currently wants shared cookies across `pipfactor.com` and `api.pipfactor.com`
-- that means production cookies are naturally scoped to `.pipfactor.com`
-- if dev also lives under `.pipfactor.com`, those cookies can leak into dev requests
-- with the current frontend hardcoding of `csrf_token`, same-apex dev creates avoidable auth ambiguity
-
-Separate apex avoids that entire class of bugs.
+Without that split, cookie collision and CSRF ambiguity can occur under `.pipfactor.com`.
 
 ---
 
-## If You Refuse A Separate Dev Domain
+## Optional Future Alternative: Separate Dev Apex
 
-There is a workable fallback, but it is not the preferred first choice.
+If you later want stricter isolation, move dev to a separate apex:
 
-Fallback design:
+- `app.pipfactor-dev.com`
+- `api.pipfactor-dev.com`
+- `sse.pipfactor-dev.com`
+- `n8n.pipfactor-dev.com`
 
-- frontend dev host: `dev.pipfactor.com`
-- API dev host: `api.dev.pipfactor.com`
-- SSE dev host: `sse.dev.pipfactor.com`
-- cookie domain: `.dev.pipfactor.com`
-- cookie names must be environment-specific
-  - example:
-    - prod: `session`, `csrf_token`
-    - dev: `dev_session`, `dev_csrf_token`
-
-Without different cookie names, same-apex dev will still be vulnerable to cookie collision/bleed from production.
-
-Because the current frontend reads the CSRF cookie by hardcoded name, this fallback requires more application changes than the separate-domain approach.
-
-***USER COMMENT : Since its a single guy working the project, the separate-domain approach might be more complex to manage.Its better to stick with *.dev.pipfactor.com***
+Separate apex reduces cookie-collision risk but increases DNS and operational overhead.
 
 1. make local work first
 2. deploy production to the cloud server
 3. stop routing production hostnames to your laptop
-4. add remote dev afterward, preferably on a separate domain
+4. add remote dev afterward under `*.dev.pipfactor.com`
 
 This avoids trying to redesign local, dev, and prod at the same time.
 
@@ -317,11 +304,13 @@ The frontend should eventually use env values as the single source of truth for:
 
 - `APP_ENV=dev`
 - `COOKIE_DOMAIN` set to dev-only domain
+- `SESSION_COOKIE_NAME=dev_session`
+- `CSRF_COOKIE_NAME=dev_csrf_token`
 - `COOKIE_SECURE=1`
 - `COOKIE_SAMESITE=lax`
 - `TRUST_PROXY_HEADERS=1`
 - allowed origins limited to dev frontend URLs
-- provider callbacks point to dev API only if sandboxing is required
+- provider callbacks can remain production-only if sandbox split is intentionally not adopted
 
 ### Production
 
@@ -332,6 +321,26 @@ The frontend should eventually use env values as the single source of truth for:
 - `TRUST_PROXY_HEADERS=1`
 - allowed origins limited to production frontend URLs
 - provider callbacks point to prod API only
+
+## Single-Operator External Integration Policy
+
+This project may intentionally keep some third-party values production-only across environments.
+
+Allowed, with explicit guardrails:
+
+- Supabase project URL/keys can remain production if you are not splitting Supabase projects
+- Razorpay and Plisio live callbacks stay production-only
+
+Clarification for Supabase in this model:
+
+- production-only Supabase means one shared project/credential set
+- callback/redirect allowlists can still include `localhost`, `dev.pipfactor.com`, and production hosts
+
+Required guardrails when following this policy:
+
+- local and dev must never route production hostnames through the laptop
+- local and dev are not webhook owners for live payment callbacks
+- local and dev billing flows should be treated as non-authoritative unless sandbox mode is explicitly introduced
 
 ---
 
@@ -347,7 +356,7 @@ The frontend work after this planning phase should include:
 4. make CSP env-aware for API and SSE hosts
 5. move deep-link/universal-link host config into env-aware config
 6. align Turnstile with real local/dev/prod hostnames
-7. optionally make CSRF cookie name configurable if same-apex dev is chosen
+7. make session and CSRF cookie names environment-aware for same-apex dev (`dev_session`, `dev_csrf_token`)
 
 ## Backend scope
 
@@ -359,8 +368,9 @@ The backend work after this planning phase should include:
 4. centralize CORS config so `api-web` and `api-sse` cannot drift
 5. keep localhost host-only cookie behavior
 6. make public URLs explicit per environment
-7. keep provider callback URLs environment-specific
-8. review proxy-header trust so it is enabled only behind controlled ingress
+7. keep provider callback ownership explicit; if production-only, local/dev must not claim those callbacks
+8. enforce environment-specific cookie names for same-apex dev
+9. review proxy-header trust so it is enabled only behind controlled ingress
 
 ## Infra scope
 
@@ -443,40 +453,7 @@ Exit criteria:
 - protected routes work without the tunnel
 - SSE works locally
 
-## Phase 2: Introduce A Real Dev Environment
-
-Objective:
-
-- create a public non-production environment for realistic browser, Turnstile, and payment-sandbox testing
-
-Preferred target:
-
-- frontend: `https://app.pipfactor-dev.com`
-- API: `https://api.pipfactor-dev.com`
-- SSE: `https://sse.pipfactor-dev.com`
-- N8N: `https://n8n.pipfactor-dev.com`
-
-Actions:
-
-1. provision the dev domain/zone
-2. create a separate Cloudflare tunnel for dev
-3. create dev env bundles for frontend and backend
-4. point dev frontend only to dev backend
-5. create a dev Turnstile widget bound to dev hosts
-6. add dev callback URLs in Supabase
-7. if billing needs dev testing:
-   - use sandbox credentials only
-   - use dev webhook URLs only
-8. validate that prod and dev cookies do not collide
-
-Exit criteria:
-
-- dev login works on public HTTPS hosts
-- dev cookies are isolated from prod
-- dev frontend never calls prod API
-- dev SSE works
-
-## Phase 3: Move Production Off The Laptop
+## Phase 2: Move Production Off The Laptop
 
 Objective:
 
@@ -489,7 +466,10 @@ Actions:
 3. run production tunnel from the cloud server
 4. update production tunnel ingress so production hostnames point to server-local services
 5. remove production hostname forwarding to laptop ports
-6. verify:
+6. enforce network hardening before go-live:
+   - bind `8080`, `8081`, `5678`, and `9001` (if used) to loopback-only
+   - ensure cloud firewall/security group denies public direct access to those ports
+7. verify:
    - cookies
    - auth
    - SSE
@@ -505,11 +485,51 @@ Exit criteria:
 - `pipfactor.com` and `api.pipfactor.com` are served by the cloud server
 - production stays alive when your laptop is offline
 
+## Phase 3: Introduce A Real Dev Environment
+
+Objective:
+
+- create a public non-production environment for realistic browser and Turnstile testing
+- payment execution tests are sandbox-only; if sandbox is not adopted, treat local/dev billing checks as non-authoritative
+
+Target for this project:
+
+- frontend: `https://dev.pipfactor.com`
+- API: `https://api.dev.pipfactor.com`
+- SSE: `https://sse.dev.pipfactor.com`
+- N8N: `https://n8n.dev.pipfactor.com`
+
+Actions:
+
+1. create dev subdomains under the existing `pipfactor.com` zone
+2. create a separate Cloudflare tunnel for dev
+3. create dev env bundles for frontend and backend
+4. point dev frontend only to dev backend
+5. create a dev Turnstile widget bound to dev hosts
+6. add dev callback URLs in Supabase if required by the same production Supabase project
+7. set dev-only cookie names:
+   - `SESSION_COOKIE_NAME=dev_session`
+   - `CSRF_COOKIE_NAME=dev_csrf_token`
+8. keep Razorpay/Plisio live callbacks pointed to production unless sandbox mode is explicitly adopted
+9. validate that prod and dev cookies do not collide
+
+Exit criteria:
+
+- dev login works on public HTTPS hosts
+- dev cookies are isolated from prod
+- dev frontend never calls prod API
+- dev SSE works
+
 ## Phase 4: Post-Cutover Hardening
 
 Objective:
 
 - reduce attack surface and simplify operations
+
+Note:
+
+- loopback binding and direct-port blocking are Phase 2 cutover requirements
+- Phase 4 re-validates and tightens those controls
 
 Actions:
 
@@ -519,7 +539,7 @@ Actions:
    - `8080`
    - `8081`
    - `5678`
-   - `9001` unless MT5 needs it externally ***USER COMMENT: I am not sure but my current implemntation requires a bridge to talk with MT5 , so i guess its INTERNAL ONLY see file at ./MT5_STUFF/bridge_server.py and SmartStreamBinary.mq5***
+   - `9001` (default: internal-only; only expose if an explicit external requirement is validated)
 4. review WAF rules for payment providers
 5. optionally collapse public SSE hostname later if you want to reduce DNS/tunnel/CSP complexity
 
@@ -566,21 +586,24 @@ This keeps environment selection explicit and avoids one giant shared `.env`.
 - optional:
   - `mt5.pipfactor.com`
 
-## Preferred Dev
-
-- `app.pipfactor-dev.com`
-- `api.pipfactor-dev.com`
-- `sse.pipfactor-dev.com`
-- `n8n.pipfactor-dev.com`
-
-## Same-Apex Fallback Dev
+## Dev (Canonical For This Project)
 
 - `dev.pipfactor.com`
 - `api.dev.pipfactor.com`
 - `sse.dev.pipfactor.com`
 - `n8n.dev.pipfactor.com`
 
-Only use this fallback if you also plan environment-specific cookie names.
+Use dev-only cookie names with this topology:
+
+- `SESSION_COOKIE_NAME=dev_session`
+- `CSRF_COOKIE_NAME=dev_csrf_token`
+
+## Alternative Dev (Separate Apex)
+
+- `app.pipfactor-dev.com`
+- `api.pipfactor-dev.com`
+- `sse.pipfactor-dev.com`
+- `n8n.pipfactor-dev.com`
 
 ---
 
@@ -629,8 +652,8 @@ Impact:
 
 Mitigation:
 
-- separate dev domain preferred
-- if same apex is unavoidable, use different cookie names
+- for same-apex dev, use different cookie names (`dev_session`, `dev_csrf_token`)
+- never run dev with production cookie names
 
 ### Risk 3: Proxy trust is exploitable
 
@@ -716,6 +739,12 @@ Run this checklist for each environment before you consider it ready.
 - payment webhook endpoints are correct
 - referral links point to the right frontend
 - n8n public URL is correct
+- if Supabase/Razorpay/Plisio are intentionally production-only, verify local/dev do not receive their live callbacks
+
+### Network hardening checks
+
+- verify ports `8080`, `8081`, `5678`, and `9001` (if present) are loopback-only on host
+- verify cloud firewall/security group does not allow public direct ingress to those ports
 
 ---
 
@@ -727,6 +756,8 @@ The most practical, scalable, non-overengineered path is:
 2. deploy production to a cloud server immediately after that
 3. stop using production hostnames as your dev ingress
 4. create a true public `dev` environment after production is stable
-5. prefer a separate dev domain/zone to avoid cookie-scope surprises
+5. use same-apex dev under `*.dev.pipfactor.com` with dev-specific cookie names
 
 If you follow that order, you fix the real problem without trying to redesign the whole platform in one risky cutover.
+
+If production hostnames are still routed through a laptop, prioritize completing Phase 1 quickly and then execute Phase 2 before Phase 3.
