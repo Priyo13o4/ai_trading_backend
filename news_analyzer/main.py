@@ -357,13 +357,7 @@ class NewsAnalysisOrchestrator:
         except Exception as e:
             logger.error(f"✗ Database connection failed: {e}")
             return False
-        
-        # Test scraper
-        if not self.scraper_client.test_connection():
-            logger.warning("✗ Scraper service health-check failed (continuing anyway)")
-        else:
-            logger.info("✓ Scraper service OK")
-        
+
         # Test Gemini API
         if not self.analyzer.test_connection():
             logger.error("✗ Gemini API connection failed")
@@ -416,7 +410,7 @@ class NewsAnalysisOrchestrator:
         # Step 2: Scrape the article
         logger.info(f"Scraping article: {url}")
         scraped_data = scraper_client.scrape_article(url)
-        if not scraped_data or not scraped_data.get('content'):
+        if not scraped_data:
             raise TransientScrapeError(f"Scrape failed or empty content for {url}")
 
         # If scraper validation flagged an invalid page (including Cloudflare human verification), skip.
@@ -426,8 +420,11 @@ class NewsAnalysisOrchestrator:
             if update_stats:
                 self.stats['skipped'] += 1
             return False
+
+        article_content = scraped_data.get('content') or ''
+        if not article_content:
+            raise TransientScrapeError(f"Scrape failed or empty content for {url}")
         
-        article_content = scraped_data['content']
         published_date = scraped_data['published_date']
         ff_category = scraped_data.get('forexfactory_category')
         
@@ -448,13 +445,6 @@ class NewsAnalysisOrchestrator:
         logger.info(f"Scraped {len(article_content)} characters, "
                    f"published: {published_date or 'unknown'}, "
                    f"category: {ff_category or 'unknown'}")
-        
-        # Step 2.5: Validate ForexFactory content
-        if not scraped_data.get('is_valid', True):
-            logger.warning(f"SKIPPING - Invalid FF content: {scraped_data.get('validation_reason', 'unknown')}")
-            if update_stats:
-                self.stats['skipped'] += 1
-            return False
         
         # Step 2.6: Check published date - skip if missing
         if not published_date:

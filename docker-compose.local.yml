@@ -4,81 +4,34 @@
 #     -f docker-compose.yml -f docker-compose.local.yml up -d
 
 services:
-  postgres:
-    env_file:
-      - .env.local
-
-  redis-queue:
-    env_file:
-      - .env.local
-
-  redis-app:
-    env_file:
-      - .env.local
-
-  redis-sessions:
-    env_file:
-      - .env.local
-
   n8n:
-    env_file:
-      - .env.local
     ports:
       - "127.0.0.1:5678:5678"
-
-  n8n-worker:
-    env_file:
-      - .env.local
 
   api-web:
     env_file:
       - .env.local
     ports:
       - "127.0.0.1:8080:8080"
-    environment:
-      APP_ENV: local
-      AUTH_ENV: local
-      TRUST_PROXY_HEADERS: "0"
-      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
-      COOKIE_DOMAIN: ""
-      COOKIE_SECURE: "0"
-      COOKIE_SAMESITE: lax
-      FRONTEND_URL: http://localhost:3000
-      API_BASE_URL: http://localhost:8080
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
-      ALLOWED_ORIGIN_REGEX: ^https?://(localhost|127[.]0[.]0[.]1)(:[0-9]{1,5})?$
 
   api-sse:
     env_file:
       - .env.local
     ports:
       - "127.0.0.1:8081:8081"
-    environment:
-      APP_ENV: local
-      AUTH_ENV: local
-      TRUST_PROXY_HEADERS: "0"
-      COOKIE_DOMAIN: ""
-      COOKIE_SECURE: "0"
-      COOKIE_SAMESITE: lax
-      FRONTEND_URL: http://localhost:3000
-      API_BASE_URL: http://localhost:8080
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
-      ALLOWED_ORIGIN_REGEX: ^https?://(localhost|127[.]0[.]0[.]1)(:[0-9]{1,5})?$
 
   api-worker:
     env_file:
       - .env.local
     ports:
       - "127.0.0.1:9001:9001"
-    environment:
-      APP_ENV: local
-      AUTH_ENV: local
-      TRUST_PROXY_HEADERS: "0"
 
   scraper:
-    env_file:
-      - .env.local
+    profiles:
+      - legacy-scraper
+
+  scrapling:
+    ports:
+      - "127.0.0.1:8010:8010"
 
   news-analyzer:
-    env_file:
-      - .env.local

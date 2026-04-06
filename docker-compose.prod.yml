@@ -8,67 +8,34 @@
 #     -f docker-compose.yml -f docker-compose.prod.yml config
 
 services:
-  postgres:
-    env_file:
-      - .env.prod
-
-  redis-queue:
-    env_file:
-      - .env.prod
-
-  redis-app:
-    env_file:
-      - .env.prod
-
-  redis-sessions:
-    env_file:
-      - .env.prod
-
   n8n:
-    env_file:
-      - .env.prod
     ports:
       - "127.0.0.1:5678:5678"
-
-  n8n-worker:
-    env_file:
-      - .env.prod
 
   api-web:
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:8080:8080"
-    environment:
-      APP_ENV: production
-      AUTH_ENV: production
-      TRUST_PROXY_HEADERS: "1"
-      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
 
   api-sse:
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:8081:8081"
-    environment:
-      APP_ENV: production
-      AUTH_ENV: production
-      TRUST_PROXY_HEADERS: "1"
 
   api-worker:
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:9001:9001"
-    environment:
-      APP_ENV: production
-      AUTH_ENV: production
-      TRUST_PROXY_HEADERS: "1"
 
   scraper:
-    env_file:
-      - .env.prod
+    profiles:
+      - legacy-scraper
+
+  scrapling:
+    ports:
+      - "127.0.0.1:8010:8010"
 
   news-analyzer:
-    env_file:
-      - .env.prod

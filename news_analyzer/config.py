@@ -31,7 +31,7 @@ class Config:
     # Scraper Configuration
     SCRAPER_BASE_URL: str = os.getenv(
         "SCRAPER_BASE_URL",
-        "http://tradingbot-scraper:8000"
+        "http://tradingbot-scrapling:8010"
     )
     # Needs to be long enough for headful/manual Cloudflare solving.
     SCRAPER_TIMEOUT: int = int(os.getenv("SCRAPER_TIMEOUT", "240"))  # seconds

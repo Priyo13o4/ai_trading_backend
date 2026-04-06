@@ -25,8 +25,9 @@ Usage:
 import os
 import sys
 import argparse
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 import logging
 import pandas as pd
 from tqdm import tqdm
@@ -117,6 +118,16 @@ TIMEFRAME_SECONDS = {
     "MN1": 2592000,
 }
 
+INTRADAY_COMPOSITE_TIMEFRAMES = {"M5", "M15", "M30", "H1", "H4"}
+
+TIMEFRAME_RESAMPLE_RULES = {
+    "M5": "5min",
+    "M15": "15min",
+    "M30": "30min",
+    "H1": "1h",
+    "H4": "4h",
+}
+
 
 def _safe_positive_int(value: int, *, fallback: int, minimum: int = 1) -> int:
     try:
@@ -137,6 +148,131 @@ def _safe_non_negative_int(value: int, *, fallback: int) -> int:
 def _timeframe_delta(timeframe: str) -> timedelta:
     seconds = TIMEFRAME_SECONDS.get((timeframe or "").strip().upper(), 300)
     return timedelta(seconds=seconds)
+
+
+def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+
+    out = df.copy()
+    out["datetime"] = pd.to_datetime(out["datetime"], utc=True, errors="coerce")
+    out = out.dropna(subset=["datetime"])  # guard against malformed rows
+
+    for col in ["open", "high", "low", "close", "volume"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    out = out.dropna(subset=["open", "high", "low", "close", "volume"])
+    out = out.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last").reset_index(drop=True)
+    return out
+
+
+def _is_intraday_composite_timeframe(timeframe: str) -> bool:
+    tf = (timeframe or "").strip().upper()
+    return _use_timescale_caggs() and tf in INTRADAY_COMPOSITE_TIMEFRAMES
+
+
+def _resample_rule_for_timeframe(timeframe: str) -> str:
+    tf = (timeframe or "").strip().upper()
+    return TIMEFRAME_RESAMPLE_RULES[tf]
+
+
+def _fetch_candlesticks_window(
+    conn: psycopg.Connection,
+    *,
+    symbol: str,
+    timeframe: str,
+    lower_bound: datetime,
+    upper_bound: datetime,
+    max_rows: int,
+) -> pd.DataFrame:
+    relation = _ohlcv_relation_for_timeframe(timeframe)
+    with conn.cursor(row_factory=dict_row) as cur:
+        if relation == "candlesticks":
+            cur.execute(
+                """
+                SELECT time AS datetime, open, high, low, close, volume
+                FROM candlesticks
+                WHERE symbol = %s
+                  AND timeframe = %s
+                  AND time >= %s
+                  AND time <= %s
+                ORDER BY time ASC
+                LIMIT %s
+                """,
+                (symbol, timeframe, lower_bound, upper_bound, max_rows),
+            )
+        else:
+            end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
+            cur.execute(
+                f"""
+                SELECT time AS datetime, open, high, low, close, volume
+                FROM {relation}
+                WHERE symbol = %s
+                  AND time >= %s
+                  AND time <= LEAST(%s, NOW() - INTERVAL '{end_offset_seconds} seconds')
+                ORDER BY time ASC
+                LIMIT %s
+                """,
+                (symbol, lower_bound, upper_bound, max_rows),
+            )
+        rows = cur.fetchall()
+
+    return _normalize_ohlcv_frame(pd.DataFrame(rows))
+
+
+def _build_intraday_forming_candle(
+    conn: psycopg.Connection,
+    *,
+    symbol: str,
+    timeframe: str,
+    latest_finalized_time: datetime,
+) -> Tuple[pd.DataFrame, Optional[datetime]]:
+    if not _is_intraday_composite_timeframe(timeframe):
+        return pd.DataFrame(), None
+
+    max_rows = _safe_positive_int(os.getenv("INDICATOR_COMPOSITE_M1_MAX_ROWS", "4000"), fallback=4000, minimum=200)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT time AS datetime, open, high, low, close, volume
+            FROM candlesticks
+            WHERE symbol = %s
+              AND timeframe = 'M1'
+              AND time > %s
+            ORDER BY time DESC
+            LIMIT %s
+            """,
+            (symbol, latest_finalized_time, max_rows),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return pd.DataFrame(), None
+
+    m1_df = _normalize_ohlcv_frame(pd.DataFrame(rows))
+    if m1_df.empty:
+        return pd.DataFrame(), None
+
+    rule = _resample_rule_for_timeframe(timeframe)
+    resampled = (
+        m1_df.set_index("datetime")
+        .resample(rule, origin="epoch", label="left", closed="left")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna(subset=["open", "high", "low", "close"])
+    )
+
+    if resampled.empty:
+        return pd.DataFrame(), None
+
+    forming_df = _normalize_ohlcv_frame(resampled.tail(1).reset_index())
+    if forming_df.empty:
+        return pd.DataFrame(), None
+
+    forming_time = forming_df["datetime"].iloc[0].to_pydatetime()
+    if forming_time <= latest_finalized_time:
+        return pd.DataFrame(), None
+
+    return forming_df, forming_time
 
 
 def _ensure_indicator_watermarks_table(conn: psycopg.Connection) -> None:
@@ -623,6 +759,48 @@ def store_latest_indicators(
     return inserted
 
 
+def _calculate_snapshot_at_time(
+    ohlcv_df: pd.DataFrame,
+    *,
+    at_time: datetime,
+    lookback_bars: int,
+) -> Dict:
+    if ohlcv_df is None or ohlcv_df.empty:
+        return {}
+
+    target_ts = pd.Timestamp(at_time)
+    if target_ts.tzinfo is None:
+        target_ts = target_ts.tz_localize("UTC")
+    else:
+        target_ts = target_ts.tz_convert("UTC")
+
+    end_idx = int(ohlcv_df["datetime"].searchsorted(target_ts, side="right"))
+    if end_idx <= 0:
+        return {}
+
+    start_idx = max(0, end_idx - lookback_bars)
+    window_df = ohlcv_df.iloc[start_idx:end_idx]
+    if window_df.empty:
+        return {}
+
+    return calculate_all_indicators(
+        df=window_df,
+        ema_periods=EMA_PERIODS,
+        rsi_period=RSI_PERIOD,
+        macd_fast=MACD_FAST,
+        macd_slow=MACD_SLOW,
+        macd_signal=MACD_SIGNAL,
+        atr_period=ATR_PERIOD,
+        bb_period=BB_PERIOD,
+        bb_deviation=BB_DEVIATION,
+        roc_period=ROC_PERIOD,
+        adx_period=ADX_PERIOD,
+        obv_slope_period=OBV_SLOPE_PERIOD,
+        momentum_ema=MOMENTUM_EMA,
+        volatility_lookback=VOLATILITY_LOOKBACK,
+    )
+
+
 def calculate_and_store_indicators(
     conn: psycopg.Connection,
     symbol: str,
@@ -634,9 +812,10 @@ def calculate_and_store_indicators(
     lookback_bars: int = DEFAULT_LOOKBACK_BARS,
     force_overlap_recompute_minutes: int = DEFAULT_FORCE_OVERLAP_RECOMPUTE_MINUTES,
 ) -> Dict:
-    """Calculate indicators for one symbol/timeframe and store"""
+    """Calculate indicators for one symbol/timeframe and store."""
     if verbose:
         print(f"\n📊 {symbol} @ {timeframe}")
+
     safety_backfill_bars = _safe_positive_int(safety_backfill_bars, fallback=2)
     max_new_bars_per_cycle = _safe_positive_int(max_new_bars_per_cycle, fallback=8)
     lookback_bars = _safe_positive_int(lookback_bars, fallback=300)
@@ -644,7 +823,7 @@ def calculate_and_store_indicators(
         force_overlap_recompute_minutes,
         fallback=60,
     )
-    
+
     latest_candle_time = _get_latest_candle_time(conn, symbol=symbol, timeframe=timeframe)
     if latest_candle_time is None:
         if verbose:
@@ -660,11 +839,7 @@ def calculate_and_store_indicators(
 
     try:
         with conn.transaction():
-            _acquire_watermark_pair_lock(
-                conn,
-                symbol=symbol,
-                timeframe=timeframe,
-            )
+            _acquire_watermark_pair_lock(conn, symbol=symbol, timeframe=timeframe)
 
             watermark_time, watermark_updated_at = _get_watermark_for_update(
                 conn,
@@ -688,9 +863,9 @@ def calculate_and_store_indicators(
                     watermark_time = seeded_indicator_time
 
             timeframe_step = _timeframe_delta(timeframe)
+            candidate_times: List[datetime] = []
 
             if watermark_time is None:
-                # Bootstrap: process only a bounded recent window.
                 lower_bound = latest_candle_time - (timeframe_step * max_new_bars_per_cycle)
                 candidate_times = _fetch_candle_times_since(
                     conn,
@@ -701,7 +876,6 @@ def calculate_and_store_indicators(
                     max_rows=max_new_bars_per_cycle,
                 )
             else:
-                # First find truly new closed candles beyond watermark.
                 new_candle_times = _fetch_candle_times_since(
                     conn,
                     symbol=symbol,
@@ -718,34 +892,22 @@ def calculate_and_store_indicators(
                             datetime.now(timezone.utc) - watermark_updated_at
                         ) >= timedelta(minutes=force_overlap_recompute_minutes)
 
-                    if not should_force_overlap:
-                        if verbose:
-                            print(f"   ⏭️  Up-to-date (watermark={watermark_time}, latest={latest_candle_time})")
-                        return {
-                            "symbol": symbol,
-                            "timeframe": timeframe,
-                            "status": "up_to_date",
-                            "bars_processed": 0,
-                            "bars_stored": 0,
-                            "success": True,
-                        }
-
-                    overlap_lower_bound = watermark_time - (timeframe_step * safety_backfill_bars)
-                    candidate_times = _fetch_candle_times_since(
-                        conn,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        lower_bound=overlap_lower_bound,
-                        upper_bound=watermark_time,
-                        max_rows=safety_backfill_bars,
-                    )
-                    if verbose:
-                        print(
-                            "   ♻️  Forced overlap refresh on stable watermark "
-                            f"(age>={force_overlap_recompute_minutes}m, candidates={len(candidate_times)})"
+                    if should_force_overlap:
+                        overlap_lower_bound = watermark_time - (timeframe_step * safety_backfill_bars)
+                        candidate_times = _fetch_candle_times_since(
+                            conn,
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            lower_bound=overlap_lower_bound,
+                            upper_bound=watermark_time,
+                            max_rows=safety_backfill_bars,
                         )
+                        if verbose:
+                            print(
+                                "   ♻️  Forced overlap refresh on stable watermark "
+                                f"(age>={force_overlap_recompute_minutes}m, candidates={len(candidate_times)})"
+                            )
                 else:
-                    # Apply tiny overlap only when there is at least one new candle.
                     overlap_lower_bound = watermark_time - (timeframe_step * safety_backfill_bars)
                     candidate_times = _fetch_candle_times_since(
                         conn,
@@ -756,7 +918,53 @@ def calculate_and_store_indicators(
                         max_rows=max_new_bars_per_cycle + safety_backfill_bars,
                     )
 
-            if not candidate_times:
+            candidate_times = sorted(set(candidate_times))
+
+            backlog_history_df = pd.DataFrame()
+            if candidate_times:
+                anchor_time = candidate_times[0]
+                backlog_window_start = anchor_time - (
+                    timeframe_step * max(lookback_bars + safety_backfill_bars + 2, lookback_bars)
+                )
+                backlog_window_rows = max(
+                    lookback_bars + max_new_bars_per_cycle + safety_backfill_bars + 32,
+                    lookback_bars + 32,
+                )
+                backlog_history_df = _fetch_candlesticks_window(
+                    conn,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    lower_bound=backlog_window_start,
+                    upper_bound=latest_candle_time,
+                    max_rows=backlog_window_rows,
+                )
+
+            realtime_window_limit = max(
+                lookback_bars + safety_backfill_bars + max_new_bars_per_cycle + 32,
+                lookback_bars + 32,
+            )
+            realtime_history_df = _normalize_ohlcv_frame(
+                fetch_recent_candlesticks(
+                    conn,
+                    symbol,
+                    timeframe,
+                    limit=realtime_window_limit,
+                    at_or_before=latest_candle_time,
+                )
+            )
+
+            forming_df, forming_time = _build_intraday_forming_candle(
+                conn,
+                symbol=symbol,
+                timeframe=timeframe,
+                latest_finalized_time=latest_candle_time,
+            )
+            if not forming_df.empty:
+                realtime_history_df = _normalize_ohlcv_frame(
+                    pd.concat([realtime_history_df, forming_df], ignore_index=True)
+                )
+
+            if not candidate_times and realtime_history_df.empty:
                 if verbose:
                     print(f"   ⏭️  Up-to-date (watermark={watermark_time}, latest={latest_candle_time})")
                 return {
@@ -770,40 +978,23 @@ def calculate_and_store_indicators(
 
             stored_count = 0
             processed_count = 0
+            forming_stored = 0
+            finalized_realtime_stored = 0
             last_success_time = None
+            forming_ts = pd.Timestamp(forming_time).tz_convert("UTC") if forming_time is not None else None
+
+            processed_targets: set[pd.Timestamp] = set()
 
             for candle_time in candidate_times:
-                df = fetch_recent_candlesticks(
-                    conn,
-                    symbol,
-                    timeframe,
-                    limit=lookback_bars,
-                    at_or_before=candle_time,
+                indicators = _calculate_snapshot_at_time(
+                    backlog_history_df,
+                    at_time=candle_time,
+                    lookback_bars=lookback_bars,
                 )
-                if df.empty:
-                    continue
-                processed_count += 1
-
-                indicators = calculate_all_indicators(
-                    df=df,
-                    ema_periods=EMA_PERIODS,
-                    rsi_period=RSI_PERIOD,
-                    macd_fast=MACD_FAST,
-                    macd_slow=MACD_SLOW,
-                    macd_signal=MACD_SIGNAL,
-                    atr_period=ATR_PERIOD,
-                    bb_period=BB_PERIOD,
-                    bb_deviation=BB_DEVIATION,
-                    roc_period=ROC_PERIOD,
-                    adx_period=ADX_PERIOD,
-                    obv_slope_period=OBV_SLOPE_PERIOD,
-                    momentum_ema=MOMENTUM_EMA,
-                    volatility_lookback=VOLATILITY_LOOKBACK,
-                )
-
                 if not indicators:
                     continue
 
+                processed_count += 1
                 inserted = store_latest_indicators(
                     conn,
                     symbol=symbol,
@@ -813,9 +1004,72 @@ def calculate_and_store_indicators(
                     commit=False,
                 )
                 stored_count += 1 if inserted else 0
+                current_ts = pd.Timestamp(candle_time)
+                if current_ts.tzinfo is None:
+                    current_ts = current_ts.tz_localize("UTC")
+                else:
+                    current_ts = current_ts.tz_convert("UTC")
+                processed_targets.add(current_ts)
                 last_success_time = candle_time
 
+            realtime_targets = [latest_candle_time]
+            if forming_time is not None:
+                realtime_targets.append(forming_time)
+
+            for realtime_time in sorted(set(realtime_targets)):
+                current_ts = pd.Timestamp(realtime_time)
+                if current_ts.tzinfo is None:
+                    current_ts = current_ts.tz_localize("UTC")
+                else:
+                    current_ts = current_ts.tz_convert("UTC")
+
+                if current_ts in processed_targets:
+                    continue
+
+                indicators = _calculate_snapshot_at_time(
+                    realtime_history_df,
+                    at_time=realtime_time,
+                    lookback_bars=lookback_bars,
+                )
+                if not indicators:
+                    continue
+
+                processed_count += 1
+                inserted = store_latest_indicators(
+                    conn,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    at_time=realtime_time,
+                    indicators=indicators,
+                    commit=False,
+                )
+                stored_count += 1 if inserted else 0
+                processed_targets.add(current_ts)
+
+                if forming_ts is not None and current_ts == forming_ts:
+                    forming_stored += 1 if inserted else 0
+                else:
+                    finalized_realtime_stored += 1 if inserted else 0
+
             if last_success_time is None:
+                if forming_stored > 0 or finalized_realtime_stored > 0:
+                    if verbose:
+                        print(
+                            "   ✅ Stored realtime snapshot(s) "
+                            f"(finalized={finalized_realtime_stored}, forming={forming_stored}) "
+                            "without watermark advance"
+                        )
+                    return {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "stored_realtime_only",
+                        "bars_processed": processed_count,
+                        "bars_stored": stored_count,
+                        "forming_stored": forming_stored,
+                        "finalized_realtime_stored": finalized_realtime_stored,
+                        "success": True,
+                    }
+
                 if verbose:
                     print("   ⚠️  Insufficient history for indicator calculation in this cycle")
                 return {
@@ -836,8 +1090,9 @@ def calculate_and_store_indicators(
 
             if verbose:
                 print(
-                    f"   ✅ Stored {stored_count} snapshots, watermark -> {last_success_time} "
-                    f"(latest={latest_candle_time}, candidates={len(candidate_times)})"
+                    f"   ✅ Stored {stored_count} snapshots (finalized_realtime={finalized_realtime_stored}, "
+                    f"forming={forming_stored}), "
+                    f"watermark -> {last_success_time} (latest_finalized={latest_candle_time}, candidates={len(candidate_times)})"
                 )
 
             return {
@@ -846,6 +1101,8 @@ def calculate_and_store_indicators(
                 "status": "stored",
                 "bars_processed": processed_count,
                 "bars_stored": stored_count,
+                "forming_stored": forming_stored,
+                "finalized_realtime_stored": finalized_realtime_stored,
                 "success": True,
             }
 
@@ -918,6 +1175,21 @@ def main():
             "When no new closed candle exists, force a tiny overlap recompute at this interval in minutes "
             "(default from INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES; 0 disables)"
         ),
+    )
+    parser.add_argument(
+        "--max-symbol-timeframes-per-run",
+        type=int,
+        default=_safe_non_negative_int(os.getenv("INDICATOR_MAX_SYMBOL_TIMEFRAMES_PER_RUN", "0"), fallback=0),
+        help=(
+            "Phase-4 guardrail: maximum symbol/timeframe pairs to process in one run "
+            "(0 = process all)"
+        ),
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=_safe_non_negative_int(os.getenv("INDICATOR_MAX_RUNTIME_SECONDS_PER_RUN", "0"), fallback=0),
+        help="Phase-4 guardrail: stop this run once elapsed runtime exceeds this budget (0 = disabled)",
     )
     args = parser.parse_args()
 
@@ -996,21 +1268,52 @@ def main():
         print(f"\n📋 Processing:")
         print(f"   Symbols: {', '.join(symbols)}")
         print(f"   Timeframes: {', '.join(timeframes)}")
+
+        # Ensure discovery SELECTs do not keep an outer transaction open.
+        # Per-pair writes rely on top-level transaction scopes inside calculate_and_store_indicators.
+        conn.commit()
+
+        pairs = [(s, tf) for s in symbols for tf in timeframes]
+        max_pairs = _safe_non_negative_int(args.max_symbol_timeframes_per_run, fallback=0)
+        if max_pairs > 0 and len(pairs) > max_pairs:
+            rotation_seed = int(datetime.now(timezone.utc).timestamp() // 300)
+            start_idx = rotation_seed % len(pairs)
+            rotated_pairs = pairs[start_idx:] + pairs[:start_idx]
+            pairs = rotated_pairs[:max_pairs]
+            print(
+                f"⚙️  Guardrail active: limiting run to {len(pairs)} pair(s) "
+                f"from total {len(symbols) * len(timeframes)}"
+            )
+
+        runtime_budget_seconds = _safe_non_negative_int(args.max_runtime_seconds, fallback=0)
+        run_started = time.monotonic()
+        deferred_pairs = 0
         
         results = []
-        for symbol in symbols:
-            for timeframe in timeframes:
-                result = calculate_and_store_indicators(
-                    conn,
-                    symbol,
-                    timeframe,
-                    verbose=args.verbose,
-                    safety_backfill_bars=args.safety_backfill_bars,
-                    max_new_bars_per_cycle=args.max_new_bars_per_cycle,
-                    lookback_bars=args.lookback_bars,
-                    force_overlap_recompute_minutes=args.force_overlap_recompute_minutes,
-                )
-                results.append(result)
+        for idx, (symbol, timeframe) in enumerate(pairs, start=1):
+            if runtime_budget_seconds > 0 and idx > 1:
+                elapsed = time.monotonic() - run_started
+                if elapsed >= runtime_budget_seconds:
+                    deferred_pairs = len(pairs) - idx + 1
+                    print(
+                        f"⏱️  Runtime budget reached ({elapsed:.1f}s >= {runtime_budget_seconds}s); "
+                        f"deferring {deferred_pairs} pair(s) to next run"
+                    )
+                    break
+
+            result = calculate_and_store_indicators(
+                conn,
+                symbol,
+                timeframe,
+                verbose=args.verbose,
+                safety_backfill_bars=args.safety_backfill_bars,
+                max_new_bars_per_cycle=args.max_new_bars_per_cycle,
+                lookback_bars=args.lookback_bars,
+                force_overlap_recompute_minutes=args.force_overlap_recompute_minutes,
+            )
+            results.append(result)
+            if result.get("success"):
+                conn.commit()
         
         # Summary
         print("\n" + "="*70)
@@ -1018,13 +1321,18 @@ def main():
         print("="*70)
         
         stored = [r for r in results if r.get("status") == "stored"]
+        stored_realtime_only = [r for r in results if r.get("status") == "stored_realtime_only"]
         up_to_date = [r for r in results if r.get("status") == "up_to_date"]
         skipped_insufficient = [r for r in results if r.get("status") == "skipped_insufficient_data"]
         skipped_no_data = [r for r in results if r.get("status") == "skipped_no_data"]
         errors = [r for r in results if r.get("status") == "error"]
 
         print(f"✅ Stored: {len(stored)}")
+        if stored_realtime_only:
+            print(f"🧩 Stored (realtime-only): {len(stored_realtime_only)}")
         print(f"⏭️  Up-to-date: {len(up_to_date)}")
+        if deferred_pairs:
+            print(f"⏸️  Deferred pairs: {deferred_pairs}")
         if skipped_insufficient:
             tfs = sorted({r['timeframe'] for r in skipped_insufficient})
             print(f"⚠️  Skipped (insufficient history): {len(skipped_insufficient)} (tfs={tfs})")
@@ -1039,7 +1347,7 @@ def main():
             if len(errors) > preview_count:
                 print(f"   - ... and {len(errors) - preview_count} more")
 
-        total_bars = sum(r.get("bars_stored", 0) for r in stored)
+        total_bars = sum(r.get("bars_stored", 0) for r in results if r.get("success"))
         print(f"📊 Total indicator rows stored: {total_bars:,}")
         print("="*70)
 

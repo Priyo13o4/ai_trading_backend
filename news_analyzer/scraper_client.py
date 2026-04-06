@@ -4,12 +4,9 @@ Integrates with the existing scraper container.
 """
 import requests
 import logging
-from typing import Dict, Optional, Tuple
-from datetime import datetime, timezone
-import time
-from bs4 import BeautifulSoup
+from typing import Dict, Optional
+from datetime import datetime, timezone, timedelta
 import re
-import pytz
 
 from config import Config
 
@@ -50,69 +47,203 @@ class ScraperClient:
             None if scraping failed
         """
         endpoint = f"{self.base_url}/api/v1/scrape"
-        payload = {
+        preflight_payload = {
             "url": url,
-            "force_selenium": force_selenium,
-            "auto_detect_js": True
+            "mode": "http",
         }
+
+        stealth_payloads = [
+            {
+                "url": url,
+                "mode": "stealthy",
+                "headless": True,
+                "solve_cloudflare": False,
+                "network_idle": False,
+            },
+            {
+                "url": url,
+                "mode": "stealthy",
+                "headless": True,
+                "solve_cloudflare": True,
+                "google_search": True,
+                "network_idle": False,
+                "session_reset": True,
+                "reuse_session": False,
+            },
+        ]
         
         try:
             logger.debug(f"Scraping article: {url}")
-            response = self.session.post(
-                endpoint,
-                json=payload,
-                timeout=self.timeout
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Check if scraping was successful
-                if not data.get('success', False):
-                    err = (data.get('error') or 'Unknown error').strip()
-                    if 'cloudflare_unsolved' in err.lower():
-                        raise CloudflareChallengeUnsolvedError(err)
-                    logger.error(f"Scraper returned success=false for {url}: {err}")
-                    return None
-                
-                # Handle the actual scraper response structure per USAGE_GUIDE
-                sections = data.get('sections', {})
-                content_section = sections.get('content', {})
-                metadata = sections.get('metadata', {})
-                
-                # Get text chunks and join them - THIS IS THE KEY
-                text_chunks = content_section.get('text_chunks', [])
-                full_content = ' '.join(text_chunks) if text_chunks else ''
+            data = None
+
+            # Fast preflight via plain HTTP mode. This quickly identifies hard source
+            # failures (e.g., 400/404) and avoids expensive browser startup.
+            try:
+                preflight_response = self.session.post(
+                    endpoint,
+                    json=preflight_payload,
+                    timeout=min(self.timeout, 30),
+                )
+                if preflight_response.status_code == 200:
+                    preflight_data = preflight_response.json()
+                    if preflight_data.get('success', False):
+                        preflight_source_status = int(
+                            preflight_data.get('meta', {}).get('status_code', 200) or 200
+                        )
+                        if preflight_source_status >= 400:
+                            logger.debug(
+                                f"HTTP preflight returned source status {preflight_source_status} for {url}; "
+                                "skipping stealthy fetch"
+                            )
+                            data = preflight_data
+            except Exception:
+                # Preflight is opportunistic; fall through to stealthy fetches.
+                data = None
+
+            if data is None:
+                for attempt_idx, payload in enumerate(stealth_payloads):
+                    response = self.session.post(
+                        endpoint,
+                        json=payload,
+                        timeout=self.timeout
+                    )
+
+                    if response.status_code != 200:
+                        err_payload = None
+                        try:
+                            err_payload = response.json()
+                        except Exception:
+                            err_payload = None
+
+                        if isinstance(err_payload, dict):
+                            err_msg = err_payload.get('error') or err_payload.get('message') or 'unknown error'
+                            logger.error(
+                                f"Scraper returned status {response.status_code} for {url}: {err_msg}"
+                            )
+                        else:
+                            logger.error(f"Scraper returned status {response.status_code} for {url}")
+                        return None
+
+                    candidate = response.json()
+                    if not candidate.get('success', False):
+                        err = (candidate.get('error') or 'Unknown error').strip()
+                        if 'cloudflare_unsolved' in err.lower():
+                            if attempt_idx == 0:
+                                logger.info(
+                                    f"Cloudflare gate suspected for {url}; retrying with solver enabled"
+                                )
+                                continue
+                            raise CloudflareChallengeUnsolvedError(err)
+                        logger.error(f"Scraper returned success=false for {url}: {err}")
+                        return None
+
+                    source_status_code = int(candidate.get('meta', {}).get('status_code', 200) or 200)
+                    if attempt_idx == 0 and source_status_code in {403, 429, 503}:
+                        logger.info(
+                            f"Source HTTP {source_status_code} for {url}; retrying with Cloudflare solver"
+                        )
+                        continue
+
+                    data = candidate
+                    break
+
+            if data is not None:
+
+                article = data.get('article', {}) or {}
+                sections = data.get('sections', {}) or {}
+                section_meta = sections.get('metadata', {}) or {}
+                section_content = sections.get('content', {}) or {}
+
+                full_content = (data.get('text') or '').strip()
+                if not full_content:
+                    chunks = section_content.get('text_chunks') or []
+                    if isinstance(chunks, list):
+                        full_content = ' '.join(
+                            chunk.strip() for chunk in chunks if isinstance(chunk, str) and chunk.strip()
+                        ).strip()
+
+                title = (
+                    data.get('title')
+                    or article.get('title')
+                    or section_meta.get('headline')
+                    or section_meta.get('title')
+                    or ''
+                )
+
+                news_type = article.get('news_type') or section_meta.get('news_type')
+                impact = article.get('impact') or section_meta.get('impact')
+                date_time_utc = article.get('date_time_utc') or section_meta.get('date_time_utc')
+                date_time = article.get('date_time') or section_meta.get('date_time')
+                links = data.get('links') or []
+
+                if not isinstance(links, list):
+                    links = []
+
+                method = data.get('mode') or data.get('method')
+
+                word_count = data.get('word_count')
+                if not isinstance(word_count, int):
+                    word_count = len(full_content.split()) if full_content else 0
+
+                metadata = {
+                    'title': title,
+                    'headline': title,
+                    'posted_date': date_time_utc or date_time or '',
+                    'publish_date': date_time_utc or '',
+                    'posted_date_utc': date_time_utc or '',
+                    'publish_date_utc': date_time_utc or '',
+                    'posted_at_text': article.get('posted_at_text') or section_meta.get('posted_at_text') or '',
+                    'category': self._build_category(news_type, impact),
+                    'impact': impact,
+                    'news_type': news_type,
+                    'posted_by': article.get('posted_by') or section_meta.get('posted_by'),
+                    'posted_ago_text': article.get('posted_ago_text') or section_meta.get('posted_ago_text'),
+                    'linked_events': article.get('linked_events') or section_meta.get('linked_events') or [],
+                    'links': links,
+                }
+
+                source_status_code = int(data.get('meta', {}).get('status_code', 200) or 200)
                 
                 # Extract metadata from the scraped content
                 published_date = self._extract_published_date_from_metadata(metadata, full_content)
                 
-                # Extract ForexFactory category from metadata (preferred) or content
-                ff_category = metadata.get('category') or self._extract_forexfactory_category(full_content)
+                # Category now comes directly from scraper metadata.
+                ff_category = metadata.get('category')
                 
-                # Validate ForexFactory content
-                is_valid, validation_reason = self._validate_forexfactory_content(full_content, url)
+                # Validate ForexFactory content.
+                if source_status_code >= 400:
+                    is_valid, validation_reason = False, f"Source HTTP {source_status_code}"
+                else:
+                    is_valid, validation_reason = self._validate_forexfactory_content(
+                        full_content,
+                        url,
+                        title=metadata.get('title'),
+                        links=links,
+                    )
                 
                 result = {
                     'content': full_content,
-                    'summary': content_section.get('summary', ''),
+                    'summary': full_content[:320],
                     'html': '',  # Not using HTML anymore
-                    'status_code': data.get('meta', {}).get('status_code', 200),
+                    'status_code': source_status_code,
                     'metadata': metadata,
                     'published_date': published_date,
                     'forexfactory_category': ff_category,
                     'is_valid': is_valid,
                     'validation_reason': validation_reason,
                     'url': url,
-                    'stats': data.get('stats', {}),
-                    'method': data.get('method'),
-                    'word_count': data.get('stats', {}).get('word_count', 0)
+                    'stats': {
+                        'word_count': word_count,
+                        'char_count': len(full_content),
+                    },
+                    'method': method,
+                    'word_count': word_count
                 }
                 
                 logger.debug(f"Successfully scraped {url} ({len(result['content'])} chars, {result['word_count']} words, method: {result['method']})")
                 return result
             else:
-                logger.error(f"Scraper returned status {response.status_code} for {url}")
+                logger.error(f"Scraper did not return usable data for {url}")
                 return None
                 
         except requests.exceptions.Timeout:
@@ -127,10 +258,7 @@ class ScraperClient:
     
     def _extract_published_date_from_metadata(self, metadata: dict, content: str) -> Optional[datetime]:
         """
-        Extract the published date from metadata or content.
-        
-        ForexFactory Story Stats format: "Jan 2, 2026 10:50pm" or "Jan 4, 9:11pm(18 hr ago)"
-        Note: ForexFactory times appear to be in IST (UTC+5:30), need to convert to UTC
+        Extract published date using explicit scraper metadata fields.
         
         Args:
             metadata: Metadata dict from scraper
@@ -140,220 +268,29 @@ class ScraperClient:
             datetime object in UTC or None
         """
         try:
-            # PRIORITY 1: Extract from metadata['posted_date'] (from cleaner.py FF extraction)
-            posted_date = metadata.get('posted_date')
-            if posted_date:
-                # Clean up - remove "(X hr ago)" suffix if present
-                posted_date = re.sub(r'\([^)]+\)$', '', posted_date).strip()
-                
-                # Try parsing "Jan 2, 2026 10:50pm" format (with year)
-                try:
-                    parsed_date = datetime.strptime(posted_date, "%b %d, %Y %I:%M%p")
-                    
-                    # Convert from IST to UTC
-                    ist = pytz.timezone('Asia/Kolkata')
-                    parsed_date_ist = ist.localize(parsed_date)
-                    parsed_date_utc = parsed_date_ist.astimezone(pytz.UTC)
-                    
-                    logger.debug(f"Date: {posted_date} IST -> {parsed_date_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                    return parsed_date_utc.replace(tzinfo=None)  # Return naive UTC datetime
-                except ValueError:
-                    pass
-                
-                # Try parsing without year (add current year)
-                try:
-                    current_year = datetime.now().year
-                    posted_date_with_year = f"{posted_date} {current_year}"
-                    parsed_date = datetime.strptime(posted_date_with_year, "%b %d, %I:%M%p %Y")
-                    
-                    # Convert from IST to UTC
-                    ist = pytz.timezone('Asia/Kolkata')
-                    parsed_date_ist = ist.localize(parsed_date)
-                    parsed_date_utc = parsed_date_ist.astimezone(pytz.UTC)
-                    
-                    logger.debug(f"Date: {posted_date} IST -> {parsed_date_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                    return parsed_date_utc.replace(tzinfo=None)
-                except ValueError as e:
-                    logger.debug(f"Failed to parse metadata posted_date: {posted_date}, error: {e}")
-            
-            # PRIORITY 2: Extract from content (fallback for older code path)
-            if content:
-                # Try with year first
-                posted_pattern = r'Posted:\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}(?:am|pm))'
-                matches = re.search(posted_pattern, content, re.IGNORECASE)
-                
-                if matches:
-                    date_str = matches.group(1)
-                    try:
-                        # Parse "Jan 2, 2026 10:50pm" format
-                        parsed_date = datetime.strptime(date_str, "%b %d, %Y %I:%M%p")
-                        
-                        # ForexFactory times are in IST (UTC+5:30), convert to UTC
-                        ist = pytz.timezone('Asia/Kolkata')
-                        parsed_date_ist = ist.localize(parsed_date)
-                        parsed_date_utc = parsed_date_ist.astimezone(pytz.UTC)
-                        
-                        logger.info(f"Extracted date from Story Stats: {date_str} IST -> {parsed_date_utc} UTC")
-                        return parsed_date_utc.replace(tzinfo=None)  # Return naive UTC datetime
-                    except ValueError as e:
-                        logger.debug(f"Failed to parse Story Stats date with year: {date_str}, error: {e}")
-                
-                # Fallback: Try without year (add current year)
-                posted_pattern_no_year = r'Posted:\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{1,2}:\d{2}(?:am|pm))'
-                matches = re.search(posted_pattern_no_year, content, re.IGNORECASE)
-                
-                if matches:
-                    date_str = matches.group(1)
-                    current_year = datetime.now().year
-                    date_str_with_year = f"{date_str} {current_year}"
-                    
-                    try:
-                        parsed_date = datetime.strptime(date_str_with_year, "%b %d, %I:%M%p %Y")
-                        
-                        # Convert from IST to UTC
-                        ist = pytz.timezone('Asia/Kolkata')
-                        parsed_date_ist = ist.localize(parsed_date)
-                        parsed_date_utc = parsed_date_ist.astimezone(pytz.UTC)
-                        
-                        logger.info(f"Extracted date from Story Stats (no year): {date_str} IST -> {parsed_date_utc} UTC")
-                        return parsed_date_utc.replace(tzinfo=None)  # Return naive UTC datetime
-                    except ValueError as e:
-                        logger.debug(f"Failed to parse Story Stats date without year: {date_str}, error: {e}")
-            
-            # PRIORITY 2: Try common metadata fields
             if not metadata:
-                logger.warning("No metadata and couldn't extract from content")
                 return None
-            
+
             date_fields = [
                 'publish_date',
-                'date',
-                'published',
-                'created',
-                'pubdate'
+                'posted_date',
+                'publish_date_utc',
+                'posted_date_utc',
             ]
-            
+
             for field in date_fields:
                 date_str = metadata.get(field)
-                if date_str:
-                    parsed_date = self._parse_date_string(date_str)
-                    if parsed_date:
-                        logger.info(f"Extracted date from metadata field '{field}': {parsed_date}")
-                        return parsed_date
-            
-            # Try parsing description if it contains date patterns
-            description = metadata.get('description', '')
-            if description:
-                date_patterns = [
-                    r'(\w{3,9}\s+\d{1,2},\s+\d{4})',  # "January 1, 2026"
-                    r'(\d{1,2}\s+\w{3,9}\s+\d{4})',     # "1 January 2026"
-                    r'(\d{4}-\d{2}-\d{2})',              # "2026-01-01"
-                ]
-                
-                for pattern in date_patterns:
-                    matches = re.findall(pattern, description)
-                    if matches:
-                        for match in matches:
-                            parsed_date = self._parse_date_string(match)
-                            if parsed_date:
-                                logger.info(f"Extracted date from description: {parsed_date}")
-                                return parsed_date
-            
-            # Fallback: try first 500 chars of content
-            if content:
-                date_patterns = [
-                    r'(\w{3,9}\s+\d{1,2},\s+\d{4})',
-                    r'(\d{1,2}\s+\w{3,9}\s+\d{4})',
-                    r'(\d{4}-\d{2}-\d{2})',
-                ]
-                
-                for pattern in date_patterns:
-                    matches = re.findall(pattern, content[:500])
-                    if matches:
-                        for match in matches:
-                            parsed_date = self._parse_date_string(match)
-                            if parsed_date:
-                                logger.info(f"Extracted date from content: {parsed_date}")
-                                return parsed_date
-            
-            logger.warning("Could not extract published date")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error extracting published date: {e}")
-            return None
-    
-    def _extract_published_date(self, html: str, content: str) -> Optional[datetime]:
-        """
-        Extract the published date from article HTML or content.
-        
-        ForexFactory typically includes dates in various formats.
-        We'll try multiple extraction methods.
-        
-        Args:
-            html: Raw HTML content
-            content: Cleaned text content
-        
-        Returns:
-            datetime object or None
-        """
-        if not html:
-            return None
-        
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # Method 1: Look for meta tags (Open Graph, Twitter Cards, etc.)
-            meta_tags = [
-                ('meta', {'property': 'article:published_time'}),
-                ('meta', {'name': 'publish-date'}),
-                ('meta', {'name': 'date'}),
-                ('meta', {'property': 'og:published_time'}),
-                ('time', {'datetime': True}),
-            ]
-            
-            for tag_name, attrs in meta_tags:
-                tag = soup.find(tag_name, attrs)
-                if tag:
-                    # Extract datetime from content or datetime attribute
-                    date_str = tag.get('content') or tag.get('datetime')
-                    if date_str:
-                        parsed_date = self._parse_date_string(date_str)
-                        if parsed_date:
-                            logger.info(f"Extracted date from {tag_name}: {parsed_date}")
-                            return parsed_date
-            
-            # Method 2: Look for common date patterns in HTML classes/ids
-            date_elements = soup.find_all(['span', 'div', 'p', 'time'], 
-                                         class_=re.compile(r'date|time|publish', re.I))
-            
-            for elem in date_elements:
-                date_str = elem.get_text(strip=True)
-                if date_str:
-                    parsed_date = self._parse_date_string(date_str)
-                    if parsed_date:
-                        logger.info(f"Extracted date from element: {parsed_date}")
-                        return parsed_date
-            
-            # Method 3: Look for date patterns in content text
-            # Common patterns: "Jan 01, 2026", "January 1, 2026", "2026-01-01", etc.
-            date_patterns = [
-                r'(\w{3,9}\s+\d{1,2},\s+\d{4})',  # "January 1, 2026"
-                r'(\d{1,2}\s+\w{3,9}\s+\d{4})',     # "1 January 2026"
-                r'(\d{4}-\d{2}-\d{2})',              # "2026-01-01"
-                r'(\d{2}/\d{2}/\d{4})',              # "01/01/2026"
-            ]
-            
-            for pattern in date_patterns:
-                matches = re.findall(pattern, content[:500])  # Check first 500 chars
-                if matches:
-                    for match in matches:
-                        parsed_date = self._parse_date_string(match)
-                        if parsed_date:
-                            logger.info(f"Extracted date from content pattern: {parsed_date}")
-                            return parsed_date
-            
-            logger.warning("Could not extract published date from article")
+                if not date_str:
+                    continue
+
+                parsed_date = self._parse_date_string(str(date_str))
+                if not parsed_date:
+                    continue
+
+                if parsed_date.tzinfo is not None:
+                    parsed_date = parsed_date.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed_date
+
             return None
             
         except Exception as e:
@@ -374,76 +311,63 @@ class ScraperClient:
             return None
         
         # Common date formats
+        normalized = date_str.strip()
+        if normalized.endswith('Z'):
+            normalized = normalized[:-1] + '+00:00'
+
         formats = [
-            '%Y-%m-%dT%H:%M:%S%z',  # ISO 8601 with timezone
-            '%Y-%m-%dT%H:%M:%S',     # ISO 8601 without timezone
-            '%Y-%m-%d',               # YYYY-MM-DD
-            '%B %d, %Y',              # January 01, 2026
-            '%b %d, %Y',              # Jan 01, 2026
-            '%d %B %Y',               # 01 January 2026
-            '%d %b %Y',               # 01 Jan 2026
-            '%m/%d/%Y',               # 01/01/2026
-            '%d/%m/%Y',               # 01/01/2026 (European)
+            ('%Y-%m-%dT%H:%M:%S.%f%z', True),  # ISO 8601 with milliseconds and timezone
+            ('%Y-%m-%dT%H:%M:%S%z', True),     # ISO 8601 with timezone
+            ('%Y-%m-%dT%H:%M:%S', True),       # ISO 8601 without timezone
+            ('%Y-%m-%d', True),                # YYYY-MM-DD
+            ('%b %d, %Y %I:%M%p', True),       # Apr 05, 2026 06:30am
+            ('%b %d, %I:%M%p', False),         # Apr 05, 6:30am (no year)
+            ('%B %d, %Y', True),               # January 01, 2026
+            ('%b %d, %Y', True),               # Jan 01, 2026
+            ('%d %B %Y', True),                # 01 January 2026
+            ('%d %b %Y', True),                # 01 Jan 2026
+            ('%m/%d/%Y', True),                # 01/01/2026
+            ('%d/%m/%Y', True),                # 01/01/2026 (European)
         ]
-        
-        for fmt in formats:
+
+        now_utc = datetime.utcnow()
+        for fmt, has_year in formats:
             try:
-                return datetime.strptime(date_str.strip(), fmt)
+                parsed = datetime.strptime(normalized, fmt)
+                if has_year:
+                    return parsed
+
+                guessed = parsed.replace(year=now_utc.year)
+                # If guess is too far in the future, prefer previous year.
+                if guessed - now_utc > timedelta(days=45):
+                    guessed = guessed.replace(year=guessed.year - 1)
+                return guessed
             except ValueError:
                 continue
         
         return None
     
-    def test_connection(self) -> bool:
-        """Test if the scraper service is reachable"""
-        health_url = f"{self.base_url}/health"
-        # Keep this check fast: the scraper can be busy (Selenium) and may not respond
-        # quickly even if it's otherwise functioning.
-        timeout = 2
+    def _build_category(self, news_type: Optional[str], impact: Optional[str]) -> Optional[str]:
+        clean_type = (news_type or '').strip()
+        clean_impact = (impact or '').strip()
 
-        for attempt in range(1, 3):
-            try:
-                response = self.session.get(health_url, timeout=timeout)
-                if response.status_code == 200:
-                    logger.info("Scraper service is healthy")
-                    return True
-                logger.warning(f"Scraper service returned status {response.status_code}")
-                return False
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning(f"Scraper health check failed (attempt {attempt}/2): {e}")
-                    time.sleep(1)
-                    continue
-                logger.error(f"Cannot reach scraper service: {e}")
-                return False
-    
-    def _extract_forexfactory_category(self, content: str) -> Optional[str]:
-        """
-        Extract ForexFactory category from content.
-        Categories like "Low Impact Breaking News", "Fundamental Analysis", etc.
-        
-        Args:
-            content: Full scraped content
-        
-        Returns:
-            Category string or None
-        """
-        if not content:
-            return None
-        
-        # Look for "Category: <category name>" pattern
-        # Common in ForexFactory's Story Stats section
-        category_pattern = r'Category:\s*([^\n]+?)(?:\s+Comments:|$)'
-        matches = re.search(category_pattern, content, re.IGNORECASE)
-        
-        if matches:
-            category = matches.group(1).strip()
-            logger.info(f"Extracted ForexFactory category: {category}")
-            return category
-        
+        if clean_type.lower() == 'breaking' and clean_impact:
+            return f"{clean_impact} Impact Breaking News"
+        if clean_type and clean_impact:
+            return f"{clean_type} ({clean_impact} Impact)"
+        if clean_type:
+            return clean_type
+        if clean_impact:
+            return f"{clean_impact} Impact"
         return None
     
-    def _validate_forexfactory_content(self, content: str, url: str) -> tuple[bool, str]:
+    def _validate_forexfactory_content(
+        self,
+        content: str,
+        url: str,
+        title: Optional[str] = None,
+        links: Optional[list[str]] = None,
+    ) -> tuple[bool, str]:
         """
         Validate ForexFactory content for common errors and edge cases.
         
@@ -459,7 +383,11 @@ class ScraperClient:
         Returns:
             Tuple of (is_valid: bool, reason: str)
         """
+        title_lower = (title or '').strip().lower()
+
         if not content:
+            if 'notice' in title_lower and 'forex factory' in title_lower:
+                return False, "Junior Member restriction page"
             return False, "Empty content"
         
         content_lower = content.lower()
@@ -496,8 +424,16 @@ class ScraperClient:
             if indicator in content_lower:
                 return False, f"Error page detected: {label}"
         
-        # Check for very short content (likely an error)
-        if len(content.strip()) < 100:
+        # Social-embed stories can be concise even when valid.
+        social_hosts = ('twitter.com', 'x.com', 'truthsocial.com')
+        has_social_embed_link = any(
+            any(host in (link or '').lower() for host in social_hosts)
+            for link in (links or [])
+            if isinstance(link, str)
+        )
+
+        min_len = 30 if has_social_embed_link else 100
+        if len(content.strip()) < min_len:
             return False, f"Content too short ({len(content)} chars)"
         
         # Check for allowed ForexFactory domains and sub-sites

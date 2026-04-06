@@ -203,8 +203,6 @@ services:
         condition: service_healthy
       redis-sessions:
         condition: service_healthy
-    ports:
-      - "8080:8080"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request as u; r=u.urlopen('http://localhost:8080/api/health', timeout=5); raise SystemExit(0 if r.getcode()==200 else 1)\""]
       interval: 60s
@@ -305,10 +303,16 @@ services:
       INDICATOR_UPDATER_CONSECUTIVE_FAILURE_THRESHOLD: "10"
       INDICATOR_UPDATER_TIMEOUT_SECONDS: "900"
       INDICATOR_MAX_NEW_BARS_PER_CYCLE: "8"
-      INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS: "7200"
-      INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP: "50000"
+      INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS: "1800"
+      INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP: "128"
       INDICATOR_LOOKBACK_BARS_STARTUP: "300"
       INDICATOR_SAFETY_BACKFILL_BARS_STARTUP: "2"
+      INDICATOR_MAX_NEW_BARS_PER_CYCLE_HARD_CAP: "256"
+      INDICATOR_LOOKBACK_BARS_HARD_CAP: "600"
+      INDICATOR_UPDATER_TIMEOUT_HARD_CAP_SECONDS: "3600"
+      INDICATOR_MAX_SYMBOL_TIMEFRAMES_PER_RUN: "40"
+      INDICATOR_MAX_RUNTIME_SECONDS_PER_RUN: "240"
+      INDICATOR_COMPOSITE_M1_MAX_ROWS: "4000"
       WORKER_LOCK_TTL_SECONDS: "1200"
       WORKER_LOCK_TTL_SAFETY_MARGIN_SECONDS: "60"
       WORKER_LOCK_STRICT_MODE: "true"
@@ -328,6 +332,8 @@ services:
   scraper:
     build: ./scraper
     container_name: tradingbot-scraper
+    profiles:
+      - legacy-scraper
     restart: unless-stopped
     environment:
       - HEADLESS=True
@@ -351,6 +357,23 @@ services:
           memory: 256m
           cpus: '0.25'
 
+  scrapling:
+    build:
+      context: ./scrapling-api
+    container_name: tradingbot-scrapling
+    restart: unless-stopped
+    environment:
+      - SCRAPLING_HOST=0.0.0.0
+      - SCRAPLING_PORT=8010
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+        reservations:
+          memory: 256m
+          cpus: '0.25'
+
   news-analyzer:
     build:
       context: .
@@ -362,12 +385,12 @@ services:
         condition: service_healthy
       redis-app:
         condition: service_healthy
-      scraper:
-        condition: service_healthy
+      scrapling:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${TRADING_BOT_DB}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - SCRAPER_BASE_URL=${SCRAPER_BASE_URL:-http://tradingbot-scraper:8000}
+      - SCRAPER_BASE_URL=${SCRAPER_BASE_URL:-http://tradingbot-scrapling:8010}
       - SCRAPER_TIMEOUT=${SCRAPER_TIMEOUT:-300}
       - GEMINI_MODEL=gemini-3-flash-preview
       - LOG_FILE_PATH=/app/logs/news_analyzer.log

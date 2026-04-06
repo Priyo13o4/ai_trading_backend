@@ -60,6 +60,56 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: Optional[int] = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except Exception:
+            value = default
+
+    if value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+def _phase_int_with_guardrail(
+    *,
+    phase: str,
+    startup_name: str,
+    scheduled_name: str,
+    default: int,
+    minimum: int,
+    hard_cap_name: Optional[str] = None,
+    hard_cap_default: Optional[int] = None,
+) -> int:
+    raw = _phase_env(phase, startup_name, scheduled_name, str(default))
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+
+    if value < minimum:
+        value = minimum
+
+    if hard_cap_name:
+        cap = _env_int(
+            hard_cap_name,
+            hard_cap_default if hard_cap_default is not None else value,
+            minimum=minimum,
+        )
+        if value > cap:
+            log(
+                f"⚠️  Clamping {scheduled_name} for phase={phase}: requested={value} hard_cap={cap}"
+            )
+            value = cap
+    return value
+
+
 def log(message):
     """Print timestamped log message"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -124,7 +174,7 @@ def _acquire_scheduler_lock_with_status(
     lock_key = os.getenv("WORKER_LOCK_KEY", "locks:data_updater_scheduler")
     ttl_seconds = int(os.getenv("WORKER_LOCK_TTL_SECONDS", "420"))
     try:
-        lock = client.lock(lock_key, timeout=ttl_seconds, blocking_timeout=0)
+        lock = client.lock(lock_key, timeout=ttl_seconds, blocking_timeout=0, thread_local=False)
         if lock.acquire(blocking=False):
             return "acquired", lock
         return "held_elsewhere", None
@@ -190,6 +240,15 @@ def _start_lock_renewal_thread(
     return t
 
 
+def _release_distributed_lock(lock: Optional[redis.lock.Lock], *, phase: str) -> None:
+    if lock is None:
+        return
+    try:
+        lock.release()
+    except Exception as exc:
+        log(f"⚠️  Failed to release scheduler lock during {phase}: {exc}")
+
+
 def _start_heartbeat_thread() -> None:
     heartbeat_file = os.getenv("WORKER_HEARTBEAT_FILE", "/tmp/worker_heartbeat")
     interval_s = float(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "15"))
@@ -223,37 +282,50 @@ def run_indicator_updater(
     log("=" * 80)
     log(f"Starting indicator updater phase={phase} (recent bars -> technical_indicators)...")
     log("=" * 80)
-    timeout_seconds = int(
-        _phase_env(
-            phase,
-            "INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS",
-            "INDICATOR_UPDATER_TIMEOUT_SECONDS",
-            "240",
-        )
+    timeout_seconds = _phase_int_with_guardrail(
+        phase=phase,
+        startup_name="INDICATOR_UPDATER_STARTUP_TIMEOUT_SECONDS",
+        scheduled_name="INDICATOR_UPDATER_TIMEOUT_SECONDS",
+        default=240,
+        minimum=60,
+        hard_cap_name="INDICATOR_UPDATER_TIMEOUT_HARD_CAP_SECONDS",
+        hard_cap_default=7200,
     )
-    backfill_bars = _phase_env(
-        phase,
-        "INDICATOR_SAFETY_BACKFILL_BARS_STARTUP",
-        "INDICATOR_SAFETY_BACKFILL_BARS",
-        "2",
+    backfill_bars = _phase_int_with_guardrail(
+        phase=phase,
+        startup_name="INDICATOR_SAFETY_BACKFILL_BARS_STARTUP",
+        scheduled_name="INDICATOR_SAFETY_BACKFILL_BARS",
+        default=2,
+        minimum=1,
+        hard_cap_name="INDICATOR_SAFETY_BACKFILL_BARS_HARD_CAP",
+        hard_cap_default=12,
     )
-    max_new_bars = _phase_env(
-        phase,
-        "INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP",
-        "INDICATOR_MAX_NEW_BARS_PER_CYCLE",
-        "8",
+    max_new_bars = _phase_int_with_guardrail(
+        phase=phase,
+        startup_name="INDICATOR_MAX_NEW_BARS_PER_CYCLE_STARTUP",
+        scheduled_name="INDICATOR_MAX_NEW_BARS_PER_CYCLE",
+        default=8,
+        minimum=1,
+        hard_cap_name="INDICATOR_MAX_NEW_BARS_PER_CYCLE_HARD_CAP",
+        hard_cap_default=256,
     )
-    lookback_bars = _phase_env(
-        phase,
-        "INDICATOR_LOOKBACK_BARS_STARTUP",
-        "INDICATOR_LOOKBACK_BARS",
-        "300",
+    lookback_bars = _phase_int_with_guardrail(
+        phase=phase,
+        startup_name="INDICATOR_LOOKBACK_BARS_STARTUP",
+        scheduled_name="INDICATOR_LOOKBACK_BARS",
+        default=300,
+        minimum=80,
+        hard_cap_name="INDICATOR_LOOKBACK_BARS_HARD_CAP",
+        hard_cap_default=800,
     )
-    force_overlap_recompute_minutes = _phase_env(
-        phase,
-        "INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES_STARTUP",
-        "INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES",
-        "60",
+    force_overlap_recompute_minutes = _phase_int_with_guardrail(
+        phase=phase,
+        startup_name="INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES_STARTUP",
+        scheduled_name="INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES",
+        default=60,
+        minimum=0,
+        hard_cap_name="INDICATOR_FORCE_OVERLAP_RECOMPUTE_MINUTES_HARD_CAP",
+        hard_cap_default=1440,
     )
     strict_lock_mode = _env_bool("WORKER_LOCK_STRICT_MODE", True)
     lock_ttl_seconds = int(os.getenv("WORKER_LOCK_TTL_SECONDS", "420"))
@@ -319,7 +391,8 @@ def run_indicator_updater(
             time.sleep(0.5)
 
         if proc.returncode == 0:
-            log("✓ Indicator updater completed successfully")
+            elapsed = time.monotonic() - start_time
+            log(f"✓ Indicator updater completed successfully in {elapsed:.1f}s")
         else:
             log(f"✗ Indicator updater failed with exit code {proc.returncode}")
         return proc.returncode == 0
@@ -593,11 +666,7 @@ def main():
             if _record_updater_result(startup_success, "startup"):
                 return 2
         finally:
-            if startup_lock is not None:
-                try:
-                    startup_lock.release()
-                except Exception:
-                    pass
+            _release_distributed_lock(startup_lock, phase="startup")
             if startup_local_lock_acquired and _LOCAL_SCHEDULER_LOCK.locked():
                 _LOCAL_SCHEDULER_LOCK.release()
     elif startup_lock_status == "held_elsewhere":
@@ -694,11 +763,7 @@ def main():
                         continue
                 
             finally:
-                if cycle_lock is not None:
-                    try:
-                        cycle_lock.release()
-                    except Exception:
-                        pass
+                _release_distributed_lock(cycle_lock, phase=f"scheduled cycle #{run_count}")
                 if local_lock_acquired and _LOCAL_SCHEDULER_LOCK.locked():
                     _LOCAL_SCHEDULER_LOCK.release()
 
