@@ -61,7 +61,7 @@ def _extract_referral_code_from_user(user_payload: dict[str, Any] | None) -> str
     if not isinstance(user_payload, dict):
         return None
 
-    raw_meta = user_payload.get("raw_user_meta_data")
+    raw_meta = user_payload.get("raw_user_meta_data") or user_payload.get("user_metadata")
     if isinstance(raw_meta, dict):
         normalized = normalize_referral_code(raw_meta.get("referral_code"))
         if normalized:
@@ -110,7 +110,8 @@ def _is_fresh_signup(created_at_epoch: int | None) -> bool:
     if created_at_epoch is None:
         return False
     age = int(time.time()) - created_at_epoch
-    return 0 <= age <= REFERRAL_CAPTURE_FRESHNESS_SECONDS
+    # Allow 300 seconds (5 mins) buffer for clock drift between Supabase cloud and local container/server
+    return -300 <= age <= REFERRAL_CAPTURE_FRESHNESS_SECONDS
 
 
 def _hash_user_agent(user_agent: str | None) -> str:
