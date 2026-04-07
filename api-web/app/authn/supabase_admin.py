@@ -82,6 +82,10 @@ async def admin_get_user(user_id: str) -> dict[str, Any]:
     except httpx.RequestError as exc:
         raise SupabaseAdminError("Supabase admin get user unavailable", status_code=503) from exc
 
+    if resp.status_code == 404:
+        logger.warning("Supabase admin get user not found: status=%s", resp.status_code)
+        raise SupabaseAdminError("User not found", status_code=401)
+
     if resp.status_code >= 400:
         logger.warning("Supabase admin get user failed: status=%s", resp.status_code)
         status_code = 400 if 400 <= resp.status_code < 500 else 503
