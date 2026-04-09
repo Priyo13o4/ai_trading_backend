@@ -99,7 +99,7 @@ services:
       start_period: 5s
 
   n8n:
-    image: n8nio/n8n:2.14.2
+    image: n8nio/n8n:2.15.0
     restart: always
     container_name: ai_trading_bot
     depends_on:
@@ -132,7 +132,7 @@ services:
       - n8n_data:/home/node/.n8n
 
   n8n-worker:
-    image: n8nio/n8n:2.14.2
+    image: n8nio/n8n:2.15.0
     restart: always
     container_name: n8n-worker
     depends_on:
@@ -329,34 +329,6 @@ services:
       retries: 3
       start_period: 30s
 
-  scraper:
-    build: ./scraper
-    container_name: tradingbot-scraper
-    profiles:
-      - legacy-scraper
-    restart: unless-stopped
-    environment:
-      - HEADLESS=True
-      - DEFAULT_TIMEOUT=30
-      - SELENIUM_TIMEOUT=30
-      - PAGE_LOAD_TIMEOUT=30
-      - HOST=0.0.0.0
-      - PORT=8000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 1g
-          cpus: '1.0'
-        reservations:
-          memory: 256m
-          cpus: '0.25'
-
   scrapling:
     build:
       context: ./scrapling-api
@@ -373,42 +345,6 @@ services:
         reservations:
           memory: 256m
           cpus: '0.25'
-
-  news-analyzer:
-    build:
-      context: .
-      dockerfile: news_analyzer/Dockerfile
-    container_name: tradingbot-news-analyzer
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis-app:
-        condition: service_healthy
-      scrapling:
-        condition: service_started
-    environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${TRADING_BOT_DB}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - SCRAPER_BASE_URL=${SCRAPER_BASE_URL:-http://tradingbot-scrapling:8010}
-      - SCRAPER_TIMEOUT=${SCRAPER_TIMEOUT:-300}
-      - GEMINI_MODEL=gemini-3-flash-preview
-      - LOG_FILE_PATH=/app/logs/news_analyzer.log
-      - REDIS_HOST=redis-app
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    volumes:
-      - ./news_analyzer/logs:/app/logs
-    command: tail -f /dev/null
-    deploy:
-      resources:
-        limits:
-          memory: 1.5g
-          cpus: '1.0'
-        reservations:
-          memory: 512m
-          cpus: '0.5'
 
 volumes:
   n8n_data:

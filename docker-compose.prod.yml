@@ -30,12 +30,6 @@ services:
     ports:
       - "127.0.0.1:9001:9001"
 
-  scraper:
-    profiles:
-      - legacy-scraper
-
   scrapling:
     ports:
       - "127.0.0.1:8010:8010"
-
-  news-analyzer:
