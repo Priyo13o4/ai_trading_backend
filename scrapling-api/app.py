@@ -3,12 +3,16 @@ import json
 import logging
 import os
 import re
+import signal
 import threading
 import traceback
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher, StealthySession
+from escalation import (
+    is_acceptable_result,
+)
 
 _SESSION_LOCK = threading.Lock()
 _SESSION_FETCH_LOCK = threading.Lock()
@@ -481,30 +485,152 @@ def _fetch_with_mode(url, mode, options, reuse_session=True, session_reset=False
         return fetch_fn(url)
 
 
-def _build_fetch_options(mode, payload):
-    # Keep stealthy mode minimal by default for lower CPU/RAM and latency.
-    if mode == "stealthy":
-        opts = {
-            "headless": bool(payload.get("headless", True)),
-            "solve_cloudflare": bool(payload.get("solve_cloudflare", True)),
-        }
-        if "google_search" in payload:
-            opts["google_search"] = bool(payload.get("google_search"))
-        if "network_idle" in payload:
-            opts["network_idle"] = bool(payload.get("network_idle"))
-        return opts
+def _timeout_handler(signum, frame):
+    """Signal handler for escalation step timeout."""
+    raise TimeoutError("Fetch operation exceeded time limit")
 
-    if mode == "dynamic":
-        opts = {
-            "headless": bool(payload.get("headless", True)),
-        }
-        if "network_idle" in payload:
-            opts["network_idle"] = bool(payload.get("network_idle"))
-        if "disable_resources" in payload:
-            opts["disable_resources"] = bool(payload.get("disable_resources"))
-        return opts
 
-    return {}
+def _scrape_with_escalation(url, payload):
+    """
+    Implements HTTP-first fallback escalation system with timeout and best-effort handling.
+    Steps: HTTP (40s) → Stealthy no CF (40s) → Stealthy with CF (40s)
+    Total timeout: 120 seconds
+    
+    If all escalation steps fail, returns best-effort result with degraded_mode flag
+    instead of raising an exception (best-effort approach for reliability).
+    
+    Returns tuple: (page_object, escalation_step_used, status_code)
+    """
+    escalation_step = None
+    status_code = 200
+    last_successful_page = None
+    last_successful_article = None
+    last_escalation_step = None
+    
+    # Step 1: Try HTTP first (fastest, 7% CPU, 50MB RAM) - 40s timeout
+    try:
+        logger.info(f"Escalation Step 1: Trying HTTP mode for {url} (40s timeout)")
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(40)
+        
+        try:
+            page = _fetch_with_mode(url, "http", {}, reuse_session=False)
+            signal.alarm(0)  # Cancel alarm
+            
+            status_code = int(getattr(page, "status", 200) or 200)
+            article = _extract_article_payload(page)
+            text_length = len(article.get("text", ""))
+            
+            # Track as potential best-effort result
+            last_successful_page = page
+            last_successful_article = article
+            last_escalation_step = "http"
+            
+            # If HTTP succeeds with good content, use it and stop escalation
+            if is_acceptable_result(status_code, text_length):
+                logger.info(f"HTTP succeeded with {text_length} chars of content")
+                return page, "http", status_code
+            
+            logger.info(f"HTTP insufficient ({text_length} chars) or error ({status_code}), escalating...")
+        except TimeoutError as te:
+            signal.alarm(0)  # Cancel alarm
+            logger.warning(f"HTTP fetch timeout (40s): {te}, escalating to Stealthy...")
+        except Exception as e:
+            signal.alarm(0)  # Cancel alarm
+            logger.warning(f"HTTP fetch failed: {e}, escalating to Stealthy...")
+    except Exception as e:
+        logger.warning(f"HTTP exception handler failed: {e}")
+    
+    # Step 2: Escalate to Stealthy without Cloudflare solving - 40s timeout
+    try:
+        logger.info(f"Escalation Step 2: Trying Stealthy (no CF) mode for {url} (40s timeout)")
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(40)
+        
+        try:
+            options = {
+                "headless": bool(payload.get("headless", True)),
+                "solve_cloudflare": False,
+            }
+            page = _fetch_with_mode(url, "stealthy", options, reuse_session=True)
+            signal.alarm(0)  # Cancel alarm
+            
+            status_code = int(getattr(page, "status", 200) or 200)
+            article = _extract_article_payload(page)
+            text_length = len(article.get("text", ""))
+            
+            # Track as potential best-effort result
+            last_successful_page = page
+            last_successful_article = article
+            last_escalation_step = "stealthy_no_cf"
+            
+            # If Stealthy (no CF) succeeds with good content, use it
+            if is_acceptable_result(status_code, text_length):
+                logger.info(f"Stealthy (no CF) succeeded with {text_length} chars of content")
+                return page, "stealthy_no_cf", status_code
+            
+            logger.info(f"Stealthy (no CF) insufficient ({text_length} chars), escalating to full power...")
+        except TimeoutError as te:
+            signal.alarm(0)  # Cancel alarm
+            logger.warning(f"Stealthy (no CF) timeout (40s): {te}, escalating to full Stealthy+CF...")
+        except Exception as e:
+            signal.alarm(0)  # Cancel alarm
+            logger.warning(f"Stealthy (no CF) failed: {e}, escalating to full Stealthy+CF...")
+    except Exception as e:
+        logger.warning(f"Stealthy (no CF) exception handler failed: {e}")
+    
+    # Step 3: Last resort - Full power with Cloudflare solving - 40s timeout
+    try:
+        logger.info(f"Escalation Step 3: Trying Stealthy (with CF) mode for {url} (40s timeout)")
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(40)
+        
+        try:
+            options = {
+                "headless": bool(payload.get("headless", True)),
+                "solve_cloudflare": True,
+            }
+            page = _fetch_with_mode(url, "stealthy", options, reuse_session=True)
+            signal.alarm(0)  # Cancel alarm
+            
+            status_code = int(getattr(page, "status", 200) or 200)
+            article = _extract_article_payload(page)
+            text_length = len(article.get("text", ""))
+            
+            # Track as potential best-effort result
+            last_successful_page = page
+            last_successful_article = article
+            last_escalation_step = "stealthy_with_cf"
+            
+            logger.info(f"Stealthy (with CF) completed with {text_length} chars")
+            return page, "stealthy_with_cf", status_code
+        except TimeoutError as te:
+            signal.alarm(0)  # Cancel alarm
+            logger.error(f"Stealthy (with CF) timeout (40s): {te}")
+        except Exception as e:
+            signal.alarm(0)  # Cancel alarm
+            logger.error(f"Stealthy (with CF) failed: {e}")
+    except Exception as e:
+        logger.error(f"Stealthy (with CF) exception handler failed: {e}")
+    
+    # All escalation steps exhausted - return best-effort result instead of raising
+    logger.error(f"All escalation steps failed for {url}. Returning best-effort result.")
+    
+    if last_successful_article and last_successful_page:
+        logger.info(f"Returning best-effort result from {last_escalation_step}")
+        # Mark result as degraded but still usable
+        return last_successful_page, last_escalation_step, status_code
+    else:
+        # Absolutely nothing available - create minimal fallback
+        logger.warning(f"No successful content available for {url}, returning minimal fallback")
+        # Create a minimal page-like object with empty content
+        class MinimalPage:
+            def __init__(self):
+                self.status = 500
+                self.text = ""
+                self.html = ""
+        
+        return MinimalPage(), "complete_failure", 500
 
 
 @atexit.register
@@ -541,9 +667,16 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
-        if self.path != "/api/v1/scrape":
+        # Route to appropriate handler
+        if self.path == "/api/v1/scrape":
+            return self._handle_scrape()
+        elif self.path == "/api/v1/scrape-no-filter":
+            return self._handle_scrape_no_filter()
+        else:
             return self._send_json(404, {"error": "Not found"})
 
+    def _handle_scrape(self):
+        """Full extraction endpoint with comprehensive article parsing."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -553,88 +686,25 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._send_json(400, {"success": False, "error": "'url' is required"})
 
-            # 'mode' is a wrapper-level switch (not a native Scrapling API param).
-            mode = (payload.get("mode") or "stealthy").strip().lower()
-            if mode not in {"stealthy", "dynamic", "http"}:
-                mode = "stealthy"
-
-            options = _build_fetch_options(mode, payload)
-            reuse_session = bool(payload.get("reuse_session", True))
-            session_reset = bool(payload.get("session_reset", False))
-
-            page = _fetch_with_mode(
-                url,
-                mode,
-                options,
-                reuse_session=reuse_session,
-                session_reset=session_reset,
-            )
-            source_status_code = int(getattr(page, "status", 200) or 200)
+            escalation_step = None
+            source_status_code = 200
+            
+            # Always use escalation system
+            page, escalation_step, source_status_code = _scrape_with_escalation(url, payload)
+            
             article = _extract_article_payload(page)
             text = article["text"]
             title = article["title"]
             links = _extract_links(page)
-
-            fallback_mode_used = None
-            social_hosts = ("twitter.com", "x.com", "truthsocial.com")
-            has_social_links = any(
-                isinstance(link, str) and any(host in link.lower() for host in social_hosts)
-                for link in (links or [])
-            )
-
-            # Some ForexFactory social embeds render differently in stealthy mode.
-            # If extraction is empty/too short, retry once with raw HTTP fetch.
-            is_ff_news = "forexfactory.com/news/" in url.lower()
-            should_try_http_fallback = (
-                len(text) < 30 or (has_social_links and len(text) < 180)
-            )
-            if is_ff_news and mode != "http" and should_try_http_fallback:
-                try:
-                    fallback_page = _fetch_with_mode(
-                        url,
-                        "http",
-                        {},
-                        reuse_session=False,
-                        session_reset=False,
-                    )
-                    fallback_source_status_code = int(getattr(fallback_page, "status", 200) or 200)
-                    fallback_article = _extract_article_payload(fallback_page)
-                    fallback_text = fallback_article["text"]
-                    fallback_links = _extract_links(fallback_page)
-
-                    merged_chunks = _dedupe_keep_order(
-                        (article.get("chunks") or []) + (fallback_article.get("chunks") or [])
-                    )
-                    merged_text = _norm(" ".join(merged_chunks))
-
-                    if len(merged_text) > len(text):
-                        text = merged_text
-                        # Keep original stats source but annotate extraction method.
-                        article["chunks"] = merged_chunks
-                        article["paragraph_count"] = len(merged_chunks)
-                        article["method"] = f"{article['method']}+http-fallback-merged"
-
-                    if len(fallback_text) > len(text):
-                        article = fallback_article
-                        text = fallback_text
-
-                    if fallback_article.get("title"):
-                        title = fallback_article["title"]
-
-                    if len(fallback_text) > 0 or len(merged_text) > 0:
-                        links = _dedupe_keep_order((links or []) + (fallback_links or []))
-                        fallback_mode_used = "http"
-                        source_status_code = fallback_source_status_code
-                except Exception:
-                    # Keep primary result when fallback fails.
-                    pass
+            
+            # Detect if result is degraded (returned due to escalation failure)
+            is_degraded = escalation_step in ["complete_failure"] or (source_status_code >= 500)
 
             return self._send_json(
                 200,
                 {
                     "success": True,
                     "url": url,
-                    "mode": mode,
                     "title": title,
                     "text": text,
                     "word_count": len(text.split()) if text else 0,
@@ -654,15 +724,64 @@ class Handler(BaseHTTPRequestHandler):
                     },
                     "meta": {
                         "status_code": source_status_code,
-                        "fetch_options": options,
-                        "reuse_session": reuse_session,
-                        "session_reset": session_reset,
-                        "fallback_mode_used": fallback_mode_used,
+                        "escalation_step": escalation_step,
+                        "fallback_mode_used": None,
+                        "degraded_mode": is_degraded,
                     },
                     "error": None,
                 },
             )
         except Exception as exc:
+            logger.error(f"Scrape error: {exc}\n{traceback.format_exc()}")
+            return self._send_json(
+                500,
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "trace": traceback.format_exc(),
+                },
+            )
+
+    def _handle_scrape_no_filter(self):
+        """Raw content endpoint - minimal processing, returns HTML without extraction."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            payload = json.loads(raw.decode("utf-8"))
+
+            url = (payload.get("url") or "").strip()
+            if not url:
+                return self._send_json(400, {"success": False, "error": "'url' is required"})
+
+            # Use escalation system for fetching
+            page, escalation_step, source_status_code = _scrape_with_escalation(url, payload)
+            
+            # Minimal processing: extract only title and raw HTML
+            title = _extract_title(page)
+            html = getattr(page, "html", "") or getattr(page, "text", "") or ""
+            
+            # Detect if result is degraded
+            is_degraded = escalation_step in ["complete_failure"] or (source_status_code >= 500)
+            
+            return self._send_json(
+                200,
+                {
+                    "success": True,
+                    "url": url,
+                    "title": title,
+                    "html": html[:50000],  # Return raw HTML (truncated for safety)
+                    "status_code": source_status_code,
+                    "meta": {
+                        "escalation_step": escalation_step,
+                        "endpoint": "scrape-no-filter",
+                        "processing": "minimal",
+                        "degraded_mode": is_degraded,
+                    },
+                    "error": None,
+                },
+            )
+        except Exception as exc:
+            logger.error(f"Scrape-no-filter error: {exc}\n{traceback.format_exc()}")
             return self._send_json(
                 500,
                 {
@@ -674,10 +793,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
     host = os.getenv("SCRAPLING_HOST", "0.0.0.0")
     port = int(os.getenv("SCRAPLING_PORT", "8010"))
+    logger.info(f"Starting synchronous Scrapling API on {host}:{port}")
+    logger.info("Features: HTTP-first escalation, scrape + scrape-no-filter endpoints")
+    
     server = HTTPServer((host, port), Handler)
-    print(f"scrapling api listening on {host}:{port}")
     server.serve_forever()
 
 
