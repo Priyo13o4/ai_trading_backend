@@ -6,7 +6,7 @@ services:
     image: custom-postgres-timescale:pg18
     restart: always
     container_name: n8n-postgres
-    command: postgres -c shared_preload_libraries=timescaledb
+    command: postgres -c shared_preload_libraries=timescaledb -c max_worker_processes=24 -c timescaledb.max_background_workers=16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

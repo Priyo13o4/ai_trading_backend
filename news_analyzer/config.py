@@ -74,8 +74,6 @@ class Config:
     @classmethod
     def validate(cls) -> bool:
         """Validate critical configuration"""
-        if not cls.GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is required")
         if not cls.DATABASE_URL:
             raise ValueError("DATABASE_URL is required")
         return True

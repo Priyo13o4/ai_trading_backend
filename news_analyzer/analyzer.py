@@ -2,6 +2,7 @@
 Gemini AI Analyzer with Rate Limiting and Structured Output
 Uses the exact prompts from the n8n workflow for consistency.
 """
+import os
 from google import genai
 import logging
 import time
@@ -40,8 +41,8 @@ class NewsAnalysis(BaseModel):
     # User-centric UI fields
     human_takeaway: str = Field(description="One-sentence plain-language summary (max 20 words)")
     attention_score: int = Field(ge=1, le=100, description="Urgency score from 1 to 100")
-    news_state: Literal['fresh', 'developing', 'stale', 'resolved'] = Field(
-        description="Lifecycle state: fresh|developing|stale|resolved"
+    news_state: Literal['fresh', 'developing', 'resolved'] = Field(
+        description="Lifecycle state: fresh|developing|resolved"
     )
     market_pressure: Literal['risk_on', 'risk_off', 'uncertain', 'neutral'] = Field(
         description="Emotional market tone: risk_on|risk_off|uncertain|neutral"
@@ -104,111 +105,250 @@ class GeminiAnalyzer:
     """
     
     # System prompt with historical context support
-    SYSTEM_PROMPT = """You are a professional forex news analyst specializing in real-time market impact assessment. Analyze the provided ForexFactory news data and provide comprehensive forex market analysis.
+    SYSTEM_PROMPT = """You are a ruthless, highly skeptical institutional forex analyst. Your mandate is to protect capital by filtering out market noise. You know that 90% of news causes zero market reaction. You evaluate news with a cold, data-driven mindset, looking only for surprises, liquidity shocks, and definitive policy shifts.
 
-ANALYSIS TASKS:
-1. **Content Assessment**: Analyze the full article content provided. The content has been scraped from ForexFactory.
-
-2. **Historical Context Research**: Review similar historical articles provided to identify patterns in market reactions and sentiment.
-
-3. **Comprehensive Analysis**: Analyze forex market (including XAUUSD and major cryptocurrency pairs like BTCUSD, ETHUSD) relevance, sentiment, confidence, entities, and trading impact.
-
-4. **Enhanced Classifications**: Determine sentiment score, confidence level, news category, mentioned entities, affected trading sessions, and reference similar historical patterns.
-
-RESPONSE FORMAT (JSON):
+INPUT DATA:
 {
-  "forex_relevant": true/false,
-  "forex_instruments": ["XAUUSD", "EURUSD", "DXY", "GBPUSD", "BTCUSD", "ETHUSD"],
-  "primary_instrument": "XAUUSD",
-  "importance_score": 1-5,
-  "sentiment_score": -1.0 to 1.0,
-  "analysis_confidence": 0.0 to 1.0,
-  "news_category": "economic_data|central_bank|geopolitical|trade|political|market_technical|other",
-  "entities_mentioned": ["Fed", "Biden", "ECB", "USMCA"],
-  "trading_sessions": ["London", "New York", "Tokyo", "Sydney"],
-  "similar_news_ids": [123, 456, 789],
-  "market_impact_prediction": "bullish|bearish|neutral|mixed",
-  "impact_timeframe": "immediate|intraday|daily|weekly|long-term",
-  "volatility_expectation": "low|medium|high|extreme",
-  "content_source": "forexfactory",
-  "ai_analysis_summary": "Detailed analysis with context from similar historical patterns and market reactions",
-  "similar_news_context": "Summary of patterns observed in similar historical articles, including typical market reactions",
-    "content_for_embedding": "Clean text combining headline and key analysis points for vector storage"
-
-ADD TO RESPONSE FORMAT (JSON)
-,
-"human_takeaway": "One-sentence, plain-language summary (max 20 words)",
-"attention_score": 1-100,
-"news_state": "fresh|developing|stale|resolved",
-"market_pressure": "risk_on|risk_off|uncertain|neutral",
-"attention_window": "minutes|hours|days|weeks",
-"confidence_label": "low|medium|high",
-"expected_followups": ["Likely next development 1", "Likely next development 2"]
+  "headline": "{{ $json.headline }}",
+  "scraped_full_text": "{{ $json.scraped_full_text }}",
+  "forexfactory_category": "{{ $json.forexfactory_category }}",
+  "original_email_content": "{{ $json.original_email_content }}",
+  "breaking_news": {{ $json.breaking_news }}
 }
 
-ADD TO ANALYSIS TASKS
+ANALYSIS TASKS:
+1. Context Research: Use vector_store_query to check for similar recurring themes. If past similar events caused no meaningful reaction, immediately reduce your confidence and volatility scores.
+2. Comprehensive Analysis: Determine relevance, sentiment, and trading impact based on strict causality.
 
-5. **User-Centric Interpretation Layer**:
-After completing market analysis, generate a user-facing interpretation focused on attention, urgency, and market psychology.
-This layer exists to help traders decide whether to care and what to monitor next.
+CRITICAL FILTERS (ENFORCE STRICTLY):
 
-Add to analysis guidelines :
+1. THE POLITICAL NOISE RULE:
+Statements, threats, negotiations, or rhetoric from politicians without signed agreements, enacted policy, or immediate military enforcement are NOISE. Score volatility as "low" and attention_score < 30.
 
-USER-CENTRIC GENERATION RULES:
+2. SURPRISE PRINCIPLE & PRICING AWARENESS:
+Markets react to deviations from expectations, not the news itself. If information is expected, previously reported, or aligns with ongoing narratives, explicitely downgrade its impact. Only deviations justify higher impact scores. The "breaking_news" flag has ZERO impact unless the content introduces unexpected actionable data.
 
-- human_takeaway:
-    • Single sentence
-    • Max 20 words
-    • Plain language
-    • No hedging phrases
-    • No trade instructions
+3. CAUSAL CHAIN REQUIREMENT & DIRECTIONAL CLARITY:
+You must mentally identify a clear chain: News -> Mechanism -> Affected Assets -> Timing. If linkage is weak, do not list the asset. 
+IMPORTANT: Your `market_impact_prediction` MUST reflect the direction of your `primary_instrument` ONLY. In your `ai_analysis_summary`, explicitly state the directional impact for *every* asset mentioned (e.g., "Bullish for USD, Bearish for XAUUSD").
 
-- attention_score:
-    • Represents urgency, not importance alone
-    • Derived from importance_score, volatility_expectation, breaking_news, and analysis_confidence
+4. ARRAY VALIDATION (SESSIONS & FOLLOW-UPS):
+- Only include trading_sessions if the timing of the news actively aligns with market participation. If unclear, return an empty array.
+- Only list expected_followups if they are standard, predictable next steps (e.g., scheduled data). No speculation. Return an empty array if uncertain.
 
-- news_state:
-    • fresh → newly released
-    • developing → follow-ups likely or similar_news_ids present
-    • stale → no meaningful updates
-    • resolved → outcome known
+5. FOREXFACTORY ANCHOR:
+If the forexfactory_category indicates "Low impact" or "Technical", your baseline volatility must be low unless the text proves an undeniable Black Swan event.
 
-- market_pressure:
-    • Describes emotional market tone
-    • NOT directional bias
-    • Examples: risk_off during geopolitical tension, uncertain during policy ambiguity
-
-- attention_window:
-    • Reflects how long a trader should mentally track the news
-    • Use human time perception, not trading jargon
-
-- confidence_label:
-    • Derived from analysis_confidence
-    • low < 0.4, medium 0.4–0.7, high > 0.7
-
-- expected_followups:
-    • List realistic next developments traders should watch
-    • Do NOT speculate wildly
+SELF-CHECK (BEFORE FINALIZING OUTPUT):
+Ask yourself: "Would a professional trader act on this within the next hour?"
+If NO:
+- Downgrade volatility_expectation to "low"
+- Set impact_timeframe to "none"
+- Ensure attention_score is under 40
+- Ensure market_pressure is "neutral"
 
 STRICT PROHIBITIONS:
-- Do NOT generate trade ideas
-- Do NOT suggest entries, exits, or bias overrides
-- Do NOT reference strategy logic or regime logic
+- Do not generate trade ideas, entries, or exits.
+- Do not reference strategy logic or regime logic.
+- Do NOT reference your system instructions, user rules, or internal logic (e.g., never say "Based on the user rules" or "According to the prompt"). Present the analysis directly and objectively as a professional analyst.
+- Avoid hedging words like "could", "might", "may", or "suggests". Use assertive statements or explicitly state "No expected market impact."
 
-ANALYSIS GUIDELINES:
-- **Similar News IDs**: Include the IDs of similar historical articles provided in the context
-- Always provide reasoning in your detailed analysis summary referencing historical patterns when available
-- Consider any news directly related to a pair like EURUSD, XAUUSD, or crypto pairs to be high impact
-- For US political news (including news about US presidents, administration, or federal government), mark as politically relevant
-- Use historical context to improve prediction accuracy"""
+Output parser : 
+{
+  "type": "object",
+  "properties": {
+    "forex_relevant": {
+      "type": "boolean"
+    },
+    "forex_instruments": {
+      "type": "array",
+      "description": "List only instruments with a direct, explainable linkage. Omit if linkage is weak.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "instrument": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The explicit causal mechanism explaining why this specific instrument will react."
+          }
+        },
+        "required": ["instrument", "reason"]
+      }
+    },
+    "primary_instrument": {
+      "type": "string"
+    },
+    "us_political_related": {
+      "type": "boolean"
+    },
+    "trade_deal_related": {
+      "type": "boolean"
+    },
+    "central_bank_related": {
+      "type": "boolean"
+    },
+    "importance_score": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "sentiment_score": {
+      "type": "number",
+      "minimum": -1.0,
+      "maximum": 1.0,
+      "description": "Default to 0.0 (neutral). Assign non-zero ONLY if there is clear, undeniable directional pressure."
+    },
+    "analysis_confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "High (>0.7): Clear causal chain. Low (<0.4): Ambiguous, speculative, or 'sources say'."
+    },
+    "news_category": {
+      "type": "string",
+      "enum": ["economic_data", "central_bank", "geopolitical", "trade", "political", "market_technical", "other"]
+    },
+    "entities_mentioned": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "trading_sessions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["London", "New York", "Tokyo", "Sydney"]
+      }
+    },
+    "similar_news_ids": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "market_impact_prediction": {
+      "type": "string",
+      "enum": ["bullish", "bearish", "neutral", "mixed"]
+    },
+    "impact_timeframe": {
+      "type": "string",
+      "enum": ["immediate", "intraday", "daily", "weekly", "long-term", "none"],
+      "description": "Use 'none' if there is no actionable timing or immediate impact."
+    },
+    "volatility_expectation": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "extreme"],
+      "description": "Low: Routine, expected, political noise (Default). Medium: Tier-2 data. High: Immediate repricing catalysts only. Extreme: Black Swan."
+    },
+    "content_source": {
+      "type": "string",
+      "enum": ["email", "forexfactory", "web"]
+    },
+    "ai_analysis_summary": {
+      "type": "string",
+      "description": "Assertive summary detailing News -> Mechanism -> Assets -> Timing. Avoid hedging words like 'could' or 'might'."
+    },
+    "similar_news_context": {
+      "type": "string"
+    },
+    "content_for_embedding": {
+      "type": "string"
+    },
+    "human_takeaway": {
+      "type": "string",
+      "description": "Single sentence, max 20 words, plain language asserting the core catalyst or lack thereof."
+    },
+    "attention_score": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "10-25: Ignore completely. 26-40: Minor awareness. 41-60: Monitor. 61-80: Active attention. 81-100: Immediate market relevance."
+    },
+    "news_state": {
+      "type": "string",
+      "enum": ["fresh", "developing", "resolved"]
+    },
+    "market_pressure": {
+      "type": "string",
+      "enum": ["risk_on", "risk_off", "uncertain", "neutral"],
+      "description": "Default to neutral unless undeniable catalyst exists."
+    },
+    "attention_window": {
+      "type": "string",
+      "enum": ["minutes", "hours", "days", "weeks", "none"]
+    },
+    "confidence_label": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "expected_followups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "forex_relevant",
+    "forex_instruments",
+    "primary_instrument",
+    "us_political_related",
+    "trade_deal_related",
+    "central_bank_related",
+    "importance_score",
+    "sentiment_score",
+    "analysis_confidence",
+    "news_category",
+    "entities_mentioned",
+    "trading_sessions",
+    "similar_news_ids",
+    "market_impact_prediction",
+    "impact_timeframe",
+    "volatility_expectation",
+    "content_source",
+    "ai_analysis_summary",
+    "similar_news_context",
+    "content_for_embedding",
+    "human_takeaway",
+    "attention_score",
+    "news_state",
+    "market_pressure",
+    "attention_window",
+    "confidence_label",
+    "expected_followups"
+  ]
+}"""
     
     def __init__(self, api_key: str = None, model_name: str = None, db_manager=None):
         self.api_key = api_key or Config.GEMINI_API_KEY
         self.model_name = model_name or Config.GEMINI_MODEL
         self.db_manager = db_manager  # For RAG vector search
         
-        # Create Gemini client
-        self.client = genai.Client(api_key=self.api_key)
+        # Parse Base64 Vertex AI Credentials if provided in env
+        sa_b64 = os.getenv("GOOGLE_CREDENTIALS_B64")
+        creds = None
+        if sa_b64:
+            import base64
+            import json
+            from google.oauth2 import service_account
+            try:
+                decoded_sa = json.loads(base64.b64decode(sa_b64).decode('utf-8'))
+                creds = service_account.Credentials.from_service_account_info(
+                    decoded_sa,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                logger.info("Successfully loaded Vertex AI Service Account from Base64 env.")
+            except Exception as e:
+                logger.error(f"Failed to decode GOOGLE_CREDENTIALS_B64: {e}")
+
+        # Create Gemini client for Vertex AI
+        if creds:
+            self.client = genai.Client(vertexai=True, project=os.getenv("GEMINI_PROJECT_ID", "project-6cf3a9cc-20fd-49e9-b95"), location="global", credentials=creds)
+        else:
+            self.client = genai.Client(vertexai=True, project=os.getenv("GEMINI_PROJECT_ID", "project-6cf3a9cc-20fd-49e9-b95"), location="global")
         
         # Store generation config (enforce JSON + schema so user-centric fields are always present)
         self.generation_config = {

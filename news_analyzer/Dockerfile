@@ -23,6 +23,7 @@ RUN mkdir -p /app/logs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV GEMINI_PROJECT_ID=project-6cf3a9cc-20fd-49e9-b95
 
 # Default command - run main backfill script
 CMD ["python", "main.py"]
