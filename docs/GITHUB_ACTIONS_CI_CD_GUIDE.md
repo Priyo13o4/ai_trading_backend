@@ -1,161 +1,140 @@
-# GitHub Actions & GHCR deployment Guide
+# GitHub Actions + GHCR CI/CD Guide
 
-Date: 2026-04-12
+Date: 2026-04-13
 
 ## Purpose
-This document provides a comprehensive, end-to-end plan for moving the `ai_trading_bot` build process from your production VM over to GitHub Actions using the GitHub Container Registry (GHCR). 
+Move production image builds off the VM and into GitHub Actions, publish to GHCR, and deploy via pull + no-build restarts.
 
-This solves the 100% CPU lockup and RAM exhaustion issue encountered when running `docker compose up --build` on a 4GB/2CPU production server.
+## 1. Auth Model and Prerequisites
 
----
+1. GitHub Actions push authentication:
+   - The workflow uses `${{ secrets.GITHUB_TOKEN }}`.
+   - No custom PAT is required inside GitHub Actions.
+   - Workflow permissions must include `packages: write`.
 
-## 1. Prerequisites and Preparation
-
-To push images to the GitHub Container Registry, your GitHub Action pipeline and your production server will need permission.
-
-1. **Create a Personal Access Token (PAT) for the VM:**
-   - Go to GitHub -> **Settings** -> **Developer Settings** -> **Personal Access Tokens (Classic)**
-   - Click **Generate new token (classic)**
-   - Name it `Prod VM GHCR Access`
-   - Select the `read:packages` scope (do NOT give it repo scope, for security).
-   - Copy this token. You will only use it once on the server.
-
-2. **Authenticate your VM to GHCR:**
-   - SSH into your production VM.
-   - Run the following command (replace `<YOUR_GITHUB_USERNAME>` and the `<TOKEN>`):
-     ```bash
-     cat token.txt | docker login ghcr.io -u <YOUR_GITHUB_USERNAME_LOWERCASE> --password-stdin
-     rm token.txt
-     ```
-
-*Note: Your GitHub Action workflow does **not** need a custom PAT. GitHub provides a dynamic, short-lived `${{ secrets.GITHUB_TOKEN }}` inside the pipeline automatically that has permissions to push to your repository's registry.*
-
----
-
-## 2. Setting up the GitHub Action Workflow
-
-Create a new file in your repository: `.github/workflows/build-prod.yml`.
-
-This workflow triggers when you push to the `main` branch, but only if the relevant files actually change. It builds each container using the project root `.` as the context so that your local modules like `common/trading_common` are accessible.
-
-```yaml
-name: Build and Push Docker Images to GHCR
-
-on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'ai_trading_bot/api-web/**'
-      - 'ai_trading_bot/api-worker/**'
-      - 'ai_trading_bot/common/**'
-      - 'ai_trading_bot/scrapling-api/**'
-      - 'ai_trading_bot/Dockerfile.postgres'
-
-env:
-  REGISTRY: ghcr.io
-  # Converts your github username/repo to lowercase automatically
-  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
-
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # Critical: allows pushing to GHCR
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # 1. Build Custom Postgres
-      - name: Build Postgres
-        run: |
-          docker build -t ${{ env.IMAGE_PREFIX }}/ai_trading_bot-postgres:latest -f ai_trading_bot/Dockerfile.postgres ai_trading_bot/
-          docker push ${{ env.IMAGE_PREFIX }}/ai_trading_bot-postgres:latest
-
-      # 2. Build API Web & SSE (They share api-web/Dockerfile)
-      - name: Build API Web
-        run: |
-          docker build -t ${{ env.IMAGE_PREFIX }}/ai_trading_bot-api-web:latest -f ai_trading_bot/api-web/Dockerfile ai_trading_bot/
-          docker push ${{ env.IMAGE_PREFIX }}/ai_trading_bot-api-web:latest
-
-      # 3. Build API Worker
-      - name: Build API Worker
-        run: |
-          docker build -t ${{ env.IMAGE_PREFIX }}/ai_trading_bot-api-worker:latest -f ai_trading_bot/api-worker/Dockerfile ai_trading_bot/
-          docker push ${{ env.IMAGE_PREFIX }}/ai_trading_bot-api-worker:latest
-
-      # 4. Build Scrapling
-      - name: Build Scrapling API
-        run: |
-          docker build -t ${{ env.IMAGE_PREFIX }}/ai_trading_bot-scrapling:latest ai_trading_bot/scrapling-api/
-          docker push ${{ env.IMAGE_PREFIX }}/ai_trading_bot-scrapling:latest
-```
-
----
-
-## 3. Adapting `docker-compose.prod.yml`
-
-Locally, `docker-compose.yml` uses `build:` to assemble images. On production, you want Docker to download the pre-compiled images instead. Note down the image paths below (replace `YOURORG` with your actual GitHub username all lowercase).
-
-Edit `ai_trading_bot/docker-compose.prod.yml` and explicitly define the `image` tags for the services you built:
-
-```yaml
-services:
-  postgres:
-    image: ghcr.io/<YOURORG>/ai_trading_bot-postgres:latest
-
-  api-web:
-    image: ghcr.io/<YOURORG>/ai_trading_bot-api-web:latest
-
-  api-sse:
-    image: ghcr.io/<YOURORG>/ai_trading_bot-api-web:latest
-
-  api-worker:
-    image: ghcr.io/<YOURORG>/ai_trading_bot-api-worker:latest
-
-  scrapling:
-    image: ghcr.io/<YOURORG>/ai_trading_bot-scrapling:latest
-```
-
-When Docker sees `image` and `build` definitions simultaneously, passing the right deploy commands will force it to use `image`.
-
----
-
-## 4. Redefining your Deployment Commands
-
-Once the Action runs and the containers are stored in GHCR, you simply SSH into the production server and run the updated pull/publish routine.
-
-Replace your current deployment block in `some_commands.txt` / runbook with this zero-compilation workflow:
+2. VM pull authentication:
+   - A PAT is optional only if the VM is already authenticated to GHCR and can pull private packages successfully.
+   - For your first-time setup (or if `docker pull ghcr.io/...` fails with auth errors), create a classic PAT with `read:packages` and log in once:
 
 ```bash
-cd "/opt/pipfactor/ai_trading_bot" # (Or wherever your root is on the VM)
+echo "<PAT_WITH_read:packages>" | docker login ghcr.io -u <github-username-lowercase> --password-stdin
+```
 
-# 1. Download the pre-built images from GHCR
-docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml pull postgres api-web api-worker scrapling
+## 2. Workflow Implemented in This Repo
 
-# 2. Restart only the containers whose images have changed
+File: `.github/workflows/build-prod.yml`
+
+Behavior:
+1. Triggers on push to `main` for relevant backend/build paths.
+2. Lowercases the owner string in a dedicated step because `github.repository_owner` is not guaranteed lowercase.
+3. Builds and pushes these images:
+   - `ai_trading_bot-postgres` from `Dockerfile.postgres` with context `.`
+   - `ai_trading_bot-api-web` from `api-web/Dockerfile` with context `.`
+   - `ai_trading_bot-api-worker` from `api-worker/Dockerfile` with context `.`
+   - `ai_trading_bot-scrapling` from `scrapling-api/Dockerfile` with context `scrapling-api/`
+4. Pushes tags:
+   - `<short_sha>` (12-char commit SHA) as immutable build output
+
+Tagging strategy recommendation:
+1. Deploy using a pinned `IMAGE_TAG=<short_sha>` across all services.
+2. Keep at least one known-good prior SHA for fast rollback.
+
+## 3. Production Compose Wiring
+
+File: `docker-compose.prod.yml`
+
+The production override now sets GHCR image references for:
+1. `postgres`
+2. `api-web`
+3. `api-sse` (reuses `ai_trading_bot-api-web` image)
+4. `api-worker`
+5. `scrapling`
+
+It uses `ghcr.io/${GHCR_IMAGE_OWNER}/...` and a shared `${IMAGE_TAG}` so you can deploy a single, consistent release tag across all services.
+
+`GHCR_IMAGE_OWNER` and `IMAGE_TAG` are required and fail fast if missing.
+
+Set these in `.env.prod`:
+
+```dotenv
+GHCR_IMAGE_OWNER=<github-account-or-org-lowercase>
+IMAGE_TAG=<12-char-commit-sha-from-actions>
+```
+
+Network/environment compatibility notes:
+1. Existing `env_file` wiring in `docker-compose.prod.yml` is preserved.
+2. Redis and n8n service topology still comes from base `docker-compose.yml`:
+   - `redis-queue`, `redis-app`, `redis-sessions`
+   - `n8n`, `n8n-worker`
+3. Only image source for app/postgres/scrapling changes; service names and inter-service DNS remain unchanged.
+
+## 4. Deployment Commands (No Build on VM)
+
+Use this exact production flow:
+
+```bash
+cd "/opt/pipfactor/ai_trading_bot"
+
+# Optional preflight: confirm VM GHCR auth works for one target image
+docker pull ghcr.io/${GHCR_IMAGE_OWNER}/ai_trading_bot-api-web:${IMAGE_TAG}
+
+# Pull newest images from GHCR
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml pull \
+  postgres api-web api-sse api-worker scrapling
+
+# Restart stack without building on the VM
 docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build \
   postgres redis-queue redis-app redis-sessions n8n n8n-worker api-web api-sse api-worker scrapling
 ```
 
-**Notice what is missing here:** `--build` has been explicitly eliminated. Your server will process this cutover in roughly 10 seconds with negligible CPU spikes.
+### Helper: Auto-set IMAGE_TAG from latest successful CI run
 
----
+File: `scripts/set_image_tag_from_actions.sh`
 
-## 5. Connecting the Dots (Summary Checklist)
+This helper fetches the latest successful run of `build-prod.yml` on `main`, takes the run commit SHA, truncates it to 12 chars, and writes `IMAGE_TAG` into `.env.prod`.
 
-1. [ ] Create a read-only GHCR PAT and log the production VM into Docker.
-2. [ ] Commit the `.github/workflows/build-prod.yml` file to the root of your repo.
-3. [ ] Check the Actions tab in GitHub to ensure the workflow turns green and publishes packages.
-4. [ ] Go to your GitHub profile -> "Packages". You should see `ai_trading_bot-api-web`, etc. Ensure their visibility is set appropriately (Private is fine, since the VM is authenticated!).
-5. [ ] Update `docker-compose.prod.yml` with the hardcoded image paths.
-6. [ ] Pull and restart on the VM using the updated commands.
+Requirements:
+1. `GITHUB_TOKEN` or `GH_TOKEN` exported in your shell (must be able to read Actions metadata).
+2. Run from repo root (`ai_trading_bot`).
+
+```bash
+cd "/opt/pipfactor/ai_trading_bot"
+chmod +x scripts/set_image_tag_from_actions.sh
+export GITHUB_TOKEN="<token_with_repo_or_actions_read_access>"
+scripts/set_image_tag_from_actions.sh --workflow build-prod.yml --branch main --env-file .env.prod
+```
+
+Then deploy as usual:
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml pull \
+   postgres api-web api-sse api-worker scrapling
+
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build \
+   postgres redis-queue redis-app redis-sessions n8n n8n-worker api-web api-sse api-worker scrapling
+```
+
+Important safety rule:
+1. Always deploy with `--no-build` in production.
+2. Production override explicitly disables `build` for GHCR-managed services.
+
+## 5. GHCR Storage Bloat and Retention Policy
+
+Without cleanup, GHCR grows quickly because every commit produces new immutable tags.
+
+Recommended policy:
+1. Keep recent SHA tags only (for example last 30-60 versions).
+2. Delete older SHA-tagged package versions regularly using GitHub package retention settings or a scheduled cleanup workflow.
+3. Before deleting old versions, ensure at least one known-good rollback SHA per image remains available.
+
+Operational cadence:
+1. Weekly: verify package growth and delete stale versions.
+2. Monthly: validate rollback by pulling and starting one pinned SHA in a staging/safe environment.
+
+## 6. Quick Validation Checklist
+
+1. Commit and push to `main`.
+2. Confirm workflow success in Actions.
+3. Verify packages in GHCR for all four images with SHA tags.
+4. Ensure VM has `GHCR_IMAGE_OWNER` + `IMAGE_TAG` in `.env.prod` and valid GHCR login.
+5. Run `pull` then `up -d --no-build`.

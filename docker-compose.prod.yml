@@ -8,28 +8,43 @@
 #     -f docker-compose.yml -f docker-compose.prod.yml config
 
 services:
+  # Set GHCR_IMAGE_OWNER to your actual GitHub account/org in lowercase.
+  # Set IMAGE_TAG to a specific SHA tag for deterministic deploy/rollback.
+  # Production deploy flow uses: docker compose pull + up -d --no-build.
+  postgres:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-postgres:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
+
   n8n:
     ports:
       - "127.0.0.1:5678:5678"
 
   api-web:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-api-web:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:8080:8080"
 
   api-sse:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-api-web:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:8081:8081"
 
   api-worker:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-api-worker:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
     env_file:
       - .env.prod
     ports:
       - "127.0.0.1:9001:9001"
 
   scrapling:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-scrapling:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
     ports:
       - "127.0.0.1:8010:8010"
