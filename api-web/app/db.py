@@ -539,8 +539,7 @@ def get_regime_market_data_from_db():
                                     "lower_lows": 0
                                 },
                                 "price_level_analysis": {
-                                    "pivot_points": pivot_data,
-                                    "volume_profile": {}
+                                    "pivot_points": pivot_data
                                 }
                             },
                             "recent_bars_detail": recent_bars
@@ -629,7 +628,12 @@ def get_latest_news_from_db(limit: int = 50, offset: int = 0):
                     market_pressure,
                     attention_window,
                     confidence_label,
-                    expected_followups
+                    expected_followups,
+                    ai_analysis_summary,
+                    original_email_content,
+                    similar_news_context,
+                    primary_instrument,
+                    is_priced_in
                   FROM email_news_analysis
                   WHERE forex_relevant = true
                   AND importance_score >= 2
@@ -683,7 +687,12 @@ def get_upcoming_news_from_db():
                     volatility_expectation,
                     forex_instruments,
                     breaking_news,
-                    forexfactory_urls[1] as forexfactory_url
+                    forexfactory_urls[1] as forexfactory_url,
+                    ai_analysis_summary,
+                    original_email_content,
+                    similar_news_context,
+                    primary_instrument,
+                    is_priced_in
                   FROM email_news_analysis
                   WHERE forex_relevant = true
                   AND (importance_score >= 4 OR breaking_news = true)

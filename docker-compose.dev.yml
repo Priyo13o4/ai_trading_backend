@@ -1,0 +1,31 @@
+# Dev override profile.
+# Usage:
+#   docker compose --env-file .env.dev \
+#     -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+services:
+  n8n:
+    ports:
+      - "127.0.0.1:5678:5678"
+
+  api-web:
+    env_file:
+      - .env.dev
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  api-sse:
+    env_file:
+      - .env.dev
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  api-worker:
+    env_file:
+      - .env.dev
+    ports:
+      - "127.0.0.1:9001:9001"
+
+  scrapling:
+    ports:
+      - "127.0.0.1:8010:8010"

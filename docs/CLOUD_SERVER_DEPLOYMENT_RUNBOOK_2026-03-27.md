@@ -108,9 +108,9 @@ Use the same internal ports as production if it is a separate machine.
 Example public hosts:
 
 - `dev.pipfactor.com`
-- `api.dev.pipfactor.com`
-- `sse.dev.pipfactor.com`
-- `n8n.dev.pipfactor.com`
+- `api-dev.pipfactor.com`
+- `sse-dev.pipfactor.com`
+- `n8n-dev.pipfactor.com`
 
 ## Dev on the same server
 
@@ -217,9 +217,9 @@ Use separate tunnels for dev and production.
 - tunnel name: `pipfactor-dev`
 - hostnames:
   - `dev.pipfactor.com`
-  - `api.dev.pipfactor.com`
-  - `sse.dev.pipfactor.com`
-  - `n8n.dev.pipfactor.com`
+  - `api-dev.pipfactor.com`
+  - `sse-dev.pipfactor.com`
+  - `n8n-dev.pipfactor.com`
 
 Why separate tunnels:
 
@@ -260,9 +260,9 @@ Create or keep proxied CNAMEs pointing to the production tunnel target:
 Under the existing `pipfactor.com` zone, create proxied CNAMEs pointing to the dev tunnel target:
 
 - `dev.pipfactor.com`
-- `api.dev.pipfactor.com`
-- `sse.dev.pipfactor.com`
-- `n8n.dev.pipfactor.com`
+- `api-dev.pipfactor.com`
+- `sse-dev.pipfactor.com`
+- `n8n-dev.pipfactor.com`
 
 Required cookie isolation with this topology:
 
@@ -320,11 +320,11 @@ credentials-file: /etc/cloudflared/<dev-tunnel-id>.json
 ingress:
   - hostname: dev.pipfactor.com
     service: http://127.0.0.1:4300
-  - hostname: api.dev.pipfactor.com
+  - hostname: api-dev.pipfactor.com
     service: http://127.0.0.1:48080
-  - hostname: sse.dev.pipfactor.com
+  - hostname: sse-dev.pipfactor.com
     service: http://127.0.0.1:48081
-  - hostname: n8n.dev.pipfactor.com
+  - hostname: n8n-dev.pipfactor.com
     service: http://127.0.0.1:45678
   - service: http_status:404
 ```

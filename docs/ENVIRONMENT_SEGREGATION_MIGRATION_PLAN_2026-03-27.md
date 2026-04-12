@@ -184,9 +184,9 @@ Canonical design for this project:
 - use same-apex dev subdomains under `pipfactor.com`
 - example:
    - `dev.pipfactor.com`
-   - `api.dev.pipfactor.com`
-   - `sse.dev.pipfactor.com`
-   - `n8n.dev.pipfactor.com`
+   - `api-dev.pipfactor.com`
+   - `sse-dev.pipfactor.com`
+   - `n8n-dev.pipfactor.com`
 - Cookie domain: `.dev.pipfactor.com`
 - Cookie names:
    - `SESSION_COOKIE_NAME=dev_session`
@@ -495,9 +495,9 @@ Objective:
 Target for this project:
 
 - frontend: `https://dev.pipfactor.com`
-- API: `https://api.dev.pipfactor.com`
-- SSE: `https://sse.dev.pipfactor.com`
-- N8N: `https://n8n.dev.pipfactor.com`
+- API: `https://api-dev.pipfactor.com`
+- SSE: `https://sse-dev.pipfactor.com`
+- N8N: `https://n8n-dev.pipfactor.com`
 
 Actions:
 
@@ -589,9 +589,9 @@ This keeps environment selection explicit and avoids one giant shared `.env`.
 ## Dev (Canonical For This Project)
 
 - `dev.pipfactor.com`
-- `api.dev.pipfactor.com`
-- `sse.dev.pipfactor.com`
-- `n8n.dev.pipfactor.com`
+- `api-dev.pipfactor.com`
+- `sse-dev.pipfactor.com`
+- `n8n-dev.pipfactor.com`
 
 Use dev-only cookie names with this topology:
 

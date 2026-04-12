@@ -15,9 +15,9 @@ These decisions are applied to this task file (including your inline comments):
 
 1. Dev topology will use same-apex fallback hosts for lower ops complexity:
    - `dev.pipfactor.com`
-   - `api.dev.pipfactor.com`
-   - `sse.dev.pipfactor.com`
-   - `n8n.dev.pipfactor.com`
+   - `api-dev.pipfactor.com`
+   - `sse-dev.pipfactor.com`
+   - `n8n-dev.pipfactor.com`
 2. Because same-apex dev is selected, env-specific cookie names are mandatory:
    - production: `session`, `csrf_token`
    - dev: `dev_session`, `dev_csrf_token`
@@ -271,9 +271,9 @@ Keep existing tunnel behavior for now, and execute this block only during server
 
 - [ ] Create DNS for:
   - `dev.pipfactor.com`
-  - `api.dev.pipfactor.com`
-  - `sse.dev.pipfactor.com`
-  - `n8n.dev.pipfactor.com`
+  - `api-dev.pipfactor.com`
+  - `sse-dev.pipfactor.com`
+  - `n8n-dev.pipfactor.com`
 - [ ] Create separate dev tunnel and isolated ingress mapping.
 - [ ] Ensure no dev hostname shares ingress config with prod tunnel.
 
