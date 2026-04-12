@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from collections import deque
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from pydantic import BaseModel, Field
+import vertexai
+from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 
 from config import Config
 
@@ -345,10 +347,13 @@ Output parser :
                 logger.error(f"Failed to decode GOOGLE_CREDENTIALS_B64: {e}")
 
         # Create Gemini client for Vertex AI
+        project_id = os.getenv("GEMINI_PROJECT_ID", "project-6cf3a9cc-20fd-49e9-b95")
         if creds:
-            self.client = genai.Client(vertexai=True, project=os.getenv("GEMINI_PROJECT_ID", "project-6cf3a9cc-20fd-49e9-b95"), location="global", credentials=creds)
+            vertexai.init(project=project_id, location="us-central1", credentials=creds)
+            self.client = genai.Client(vertexai=True, project=project_id, location="us-central1", credentials=creds)
         else:
-            self.client = genai.Client(vertexai=True, project=os.getenv("GEMINI_PROJECT_ID", "project-6cf3a9cc-20fd-49e9-b95"), location="global")
+            vertexai.init(project=project_id, location="us-central1")
+            self.client = genai.Client(vertexai=True, project=project_id, location="us-central1")
         
         # Store generation config (enforce JSON + schema so user-centric fields are always present)
         self.generation_config = {
@@ -869,12 +874,15 @@ Focus on forex market impact, affected instruments (including major crypto pairs
             if len(text) > 10000:
                 text = text[:10000]
             
-            result = self.client.models.embed_content(
-                model=self.embedding_model_name,
-                contents=text  # Changed from 'content' to 'contents'
+            # Using vertexai explicit SDK implementation
+            model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+            text_input = TextEmbeddingInput(text, "RETRIEVAL_DOCUMENT")
+            result = model.get_embeddings(
+                [text_input],
+                output_dimensionality=3072
             )
             
-            embedding = result.embeddings[0].values
+            embedding = result[0].values
             logger.info(f"Generated embedding of dimension {len(embedding)}")
             return embedding
             
