@@ -1,0 +1,135 @@
+name: GHCR Retention Cleanup
+
+on:
+  schedule:
+    - cron: '30 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      keep_count:
+        description: "Number of SHA-tagged versions to keep per package"
+        required: false
+        default: "20"
+      delete_untagged:
+        description: "Also delete untagged package versions"
+        required: false
+        default: "true"
+      dry_run:
+        description: "Log actions without deleting versions"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ai_trading_bot-postgres
+          - ai_trading_bot-api-web
+          - ai_trading_bot-api-worker
+          - ai_trading_bot-scrapling
+
+    steps:
+      - name: Prune old GHCR versions
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ matrix.package }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        with:
+          script: |
+            const pkg = process.env.PACKAGE_NAME;
+            const owner = process.env.REPOSITORY_OWNER;
+
+            const keepCount = Number(context.payload.inputs?.keep_count || 20);
+            const deleteUntagged = String(context.payload.inputs?.delete_untagged ?? 'true') === 'true';
+            const dryRun = String(context.payload.inputs?.dry_run ?? 'false') === 'true';
+
+            if (!Number.isFinite(keepCount) || keepCount < 1) {
+              core.setFailed(`Invalid keep_count: ${keepCount}`);
+              return;
+            }
+
+            const repoInfo = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const isOrg = repoInfo.data.owner?.type === 'Organization';
+
+            const listPath = isOrg
+              ? `/orgs/${owner}/packages/container/${pkg}/versions`
+              : `/users/${owner}/packages/container/${pkg}/versions`;
+            const deletePath = isOrg
+              ? `/orgs/${owner}/packages/container/${pkg}/versions/{package_version_id}`
+              : `/users/${owner}/packages/container/${pkg}/versions/{package_version_id}`;
+
+            core.info(`Package: ${pkg}`);
+            core.info(`Owner: ${owner} (${isOrg ? 'org' : 'user'})`);
+            core.info(`keep_count=${keepCount}, delete_untagged=${deleteUntagged}, dry_run=${dryRun}`);
+
+            const versions = [];
+            for (let page = 1; page <= 10; page += 1) {
+              const res = await github.request(`GET ${listPath}`, {
+                package_type: 'container',
+                per_page: 100,
+                page,
+              });
+              const batch = res.data || [];
+              versions.push(...batch);
+              if (batch.length < 100) break;
+            }
+
+            const shaRe = /^[0-9a-f]{12}$/;
+            const shaOnly = [];
+            const untagged = [];
+            let protectedTagged = 0;
+
+            for (const v of versions) {
+              const tags = v.metadata?.container?.tags || [];
+              if (tags.length === 0) {
+                untagged.push(v);
+                continue;
+              }
+
+              const allSha = tags.every((t) => shaRe.test(t));
+              if (allSha) {
+                shaOnly.push(v);
+              } else {
+                protectedTagged += 1;
+              }
+            }
+
+            shaOnly.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+            const shaToDelete = shaOnly.slice(keepCount);
+            const untaggedToDelete = deleteUntagged ? untagged : [];
+
+            const ids = new Set();
+            for (const v of [...shaToDelete, ...untaggedToDelete]) ids.add(v.id);
+            const deleteIds = [...ids];
+
+            core.info(`Total versions: ${versions.length}`);
+            core.info(`SHA-only versions: ${shaOnly.length}`);
+            core.info(`Protected tagged versions: ${protectedTagged}`);
+            core.info(`Untagged versions: ${untagged.length}`);
+            core.info(`Delete candidates: ${deleteIds.length}`);
+
+            if (deleteIds.length === 0) {
+              core.info('Nothing to delete.');
+              return;
+            }
+
+            for (const id of deleteIds) {
+              if (dryRun) {
+                core.info(`[dry-run] Would delete package version id=${id}`);
+                continue;
+              }
+              await github.request(`DELETE ${deletePath}`, {
+                package_type: 'container',
+                package_version_id: id,
+              });
+              core.info(`Deleted package version id=${id}`);
+            }
