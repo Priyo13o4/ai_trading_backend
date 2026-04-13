@@ -70,5 +70,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ghcr.io/${{ steps.vars.outputs.owner_lc }}/${{ matrix.image }}:${{ steps.vars.outputs.short_sha }}
