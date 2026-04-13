@@ -41,7 +41,7 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '5 minutes', time)
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_m5 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_m5 SET (timescaledb.materialized_only = FALSE);
 CREATE INDEX IF NOT EXISTS idx_candlesticks_m5_symbol_time ON candlesticks_m5 (symbol, time DESC);
 SELECT add_continuous_aggregate_policy('candlesticks_m5',
   start_offset => INTERVAL '30 days',
@@ -69,7 +69,7 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '15 minutes', time)
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_m15 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_m15 SET (timescaledb.materialized_only = FALSE);
 CREATE INDEX IF NOT EXISTS idx_candlesticks_m15_symbol_time ON candlesticks_m15 (symbol, time DESC);
 SELECT add_continuous_aggregate_policy('candlesticks_m15',
   start_offset => INTERVAL '60 days',
@@ -97,7 +97,7 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '30 minutes', time)
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_m30 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_m30 SET (timescaledb.materialized_only = FALSE);
 CREATE INDEX IF NOT EXISTS idx_candlesticks_m30_symbol_time ON candlesticks_m30 (symbol, time DESC);
 SELECT add_continuous_aggregate_policy('candlesticks_m30',
   start_offset => INTERVAL '90 days',
@@ -125,7 +125,7 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '1 hour', time)
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_h1 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_h1 SET (timescaledb.materialized_only = FALSE);
 CREATE INDEX IF NOT EXISTS idx_candlesticks_h1_symbol_time ON candlesticks_h1 (symbol, time DESC);
 SELECT add_continuous_aggregate_policy('candlesticks_h1',
   start_offset => INTERVAL '180 days',
@@ -153,7 +153,7 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '4 hours', time)
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_h4 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_h4 SET (timescaledb.materialized_only = FALSE);
 CREATE INDEX IF NOT EXISTS idx_candlesticks_h4_symbol_time ON candlesticks_h4 (symbol, time DESC);
 SELECT add_continuous_aggregate_policy('candlesticks_h4',
   start_offset => INTERVAL '365 days',

@@ -9,6 +9,9 @@ setup(
         "redis>=7.1.0",
         "psycopg[binary]>=3.3.2",
         "python-dotenv>=1.2.1",
+        "pandas>=2.2.0",
+        "pandas-ta>=0.4.67b0",
+        "numpy>=1.26.0",
     ],
     python_requires=">=3.11",
 )

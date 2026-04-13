@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from typing import Any, Callable, TypeVar
 from psycopg.rows import dict_row
 from fastapi import HTTPException
+import pandas as pd
+from trading_common.indicators.technical import calculate_all_indicators
 
 logger = logging.getLogger(__name__)
 DB_TIMEOUT_RETRY_AFTER_SECONDS = (os.getenv("DB_TIMEOUT_RETRY_AFTER_SECONDS") or "5").strip() or "5"
@@ -449,7 +451,8 @@ def get_regime_market_data_from_db():
                         
                         if not indicators:
                             logger.warning(f"[DB] No indicators for {symbol}/{timeframe}")
-                            continue
+                            # We will try to calculate them on-the-fly if candles are available
+                            indicators = {}
                         
                         # Get recent bars for market structure analysis (USE TIMESCALE CAGGs)
                         rel = _ohlcv_relation_for_timeframe(timeframe)
@@ -481,6 +484,71 @@ def get_regime_market_data_from_db():
                         # Convert to list for easier processing
                         candle_list = list(candles)
                         current_candle = candle_list[0]
+
+                        # CHECK FOR STALE INDICATORS: If latest candle is newer than stored indicators, recalculate on-the-fly
+                        is_on_the_fly = False
+                        indicators_time = indicators.get('time')
+                        
+                        if not indicators_time or current_candle['time'] > indicators_time:
+                            try:
+                                # Prepare DataFrame for calculation (need at least 250 bars for lookbacks)
+                                df = pd.DataFrame(candle_list).sort_values('time').reset_index(drop=True)
+                                # Mapping columns to what calculate_all_indicators expects
+                                df = df.rename(columns={'time': 'datetime'})
+                                for col in ["open", "high", "low", "close", "volume"]:
+                                    df[col] = pd.to_numeric(df[col])
+                                
+                                # Calculate all indicators
+                                calc_res = calculate_all_indicators(
+                                    df=df,
+                                    ema_periods=[9, 21, 50, 100, 200],
+                                    rsi_period=14,
+                                    macd_fast=12,
+                                    macd_slow=26,
+                                    macd_signal=9,
+                                    atr_period=14,
+                                    bb_period=20,
+                                    bb_deviation=2.0,
+                                    roc_period=10,
+                                    adx_period=14,
+                                    obv_slope_period=14,
+                                    momentum_ema=21,
+                                    volatility_lookback=100
+                                )
+                                
+                                if calc_res:
+                                    # Normalize calculated indicators to match the dictionary format used in construction
+                                    # We flatten the structure back to match indicators['ema_9'] etc.
+                                    indicators['ema_9'] = calc_res.get('emas', {}).get('EMA_9')
+                                    indicators['ema_21'] = calc_res.get('emas', {}).get('EMA_21')
+                                    indicators['ema_50'] = calc_res.get('emas', {}).get('EMA_50')
+                                    indicators['ema_100'] = calc_res.get('emas', {}).get('EMA_100')
+                                    indicators['ema_200'] = calc_res.get('emas', {}).get('EMA_200')
+                                    indicators['rsi'] = calc_res.get('rsi')
+                                    indicators['macd_main'] = calc_res.get('macd_main')
+                                    indicators['macd_signal'] = calc_res.get('macd_signal')
+                                    indicators['macd_histogram'] = calc_res.get('macd_histogram')
+                                    indicators['atr'] = calc_res.get('atr')
+                                    indicators['atr_percentile'] = calc_res.get('atr_percentile')
+                                    indicators['bb_upper'] = calc_res.get('bb_upper')
+                                    indicators['bb_middle'] = calc_res.get('bb_middle')
+                                    indicators['bb_lower'] = calc_res.get('bb_lower')
+                                    indicators['bb_squeeze_ratio'] = calc_res.get('bb_squeeze_ratio')
+                                    indicators['bb_width_percentile'] = calc_res.get('bb_width_percentile')
+                                    indicators['roc_percent'] = calc_res.get('roc_percent')
+                                    indicators['ema_momentum_slope'] = calc_res.get('ema_momentum_slope')
+                                    indicators['adx'] = calc_res.get('adx')
+                                    indicators['dmp'] = calc_res.get('dmp')
+                                    indicators['dmn'] = calc_res.get('dmn')
+                                    indicators['obv_slope'] = calc_res.get('obv_slope')
+                                    is_on_the_fly = True
+                                    # logger.info(f"[DB] Recalculated indicators on-the-fly for {symbol}/{timeframe}")
+                            except Exception as calc_err:
+                                logger.warning(f"[DB] On-the-fly calculation failed for {symbol}/{timeframe}: {calc_err}")
+
+                        if not indicators and not is_on_the_fly:
+                            logger.warning(f"[DB] No indicators available for {symbol}/{timeframe} after attempt")
+                            continue
                         
                         # Calculate market structure from recent 50 bars
                         recent_50 = candle_list[:50]
@@ -628,7 +696,7 @@ def get_regime_market_data_from_db():
                 "successful_symbols": successful_symbols,
                 "total_symbols": len(symbols),
                 "failed_symbols": failed_symbols,
-                "data_source": "stored_indicators"
+                "data_source": "hybrid_on_the_fly"
             },
             "market_data": market_data
         }

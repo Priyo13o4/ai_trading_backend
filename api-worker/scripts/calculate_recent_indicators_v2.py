@@ -49,8 +49,8 @@ elif os.path.isdir(api_web_app_dir):
 else:
     sys.path.insert(0, scripts_dir)
 
-# Import unified indicator calculation from technical.py (single source of truth)
-from app.indicators.technical import calculate_all_indicators
+# Import unified indicator calculation from common (single source of truth)
+from trading_common.indicators.technical import calculate_all_indicators
 
 # Configuration
 DATABASE_URL = os.getenv(
