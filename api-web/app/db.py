@@ -143,6 +143,56 @@ def _ohlcv_relation_for_timeframe(timeframe: str) -> str:
 
     raise ValueError(f"Unsupported timeframe: {tf}")
 
+
+def _compute_swing_analysis(candle_list: list[dict], lookback: int = 50, flank: int = 2) -> dict[str, int]:
+    """Compute swing highs/lows and their directional transitions."""
+    base = {
+        "total_swing_highs": 0,
+        "total_swing_lows": 0,
+        "higher_highs": 0,
+        "lower_highs": 0,
+        "higher_lows": 0,
+        "lower_lows": 0,
+    }
+    if not candle_list:
+        return base
+
+    window = list(reversed(candle_list[:lookback]))
+    min_points = (flank * 2) + 1
+    if len(window) < min_points:
+        return base
+
+    swing_highs: list[float] = []
+    swing_lows: list[float] = []
+
+    for i in range(flank, len(window) - flank):
+        current_high = float(window[i]["high"])
+        current_low = float(window[i]["low"])
+
+        prev_highs = [float(window[j]["high"]) for j in range(i - flank, i)]
+        next_highs = [float(window[j]["high"]) for j in range(i + 1, i + flank + 1)]
+        if current_high > max(prev_highs) and current_high >= max(next_highs):
+            swing_highs.append(current_high)
+
+        prev_lows = [float(window[j]["low"]) for j in range(i - flank, i)]
+        next_lows = [float(window[j]["low"]) for j in range(i + 1, i + flank + 1)]
+        if current_low < min(prev_lows) and current_low <= min(next_lows):
+            swing_lows.append(current_low)
+
+    higher_highs = sum(1 for i in range(1, len(swing_highs)) if swing_highs[i] > swing_highs[i - 1])
+    lower_highs = sum(1 for i in range(1, len(swing_highs)) if swing_highs[i] < swing_highs[i - 1])
+    higher_lows = sum(1 for i in range(1, len(swing_lows)) if swing_lows[i] > swing_lows[i - 1])
+    lower_lows = sum(1 for i in range(1, len(swing_lows)) if swing_lows[i] < swing_lows[i - 1])
+
+    return {
+        "total_swing_highs": len(swing_highs),
+        "total_swing_lows": len(swing_lows),
+        "higher_highs": int(higher_highs),
+        "lower_highs": int(lower_highs),
+        "higher_lows": int(higher_lows),
+        "lower_lows": int(lower_lows),
+    }
+
 # ============================================================================
 # STRATEGY & SIGNAL QUERIES (NEW SCHEMA v2.0)
 # ============================================================================
@@ -437,6 +487,7 @@ def get_regime_market_data_from_db():
                         recent_high = max(c['high'] for c in recent_50)
                         recent_low = min(c['low'] for c in recent_50)
                         range_percent = round(((recent_high - recent_low) / recent_low) * 100, 2) if recent_low > 0 else 0.0
+                        swing_analysis = _compute_swing_analysis(candle_list, lookback=50, flank=2)
                         
                         # Calculate pivot points from previous bar
                         pivot_data = {}
@@ -530,14 +581,7 @@ def get_regime_market_data_from_db():
                                 "recent_high": round(recent_high, 5),
                                 "recent_low": round(recent_low, 5),
                                 "range_percent": range_percent,
-                                "swing_analysis": {
-                                    "total_swing_highs": 0,
-                                    "total_swing_lows": 0,
-                                    "higher_highs": 0,
-                                    "lower_highs": 0,
-                                    "higher_lows": 0,
-                                    "lower_lows": 0
-                                },
+                                "swing_analysis": swing_analysis,
                                 "price_level_analysis": {
                                     "pivot_points": pivot_data
                                 }
@@ -632,6 +676,7 @@ def get_latest_news_from_db(limit: int = 50, offset: int = 0):
                     ai_analysis_summary,
                     original_email_content,
                     similar_news_context,
+                    similar_news_ids,
                     primary_instrument,
                     is_priced_in
                   FROM email_news_analysis
@@ -691,6 +736,7 @@ def get_upcoming_news_from_db():
                     ai_analysis_summary,
                     original_email_content,
                     similar_news_context,
+                    similar_news_ids,
                     primary_instrument,
                     is_priced_in
                   FROM email_news_analysis
@@ -705,6 +751,50 @@ def get_upcoming_news_from_db():
     except Exception as e:
         logger.error(f"[DB ERROR] get_upcoming_news_from_db: {str(e)}")
         raise
+
+def get_news_by_id_from_db(item_id: int):
+    """
+    Get a specific news record by its email_id (id)
+    """
+    logger.info(f"[DB] Fetching news by ID: {item_id}")
+    try:
+        with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                  SELECT 
+                    email_id as id,
+                    headline as title,
+                    COALESCE(ai_analysis_summary, original_email_content) as text,
+                    email_received_at as timestamp,
+                    importance_score,
+                    sentiment_score,
+                    forex_instruments,
+                    forexfactory_category,
+                    market_impact_prediction,
+                    volatility_expectation,
+                    forexfactory_urls[1] as forexfactory_url,
+                    human_takeaway,
+                    attention_score,
+                    news_state,
+                    market_pressure,
+                    attention_window,
+                    confidence_label,
+                    expected_followups,
+                    ai_analysis_summary,
+                    original_email_content,
+                    similar_news_context,
+                    similar_news_ids,
+                    primary_instrument,
+                    is_priced_in
+                  FROM email_news_analysis
+                  WHERE email_id = %s
+                """, (item_id,))
+                result = cur.fetchone()
+                return result
+    except Exception as e:
+        logger.error(f"[DB ERROR] get_news_by_id_from_db: {str(e)}")
+        raise
+
 
 
 def get_latest_weekly_macro_playbook_from_db():

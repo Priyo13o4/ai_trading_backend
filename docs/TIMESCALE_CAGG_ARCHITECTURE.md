@@ -61,8 +61,10 @@
 ## Notes on compression
 
 - Base hypertables like `candlesticks` and `technical_indicators` can be compressed (your DB has compression enabled and a compression policy job).
-- CAGG materializations are stored in internal hypertables; compressing those is optional/advanced.
-  - If needed later, we can enable compression on the `_timescaledb_internal._materialized_hypertable_*` tables and add policies.
+- CAGG materializations are stored in internal hypertables.
+- **v2.1 update (2.26.2):** We have enabled **Compression on CAGGs**. This reduces storage of derived history by 90% and enables **ColumnarIndexScan** for high-speed min/max lookups on your charts.
+  - Policy: `INTERVAL '1 day'` for intraday, `INTERVAL '7 days'` for H4.
+
 
 ---
 
@@ -134,8 +136,11 @@ WHERE timeframe = 'M1'
 GROUP BY symbol, time_bucket(INTERVAL '1 hour', time, 'UTC')
 WITH NO DATA;
 
-ALTER MATERIALIZED VIEW candlesticks_h1 SET (timescaledb.materialized_only = TRUE);
+ALTER MATERIALIZED VIEW candlesticks_h1 SET (timescaledb.materialized_only = FALSE);
 ```
+
+**v2.1 update (2.26.2):** We now set `materialized_only = FALSE`. This enables **Real-time Aggregation**, meaning the current "forming" bucket is live-calculated from M1 and visible in the CAGG view without waiting for a materialized refresh.
+
 
 **Key points:**
 - Source: `candlesticks WHERE timeframe='M1'`

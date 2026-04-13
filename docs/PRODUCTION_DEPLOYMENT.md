@@ -501,3 +501,21 @@ stripe trigger invoice.payment_succeeded
 ---
 
 ## Part 7: Monitoring & Maintenance
+
+### 🗄️ Database Sync (Prod to Local)
+
+If you need to pull production data down to your local developer machine, follow these rules to avoid TimescaleDB catalog corruption:
+
+1. **Version Parity**: Ensure both local and production are on the same version (currently **TimescaleDB 2.26.2**).
+2. **Restore Strategy**:
+   - Do NOT restore into a pre-initialized database.
+   - Use `dropdb` and `createdb` to start fresh.
+   - Run `pg_restore --no-owner --no-privileges -d your_db prod_dump.pgdump`. This allows TimescaleDB to recreate its internal metadata catalog correctly.
+3. **Optimizations**: After restoring, re-apply 2.26 optimizations:
+   - `ALTER MATERIALIZED VIEW ... SET (timescaledb.materialized_only = false);` (for Real-time charts).
+   - `ALTER MATERIALIZED VIEW ... SET (timescaledb.compress = true);` + add compression policies.
+
+### 📈 TimescaleDB Performance (2.26.2+)
+
+- **Real-time CAGGs**: Continuous Aggregates are now set to `materialized_only = false`. This allows the API to serve the "forming" candle directly from the raw M1 data merged with the materialized history.
+- **Compression**: CAGGs are compressed automatically after 1 day (intraday) or 7 days (H4). This enables high-speed summary queries.

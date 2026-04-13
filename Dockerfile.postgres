@@ -3,7 +3,14 @@ FROM pgvector/pgvector:pg18
 
 USER root
 
-# Install TimescaleDB on top
+# Install TimescaleDB on top.
+# NOTE: Version is intentionally NOT pinned — this always installs the latest
+# stable release from the packagecloud repo at build time.
+# To avoid version drift between local and VM environments, always rebuild
+# the image on BOTH machines when you rebuild one:
+#   docker compose build --no-cache postgres
+# After restarting, run in the DB to sync the extension catalog:
+#   ALTER EXTENSION timescaledb UPDATE;
 RUN apt-get update && \
     apt-get install -y gnupg lsb-release wget && \
     echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" > /etc/apt/sources.list.d/timescaledb.list && \

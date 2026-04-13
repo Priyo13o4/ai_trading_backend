@@ -1,10 +1,9 @@
 """
 Market Structure Analysis Module
-Implements swing analysis, pivot points, and volume profile (matching MT5 script logic)
+Implements swing analysis and pivot points (matching MT5 script logic)
 """
 
 import pandas as pd
-import numpy as np
 from typing import Dict, Optional
 import logging
 
@@ -72,49 +71,6 @@ def calculate_pivot_points(high: float, low: float, close: float, open_price: fl
     }
     
     return pivots
-
-
-def calculate_volume_profile(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    Calculate volume profile:
-    - Point of Control (POC): Price level with highest volume
-    - Value Area High (VAH): Upper boundary of 70% volume
-    - Value Area Low (VAL): Lower boundary of 70% volume
-    """
-    if df is None or df.empty:
-        return {}
-    
-    try:
-        # Group prices into bins and sum volume
-        price_volume = df.groupby(pd.cut(df['close'], bins=100))['volume'].sum()
-        
-        # Point of Control: price level with max volume
-        poc = price_volume.idxmax().mid if not price_volume.empty else 0.0
-        
-        # Value Area: 70% of total volume
-        total_volume = price_volume.sum()
-        if total_volume == 0:
-            return {
-                "point_of_control": round(poc, 4),
-                "value_area_high": 0.0,
-                "value_area_low": 0.0
-            }
-        
-        sorted_volume = price_volume.sort_values(ascending=False)
-        cumulative_volume = sorted_volume.cumsum()
-        value_area_series = sorted_volume[cumulative_volume <= total_volume * 0.7]
-        
-        vah = value_area_series.index.max().right if not value_area_series.empty else 0.0
-        val = value_area_series.index.min().left if not value_area_series.empty else 0.0
-        
-        return {
-            "point_of_control": round(poc, 4),
-            "value_area_high": round(vah, 4),
-            "value_area_low": round(val, 4)
-        }
-    except Exception as e:
-        logger.warning(f"Volume profile calculation failed: {e}")
-        return {}
 
 
 def analyze_swing_structure(df: pd.DataFrame, lookback: int) -> Dict[str, int]:
@@ -196,17 +152,13 @@ def analyze_market_structure(
                 open_price=prev_bar['open']
             )
         
-        # Volume profile
-        volume_profile_data = calculate_volume_profile(df)
-        
         return {
             "recent_high": round(recent_high, 5),
             "recent_low": round(recent_low, 5),
             "range_percent": range_percent,
             "swing_analysis": swing_analysis,
             "price_level_analysis": {
-                "pivot_points": pivot_data,
-                "volume_profile": volume_profile_data
+                "pivot_points": pivot_data
             }
         }
     except Exception as e:
