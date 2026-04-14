@@ -464,7 +464,7 @@ def get_regime_market_data_from_db():
                                     FROM candlesticks
                                     WHERE symbol = %s AND timeframe = %s
                                     ORDER BY time DESC
-                                    LIMIT 100
+                                    LIMIT 300
                                 """, (symbol, timeframe))
                             else:
                                 # Use TimescaleDB continuous aggregate for higher timeframes
@@ -473,7 +473,7 @@ def get_regime_market_data_from_db():
                                     FROM {rel}
                                     WHERE symbol = %s
                                     ORDER BY time DESC
-                                    LIMIT 100
+                                    LIMIT 300
                                 """, (symbol,))
                             candles = cur.fetchall()
                         
