@@ -273,15 +273,111 @@ function buildAccountDeletionEmail(otpCode: string, expiryIso: string) {
   return {
     subject: "PipFactor account deletion verification code",
     text: `Your PipFactor account deletion code is ${otpCode}. This code expires in about ${expiryMinutes} minute(s). If you did not request account deletion, please ignore this email.`,
-    html: `
-      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111827;">
-        <h2 style="margin: 0 0 12px 0;">Confirm Account Deletion</h2>
-        <p style="margin: 0 0 12px 0;">Use the verification code below to confirm deletion of your PipFactor account:</p>
-        <p style="font-size: 28px; font-weight: bold; letter-spacing: 4px; margin: 0 0 16px 0;">${otpCode}</p>
-        <p style="margin: 0 0 12px 0;">This code expires in about <strong>${expiryMinutes} minute(s)</strong>.</p>
-        <p style="margin: 0; color: #6b7280;">If you did not request this, you can ignore this email.</p>
-      </div>
-    `.trim(),
+    html: `<!DOCTYPE html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="supported-color-schemes" content="light" />
+    <title>PipFactor - Delete Account</title>
+    <!--[if mso]>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+    <![endif]-->
+</head>
+<body style="margin:0;padding:0;background-color:#f5f5f7;background-image:linear-gradient(#f5f5f7,#f5f5f7);font-family:Arial,Helvetica,sans-serif;-webkit-font-smoothing:antialiased;word-break:break-word;">
+    
+    <!-- PREHEADER TEXT (Hidden in body, shows in inbox preview) -->
+    <div style="display:none;font-size:1px;color:#f5f5f7;color:rgba(245,245,247,1);line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">
+        Action required: Your account deletion verification code is ${otpCode}.
+        &zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f7;background-image:linear-gradient(#f5f5f7,#f5f5f7);padding:24px 12px;">
+        <tr>
+            <td align="center">
+                
+                <!-- OUTLOOK GHOST TABLE -->
+                <!--[if mso | IE]>
+                <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="600" align="center" style="width:600px;">
+                <tr>
+                <td>
+                <![endif]-->
+
+                <!-- Card -->
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#111111;background-image:linear-gradient(#111111,#111111);border-radius:12px;border:1px solid #222222;">
+                    <!-- Header -->
+                    <tr>
+                        <td align="center" style="padding:32px 24px 8px;">
+                            <img src="https://cdn.pipfactor.com/email-assets/logo.png" width="56" alt="PipFactor" style="display:block;border:0;outline:none;text-decoration:none;">
+                        </td>
+                    </tr>
+                    
+                    <!-- Title -->
+                    <tr>
+                        <td align="center" style="padding:8px 24px 0;">
+                            <h1 style="margin:0;color:#d4af37;color:rgba(212,175,55,1);font-size:26px;font-weight:700;">
+                                Delete your account
+                            </h1>
+                        </td>
+                    </tr>
+                    
+                    <!-- Text -->
+                    <tr>
+                        <td align="center" style="padding:16px 32px;color:#e6e6e6;color:rgba(230,230,230,1);font-size:15px;line-height:1.6;">
+                            Use the verification code below to confirm the deletion of your PipFactor account.
+                        </td>
+                    </tr>
+                    
+                    <!-- OTP Box -->
+                    <tr>
+                        <td align="center" style="padding:16px 24px 32px;">
+                            <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+                                <tr>
+                                    <td align="center" style="background-color:#222222;background-image:linear-gradient(#222222,#222222);border-radius:8px;padding:16px 32px;border:1px solid #333333;">
+                                        <span style="font-family:monospace;font-size:32px;font-weight:700;letter-spacing:6px;color:#d4af37;color:rgba(212,175,55,1);">${otpCode}</span>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    
+                    <!-- Divider (Fixed for Outlook height bugs) -->
+                    <tr>
+                        <td style="height:1px;background-color:#222222;background-image:linear-gradient(#222222,#222222);font-size:1px;line-height:1px;">&nbsp;</td>
+                    </tr>
+                    
+                    <!-- Footer text -->
+                    <tr>
+                        <td align="center" style="padding:24px 32px;color:#9a9a9a;color:rgba(154,154,154,1);font-size:13px;line-height:1.6;">
+                            This code expires in about <strong>${expiryMinutes} minute(s)</strong>.<br/>
+                            If you didn’t request this, please secure your account or ignore this email.
+                        </td>
+                    </tr>
+                    
+                    <!-- Brand footer -->
+                    <tr>
+                        <td align="center" style="padding:0 32px 32px;color:#777777;color:rgba(119,119,119,1);font-size:12px;">
+                            © 2026 PipFactor
+                        </td>
+                    </tr>
+                </table>
+
+                <!--[if mso | IE]>
+                </td>
+                </tr>
+                </table>
+                <![endif]-->
+
+            </td>
+        </tr>
+    </table>
+</body>
+</html>`
   };
 }
 

@@ -1867,7 +1867,7 @@ async def get_current_news(
         raise HTTPException(500, "Internal server error")
 
 
-@app.get("/api/news/{item_id}")
+@app.get("/api/news/{item_id:int}")
 async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_signals_context)):
     """Fetch a specific news record securely with TTL caching"""
     logger.info(f"[API] GET /api/news/{item_id} - User: {ctx.get('user_id', 'anonymous')}")
