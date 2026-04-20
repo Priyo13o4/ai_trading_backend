@@ -107,10 +107,10 @@ class NewsMarkersCache:
     """Cache manager for news markers (chart annotations)."""
     
     @staticmethod
-    def get(symbol: str, hours: int = 168) -> Optional[List[Dict]]:
+    def get(symbol: str, hours: int = 168, min_importance: int = 3) -> Optional[List[Dict]]:
         """Get cached news markers for symbol and time range."""
         try:
-            key = f"news_markers:{symbol}:{hours}h"
+            key = f"news_markers:{symbol}:{hours}h:imp{min_importance}"
             data = redis_client.get(key)
             return json.loads(data) if data else None
         except Exception as e:
@@ -118,10 +118,10 @@ class NewsMarkersCache:
             return None
     
     @staticmethod
-    def set(symbol: str, markers: List[Dict], hours: int = 168, ttl: int = None):
+    def set(symbol: str, markers: List[Dict], hours: int = 168, min_importance: int = 3, ttl: int = None):
         """Cache news markers."""
         try:
-            key = f"news_markers:{symbol}:{hours}h"
+            key = f"news_markers:{symbol}:{hours}h:imp{min_importance}"
             ttl = ttl or CACHE_TTL['news_markers']
             
             redis_client.setex(key, ttl, json_dumps(markers))

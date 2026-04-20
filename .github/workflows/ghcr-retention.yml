@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Prune old GHCR versions
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           PACKAGE_NAME: ${{ matrix.package }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -73,11 +73,20 @@ jobs:
 
             const versions = [];
             for (let page = 1; page <= 10; page += 1) {
-              const res = await github.request(`GET ${listPath}`, {
-                package_type: 'container',
-                per_page: 100,
-                page,
-              });
+              let res;
+              try {
+                res = await github.request(`GET ${listPath}`, {
+                  per_page: 100,
+                  page,
+                });
+              } catch (err) {
+                if (err?.status === 404) {
+                  core.warning(`Package not found or inaccessible: ${pkg}. Skipping.`);
+                  return;
+                }
+                throw err;
+              }
+
               const batch = res.data || [];
               versions.push(...batch);
               if (batch.length < 100) break;
@@ -127,9 +136,16 @@ jobs:
                 core.info(`[dry-run] Would delete package version id=${id}`);
                 continue;
               }
-              await github.request(`DELETE ${deletePath}`, {
-                package_type: 'container',
-                package_version_id: id,
-              });
-              core.info(`Deleted package version id=${id}`);
+              try {
+                await github.request(`DELETE ${deletePath}`, {
+                  package_version_id: id,
+                });
+                core.info(`Deleted package version id=${id}`);
+              } catch (err) {
+                if (err?.status === 404) {
+                  core.warning(`Package version id=${id} not found; skipping.`);
+                  continue;
+                }
+                throw err;
+              }
             }

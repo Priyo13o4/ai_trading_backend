@@ -243,7 +243,7 @@ def get_latest_signal_from_db(pair: str):
 
 def get_old_signal_from_db(pair: str):
     """
-    Get the 2nd most recent strategy for preview purposes
+    Get the strategy that is 2 signals behind the latest for preview purposes
     Used on main page to show sample signals without giving real-time data
     """
     logger.info(f"[DB] Fetching preview strategy for pair: {pair}")
@@ -268,7 +268,7 @@ def get_old_signal_from_db(pair: str):
                   FROM strategies
                                     WHERE symbol = %s
                   ORDER BY timestamp DESC
-                  LIMIT 1 OFFSET 1
+                                    LIMIT 1 OFFSET 2
                 """, (pair.upper(),))
                 result = cur.fetchone()
                 if result:

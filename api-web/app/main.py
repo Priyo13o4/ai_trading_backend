@@ -159,6 +159,7 @@ _janitor_leader_lock_handle = None
 _janitor_is_leader = False
 _events_singleflight_local_locks: dict[str, asyncio.Lock] = {}
 _events_singleflight_local_locks_guard = asyncio.Lock()
+PREVIEW_SUPPORTED_PAIRS = {"XAUUSD", "BTCUSD", "EURUSD"}
 
 app = FastAPI(
     title="AI Trading Bot API",
@@ -1177,34 +1178,36 @@ async def get_signal_preview(pair: str, request: Request):
     logger.info(f"[API] GET /api/preview/{pair} - Public access")
     
     try:
-        # Only XAUUSD previews for now
-        if pair.upper() != "XAUUSD":
+        normalized_pair = pair.upper().strip()
+        if normalized_pair not in PREVIEW_SUPPORTED_PAIRS:
             logger.warning(f"[API] Preview requested for unsupported pair: {pair}")
-            raise HTTPException(404, "Preview only available for XAUUSD")
+            supported = ", ".join(sorted(PREVIEW_SUPPORTED_PAIRS))
+            raise HTTPException(404, f"Preview only available for: {supported}")
         
-        key = f"preview:signal:{pair.upper()}"
+        key = f"preview:signal:v2:{normalized_pair}"
+        response_headers = {"Cache-Control": "public, max-age=300"}
         
         # Try Redis cache
         cached = await REDIS.get(key)
         if cached: 
-            logger.info(f"[API] Cache HIT for preview: {pair}")
-            return JSONResponse(content=json.loads(cached))
+            logger.info(f"[API] Cache HIT for preview: {normalized_pair}")
+            return JSONResponse(content=json.loads(cached), headers=response_headers)
 
         # Cache miss - get old signal
-        logger.info(f"[API] Cache MISS for preview: {pair}, querying database")
-        row = await asyncio.to_thread(get_old_signal_from_db, pair)
+        logger.info(f"[API] Cache MISS for preview: {normalized_pair}, querying database")
+        row = await asyncio.to_thread(get_old_signal_from_db, normalized_pair)
         
         if not row: 
-            logger.warning(f"[API] No preview strategy found for pair: {pair}")
+            logger.warning(f"[API] No preview strategy found for pair: {normalized_pair}")
             raise HTTPException(404, "No preview available")
         
         # Cache preview for 1 hour (it's old data)
         ttl = 60 * 60
         serialized = json_dumps(row)
         await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached preview for {pair} with TTL={ttl}s")
+        logger.info(f"[API] Cached preview for {normalized_pair} with TTL={ttl}s")
         
-        return JSONResponse(content=json.loads(serialized))
+        return JSONResponse(content=json.loads(serialized), headers=response_headers)
     
     except HTTPException:
         raise
@@ -2091,6 +2094,8 @@ async def get_news_markers(
     symbol: str,
     hours: int = None,
     min_importance: int = 3,
+    before: Optional[str] = Query(default=None, description="ISO UTC timestamp cursor for older pages"),
+    limit: int = Query(default=500, ge=50, le=1000),
     ctx=Depends(require_signals_context),
 ):
     """Get news markers for chart annotations
@@ -2099,6 +2104,8 @@ async def get_news_markers(
         symbol: Trading pair (e.g., XAUUSD)
         hours: Time range in hours (default: None = all time)
         min_importance: Minimum importance score (1-5, default 3)
+        before: Optional cursor. Returns rows strictly older than this timestamp.
+        limit: Maximum rows returned.
     
     Returns:
         List of news events with timestamps for chart markers
@@ -2114,22 +2121,41 @@ async def get_news_markers(
     if hours is None:
         hours = 8760  # 365 days
     
+    cursor_before: Optional[datetime] = None
+    if before:
+        try:
+            normalized_before = before.strip()
+            if normalized_before.endswith("Z"):
+                normalized_before = f"{normalized_before[:-1]}+00:00"
+            parsed_before = datetime.fromisoformat(normalized_before)
+            if parsed_before.tzinfo is None:
+                parsed_before = parsed_before.replace(tzinfo=timezone.utc)
+            cursor_before = parsed_before.astimezone(timezone.utc)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid 'before' cursor. Use ISO UTC timestamp.")
+
     logger.info(
-        "GET /api/news/markers/%s?hours=%s&min_importance=%s - User: %s",
+        "GET /api/news/markers/%s?hours=%s&min_importance=%s&before=%s&limit=%s - User: %s",
         symbol,
         hours,
         min_importance,
+        before,
+        limit,
         ctx.get("user_id", "anonymous"),
     )
     
-    # Try cache first (cache key includes importance filter)
-    cache_key = f"{symbol}_{hours}h_imp{min_importance}"
-    cached_markers = NewsMarkersCache.get(symbol, hours)
-    if cached_markers:
-        # Filter by importance on cache hit
-        filtered = [m for m in cached_markers if m.get('importance', 0) >= min_importance]
-        logger.info(f"Cache HIT: news markers for {symbol} ({len(filtered)}/{len(cached_markers)} after importance filter)")
-        return {"markers": filtered}
+    use_cache = cursor_before is None and limit == 500
+
+    # Try cache first (cache key includes importance filter) for first page only.
+    if use_cache:
+        cached_markers = NewsMarkersCache.get(symbol, hours, min_importance)
+        if cached_markers is not None:
+            # Filter by importance on cache hit
+            filtered = [m for m in cached_markers if m.get('importance', 0) >= min_importance]
+            has_more = len(filtered) >= limit
+            cursor = filtered[-1]['time'] if filtered else None
+            logger.info(f"Cache HIT: news markers for {symbol} ({len(filtered)}/{len(cached_markers)} after importance filter)")
+            return {"markers": filtered, "has_more": has_more, "cursor_before": cursor}
     
     logger.info(f"Cache MISS: news markers for {symbol}, querying database")
     
@@ -2144,8 +2170,8 @@ async def get_news_markers(
             DATABASE_URL = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
         
         # Calculate time range
-        now = datetime.now(timezone.utc)
-        start_time = now - timedelta(hours=hours)
+        range_end = cursor_before or datetime.now(timezone.utc)
+        start_time = range_end - timedelta(hours=hours)
         
         # Map symbol to instruments (handle different naming conventions)
         symbol_map = {
@@ -2178,18 +2204,22 @@ async def get_news_markers(
                     FROM email_news_analysis
                     WHERE forex_relevant = true
                         AND email_received_at >= %s
-                        AND email_received_at <= %s
+                        AND email_received_at < %s
                         AND importance_score >= %s
                         AND (
-                            primary_instrument = ANY(%s)
-                            OR forex_instruments && %s
+                            primary_instrument = ANY(%s::text[])
+                            OR COALESCE(forex_instruments, '[]'::jsonb) ?| %s::text[]
                         )
                     ORDER BY email_received_at DESC
-                    LIMIT 500
+                    LIMIT %s
                 """
                 
-                cur.execute(query, (start_time, now, min_importance, instruments, instruments))
+                cur.execute(query, (start_time, range_end, min_importance, instruments, instruments, limit + 1))
                 news_items = cur.fetchall()
+
+        has_more = len(news_items) > limit
+        if has_more:
+            news_items = news_items[:limit]
         
         # Format for chart markers
         markers = []
@@ -2226,11 +2256,16 @@ async def get_news_markers(
                 'shape': shape
             })
         
-        # Cache the results
-        NewsMarkersCache.set(symbol, markers, hours)
+        # Cache only first page responses.
+        if use_cache:
+            NewsMarkersCache.set(symbol, markers, hours, min_importance)
         
         logger.info(f"Returning {len(markers)} news markers for {symbol}")
-        return {"markers": markers}
+        return {
+            "markers": markers,
+            "has_more": has_more,
+            "cursor_before": markers[-1]['time'] if markers else None,
+        }
         
     except Exception as e:
         logger.error(f"Error fetching news markers for {symbol}: {e}", exc_info=True)
