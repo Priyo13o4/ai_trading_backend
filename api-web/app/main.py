@@ -1823,7 +1823,7 @@ async def get_current_news(
     response: Response, 
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    ctx=Depends(require_signals_context)
+    ctx=Depends(require_session)
 ):
     """Get current/recent high-impact forex news with pagination"""
     logger.info(f"[API] GET /api/news/current - User: {ctx.get('user_id', 'anonymous')}, limit={limit}, offset={offset}")
@@ -1871,7 +1871,7 @@ async def get_current_news(
 
 
 @app.get("/api/news/{item_id:int}")
-async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_signals_context)):
+async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_session)):
     """Fetch a specific news record securely with TTL caching"""
     logger.info(f"[API] GET /api/news/{item_id} - User: {ctx.get('user_id', 'anonymous')}")
     try:
@@ -1901,7 +1901,7 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/upcoming")
-async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_signals_context)):
+async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session)):
     """Get upcoming high-impact forex events"""
     logger.info(f"[API] GET /api/news/upcoming - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1999,8 +1999,6 @@ async def get_news_events(
         return json_dumps(result)
 
     try:
-        require_permission(ctx, "signals")
-
         key = f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
         cached = await _redis_get_best_effort(key)
         if cached:
