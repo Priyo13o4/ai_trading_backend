@@ -162,7 +162,8 @@ def record_api_call(api_key: str) -> dict:
     }
     
     if new_count >= CALLS_PER_MINUTE_PER_KEY:
-        logger.info(f"API key ...{key_hash} exhausted ({new_count}/{CALLS_PER_MINUTE_PER_KEY}), will switch on next call")
+        _exhausted_msg = f"API key (hint: ...{key_hash}) exhausted ({new_count}/{CALLS_PER_MINUTE_PER_KEY}), will switch on next call"
+        logger.info("%s", _exhausted_msg)
     
     return status
 

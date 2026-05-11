@@ -130,7 +130,8 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=20
             )
-            logger.info("Queue Redis initialized: %s", _safe_redis_url_for_log(url))
+            _url_for_log = _safe_redis_url_for_log(url)
+            logger.info("Queue Redis initialized: %s", _url_for_log)
         return cls._queue_redis
 
     @classmethod
@@ -151,7 +152,8 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=50
             )
-            logger.info("App Redis initialized: %s", _safe_redis_url_for_log(url))
+            _url_for_log = _safe_redis_url_for_log(url)
+            logger.info("App Redis initialized: %s", _url_for_log)
         return cls._app_redis
 
     @classmethod
@@ -171,7 +173,8 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=30
             )
-            logger.info("Session Redis initialized: %s", _safe_redis_url_for_log(url))
+            _url_for_log = _safe_redis_url_for_log(url)
+            logger.info("Session Redis initialized: %s", _url_for_log)
         return cls._session_redis
 
     @classmethod

@@ -984,11 +984,10 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                     )
                 created_count += 1
                 logger.info(
-                    "[PLISIO RENEWAL] Created renewal invoice user=...%s sub=%s cycle=%s order=%s",
+                    "[PLISIO RENEWAL] Created renewal invoice user=...%s sub=%s cycle=%s",
                     user_id[-8:] if user_id else "unknown",
                     sub_id,
                     cycle_marker,
-                    tx_data["provider_payment_id"],
                 )
             except Exception as exc:
                 if _is_duplicate_transaction_error(exc):
