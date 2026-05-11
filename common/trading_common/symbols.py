@@ -201,7 +201,13 @@ async def get_active_symbols(
         return override
 
     # Check if this is an async redis client
-    is_async = hasattr(redis_client, "get") and asyncio.iscoroutinefunction(redis_client.get)
+    is_async = False
+    if hasattr(redis_client, "__class__") and "asyncio" in redis_client.__class__.__module__:
+        is_async = True
+    elif asyncio.iscoroutinefunction(getattr(redis_client, "execute_command", None)):
+        is_async = True
+    elif asyncio.iscoroutinefunction(getattr(redis_client, "get", None)):
+        is_async = True
 
     if is_async:
         cached = await _read_symbols_from_redis_async(redis_client)
@@ -232,7 +238,13 @@ async def refresh_active_symbols(
     ttl_seconds: Optional[int] = None,
 ) -> list[str]:
     """Async version of refresh_active_symbols_sync."""
-    is_async = hasattr(redis_client, "get") and asyncio.iscoroutinefunction(redis_client.get)
+    is_async = False
+    if hasattr(redis_client, "__class__") and "asyncio" in redis_client.__class__.__module__:
+        is_async = True
+    elif asyncio.iscoroutinefunction(getattr(redis_client, "execute_command", None)):
+        is_async = True
+    elif asyncio.iscoroutinefunction(getattr(redis_client, "get", None)):
+        is_async = True
 
     if is_async:
         ttl = int(ttl_seconds or SYMBOLS_ACTIVE_TTL_SECONDS)

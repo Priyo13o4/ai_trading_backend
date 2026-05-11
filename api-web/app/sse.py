@@ -870,7 +870,7 @@ async def multiplex_event_generator(
             exc,
         )
         yield _format_typed_event(
-            {"type": "error", "message": str(exc)},
+            {"type": "error", "message": "Internal stream error"},
             fallback_event="error",
             include_event_name=include_event_name,
         )
@@ -972,7 +972,7 @@ async def event_generator(
         logger.info("[SSE] CANCEL channel=%s ip=%s", channel, masked_client_ip)
     except Exception as exc:
         logger.error("[SSE] ERROR  channel=%s ip=%s error=%s", channel, masked_client_ip, exc)
-        yield f"data: {json_dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        yield f"data: {json_dumps({'type': 'error', 'message': 'Internal stream error'})}\n\n"
     finally:
         if queue is not None:
             await _FANOUT_MANAGER.unsubscribe(queue)
@@ -1161,7 +1161,7 @@ async def stream_health():
     except Exception as exc:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "error": f"fanout_unavailable: {str(exc)[:200]}"},
+            content={"status": "unhealthy", "error": "fanout_unavailable"},
         )
 
     try:
@@ -1177,5 +1177,5 @@ async def stream_health():
     except Exception as exc:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "redis": "disconnected", "error": str(exc)[:200]},
+            content={"status": "unhealthy", "redis": "disconnected", "error": "redis_unavailable"},
         )

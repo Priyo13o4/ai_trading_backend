@@ -152,7 +152,7 @@ AUTH_INVALIDATION_TOLERANCE_SECONDS = _env_int(
 )
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
 AUTH_EXCHANGE_TURNSTILE_ENFORCE = _env_bool("AUTH_EXCHANGE_TURNSTILE_ENFORCE", False)
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$")
 COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 SESSION_PUBLIC_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
 
@@ -1175,6 +1175,8 @@ async def auth_update_email(request: Request) -> dict[str, Any]:
     email = (email_raw or "").strip().lower() if isinstance(email_raw, str) else ""
     if not email:
         raise HTTPException(status_code=400, detail="email is required")
+    if len(email) > 254:
+        raise HTTPException(status_code=400, detail="email is invalid")
     if not EMAIL_PATTERN.match(email):
         raise HTTPException(status_code=400, detail="email is invalid")
 
@@ -1263,6 +1265,6 @@ async def auth_invalidate_user(request: Request) -> dict[str, Any]:
             return {"ok": True, "updated": updated, "mode": "graceful_refresh"}
         except Exception as e:
             logger.error("auth.invalidated event=refresh_failed user=%s error=%s", user_id, str(e))
-            return {"ok": True, "error": str(e), "mode": "failed_refresh"}
+            return {"ok": True, "error": "refresh_failed", "mode": "failed_refresh"}
 
 

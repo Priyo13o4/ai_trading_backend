@@ -298,3 +298,4 @@ SELECT add_continuous_aggregate_policy('daily_candlesticks',
 -- ============================================================================
 -- END OF SCHEMA
 -- ============================================================================
+CREATE TABLE IF NOT EXISTS weekly_macro_playbook (id SERIAL PRIMARY KEY, pair_bias JSONB DEFAULT '[]'::jsonb);

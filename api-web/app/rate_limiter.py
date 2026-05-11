@@ -61,7 +61,7 @@ def _get_key_usage(api_key: str) -> int:
         return 0
     
     # Key format: rate_limit:{api_key_hash}:{minute_timestamp}
-    key_hash = api_key[-8:]  # Use last 8 chars as identifier
+    key_hash = api_key[-4:]  # Use last 4 chars as identifier
     current_minute = int(time.time() // WINDOW_SECONDS)
     redis_key = f"rate_limit:{key_hash}:{current_minute}"
     
@@ -79,7 +79,7 @@ def _increment_key_usage(api_key: str) -> int:
     if not redis:
         return 1
     
-    key_hash = api_key[-8:]
+    key_hash = api_key[-4:]
     current_minute = int(time.time() // WINDOW_SECONDS)
     redis_key = f"rate_limit:{key_hash}:{current_minute}"
     
@@ -152,7 +152,7 @@ def record_api_call(api_key: str) -> dict:
         Status dict with current usage info
     """
     new_count = _increment_key_usage(api_key)
-    key_hash = api_key[-8:]
+    key_hash = api_key[-4:]
     
     status = {
         'key': f"...{key_hash}",

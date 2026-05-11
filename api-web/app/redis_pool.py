@@ -67,6 +67,12 @@ def _build_redis_url(prefix: str) -> str:
     return f"redis://{host}:{port}/{db}"
 
 
+def _safe_redis_url_for_log(url: str) -> str:
+    """Redact credentials from Redis URL for safe logging."""
+    import re as _re
+    return _re.sub(r"//:[^@]+@", "//:<REDACTED>@", url)
+
+
 def namespaced_key(service: str, key: str) -> str:
     """
     Ensure a Redis key is properly namespaced.
@@ -124,7 +130,7 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=20
             )
-            logger.info("Queue Redis initialized: %s", url.split("@")[-1] if "@" in url else url)
+            logger.info("Queue Redis initialized: %s", _safe_redis_url_for_log(url))
         return cls._queue_redis
 
     @classmethod
@@ -145,7 +151,7 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=50
             )
-            logger.info("App Redis initialized: %s", url.split("@")[-1] if "@" in url else url)
+            logger.info("App Redis initialized: %s", _safe_redis_url_for_log(url))
         return cls._app_redis
 
     @classmethod
@@ -165,7 +171,7 @@ class RedisPool:
                 decode_responses=True,
                 max_connections=30
             )
-            logger.info("Session Redis initialized: %s", url.split("@")[-1] if "@" in url else url)
+            logger.info("Session Redis initialized: %s", _safe_redis_url_for_log(url))
         return cls._session_redis
 
     @classmethod

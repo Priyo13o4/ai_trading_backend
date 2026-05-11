@@ -1,0 +1,1 @@
+ALTER TABLE weekly_macro_playbook ADD COLUMN IF NOT EXISTS pair_bias JSONB DEFAULT '[]'::jsonb;

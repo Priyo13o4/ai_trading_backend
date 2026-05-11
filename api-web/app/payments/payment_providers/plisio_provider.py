@@ -271,10 +271,9 @@ class PlisioProvider(PaymentProvider):
                 )
         except Exception:
             logger.exception(
-                "PLISIO_CALL create_invoice.error order_number_int=%s currency=%s source_amount=%s",
+                "PLISIO_CALL create_invoice.error order_number_int=%s currency=%s",
                 invoice_payload.get("order_number"),
                 self.crypto_currency,
-                invoice_payload.get("source_amount"),
             )
             raise
         invoice_data = self._to_plain_dict(invoice_result)

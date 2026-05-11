@@ -2303,7 +2303,7 @@ async def record_trade_outcome(request: Request):
         "MT5_TRADE_WEBHOOK_KEY",
         "N8N_MARKET_DATA_KEY",
     )
-    logger.info("[API] POST /api/trades/outcome - Internal auth=%s", auth_source)
+    logger.info("[API] POST /api/trades/outcome - Internal auth=verified")
     
     try:
         trade_data = await request.json()
@@ -2325,7 +2325,7 @@ async def close_trade(ticket: int, request: Request):
         "MT5_TRADE_WEBHOOK_KEY",
         "N8N_MARKET_DATA_KEY",
     )
-    logger.info("[API] PUT /api/trades/%s/close - Internal auth=%s", ticket, auth_source)
+    logger.info("[API] PUT /api/trades/%s/close - Internal auth=verified", ticket)
     
     try:
         outcome_data = await request.json()
