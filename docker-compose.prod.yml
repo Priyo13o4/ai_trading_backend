@@ -48,3 +48,6 @@ services:
     image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-scrapling:${IMAGE_TAG:?set IMAGE_TAG in .env.prod}
     ports:
       - "127.0.0.1:8010:8010"
+  docker-monitor:
+    build: null
+    image: ghcr.io/${GHCR_IMAGE_OWNER:?set GHCR_IMAGE_OWNER in .env.prod}/ai_trading_bot-docker-monitor:${IMAGE_TAG:-latest}

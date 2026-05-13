@@ -12,6 +12,7 @@ on:
       - 'api-worker/**'
       - 'common/**'
       - 'scrapling-api/**'
+      - 'docker-monitor/**'
 
 concurrency:
   group: build-prod-${{ github.ref }}
@@ -39,7 +40,10 @@ jobs:
             context: .
           - image: ai_trading_bot-scrapling
             file: scrapling-api/Dockerfile
-            context: scrapling-api/
+            context: scrapling-api
+          - image: ai_trading_bot-docker-monitor
+            file: docker-monitor/Dockerfile
+            context: .
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

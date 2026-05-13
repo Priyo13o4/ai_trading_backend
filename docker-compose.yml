@@ -99,7 +99,7 @@ services:
       start_period: 5s
 
   n8n:
-    image: n8nio/n8n:2.15.0
+    image: n8nio/n8n:2.19.5
     restart: always
     container_name: ai_trading_bot
     depends_on:
@@ -132,7 +132,7 @@ services:
       - n8n_data:/home/node/.n8n
 
   n8n-worker:
-    image: n8nio/n8n:2.15.0
+    image: n8nio/n8n:2.19.5
     restart: always
     container_name: n8n-worker
     depends_on:
@@ -346,5 +346,40 @@ services:
           memory: 256m
           cpus: '0.25'
 
+
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      STATS: "1"
+      POST: "0"
+    networks:
+      - monitor-net
+
+  docker-monitor:
+    build:
+      context: ./docker-monitor
+    container_name: docker-monitor
+    restart: always
+    environment:
+      DOCKER_HOST: http://socket-proxy:2375
+      N8N_WEBHOOK_URL: ${N8N_ERROR_ALERT_BASE_URL:-http://ai_trading_bot:5678/webhook/af570dae-9df5-4279-8f23-cca2097443b9/error-alert/system_check}
+      N8N_ERROR_ALERT_SECRET: ${N8N_ERROR_ALERT_SECRET:-UvqovG6Yxlmnhb5f5FRHSjtXoopYsroK}
+      POLL_INTERVAL_SECONDS: 60
+      CPU_ALERT_THRESHOLD: 80
+      MEM_ALERT_THRESHOLD: 85
+    networks:
+      - monitor-net
+    depends_on:
+      - socket-proxy
+
 volumes:
   n8n_data:
+
+networks:
+  monitor-net:
+    driver: bridge

@@ -43,6 +43,10 @@ shutdown_children() {
 		echo "Stopping MT5 ingest server (pid=${INGEST_PID})..."
 		kill "${INGEST_PID}" >/dev/null 2>&1
 	fi
+	if [[ -n "${WATCHDOG_PID}" ]] && kill -0 "${WATCHDOG_PID}" >/dev/null 2>&1; then
+		echo "Stopping staleness watchdog (pid=${WATCHDOG_PID})..."
+		kill "${WATCHDOG_PID}" >/dev/null 2>&1
+	fi
 	wait >/dev/null 2>&1
 	set -e
 }
@@ -56,6 +60,10 @@ fi
 is_scheduler_required() {
 	[[ "${SCHEDULER_REQUIRED,,}" == "true" || "${SCHEDULER_REQUIRED}" == "1" || "${SCHEDULER_REQUIRED,,}" == "yes" ]]
 }
+
+echo "Starting staleness watchdog..."
+python -u /app/scripts/worker/mt5_staleness_watchdog.py &
+WATCHDOG_PID=$!
 
 echo "Starting MT5 ingest server (TCP port 9001)..."
 python -u /app/scripts/mt5_ingest_server.py &
