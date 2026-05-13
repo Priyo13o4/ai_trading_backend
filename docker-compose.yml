@@ -23,6 +23,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 20s
 
   # =============================================================================
   # REDIS SEGMENTATION (Phase 4-D)
@@ -114,6 +115,8 @@ services:
       DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
       DB_POSTGRESDB_USER: ${POSTGRES_USER}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Limit connection pool to avoid exhausting Postgres on small VMs
+      DB_POSTGRESDB_CONNECTION_LIMIT: 5
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
@@ -128,6 +131,14 @@ services:
       N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true
       N8N_PROXY_HOPS: 1
+      # Disable internal task runner - not needed in queue mode with a dedicated worker
+      N8N_RUNNERS_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz 2>/dev/null | grep -q ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     volumes:
       - n8n_data:/home/node/.n8n
 
@@ -140,6 +151,8 @@ services:
         condition: service_healthy
       redis-queue:
         condition: service_healthy
+      n8n:
+        condition: service_healthy
     environment:
       EXECUTIONS_MODE: queue
       DB_TYPE: postgresdb
@@ -148,11 +161,16 @@ services:
       DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
       DB_POSTGRESDB_USER: ${POSTGRES_USER}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Limit connection pool to avoid exhausting Postgres on small VMs
+      DB_POSTGRESDB_CONNECTION_LIMIT: 5
       QUEUE_BULL_REDIS_HOST: redis-queue
       QUEUE_BULL_REDIS_PORT: 6379
       QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_PROXY_HOPS: 1
+      # Disable internal task runner in worker mode - grant token flow only works
+      # when the broker and runner are in the same process (non-worker deployments)
+      N8N_RUNNERS_ENABLED: "false"
     volumes:
       - n8n_data:/home/node/.n8n
     command: worker

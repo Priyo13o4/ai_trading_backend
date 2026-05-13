@@ -780,45 +780,39 @@ def get_news_count():
 
 def get_upcoming_news_from_db():
     """
-    Get upcoming high-impact news events
-    Returns breaking news and high importance items
+    Get upcoming high-impact news events from the economic calendar.
+    Returns events in the next 6 hours (and recent 30 mins) ordered chronologically.
     """
-    logger.info("[DB] Fetching upcoming news")
+    logger.info("[DB] Fetching upcoming economic calendar events")
     try:
         with psycopg.connect(POSTGRES_DSN, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                   SELECT 
-                    email_id as id,
-                    headline as title,
-                    COALESCE(ai_analysis_summary, original_email_content) as text,
-                    email_received_at as timestamp,
-                    importance_score,
-                    sentiment_score,
-                    market_impact_prediction,
-                    impact_timeframe,
-                    volatility_expectation,
-                    forex_instruments,
-                    breaking_news,
-                    forexfactory_urls[1] as forexfactory_url,
-                    ai_analysis_summary,
-                    original_email_content,
-                    similar_news_context,
-                    similar_news_ids,
-                    primary_instrument,
-                    is_priced_in
-                  FROM email_news_analysis
-                  WHERE forex_relevant = true
-                  AND (importance_score >= 4 OR breaking_news = true)
-                  ORDER BY importance_score DESC, email_received_at DESC
+                    analysis_id,
+                    event_name,
+                    event_time_utc,
+                    country,
+                    impact,
+                    key_numbers,
+                    market_pricing_sentiment,
+                    primary_affected_pairs,
+                    trading_scenarios,
+                    market_dynamics,
+                    created_at
+                  FROM economic_event_analysis
+                  WHERE event_time_utc >= NOW() - INTERVAL '30 minutes'
+                  AND event_time_utc <= NOW() + INTERVAL '6 hours'
+                  ORDER BY event_time_utc ASC
                   LIMIT 25
                 """)
                 results = cur.fetchall()
-                logger.info(f"[DB] Found {len(results)} upcoming news items")
+                logger.info(f"[DB] Found {len(results)} upcoming calendar events")
                 return results
     except Exception as e:
         logger.error(f"[DB ERROR] get_upcoming_news_from_db: {str(e)}")
         raise
+
 
 def get_news_by_id_from_db(item_id: int):
     """
