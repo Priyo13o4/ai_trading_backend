@@ -240,6 +240,26 @@ def publish_strategy_update(strategy: Dict[str, Any]) -> bool:
     return _publish_payload(PubSubManager.CHANNELS["strategies"], payload)
 
 
+def publish_playbook_update(playbook: Dict[str, Any]) -> bool:
+    """Publish a playbook update event for SSE consumers."""
+    payload = {
+        "type": "playbook_update",
+        "playbook": playbook,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["news"], payload)
+
+
+def publish_event_analysis_update(events: List[Dict[str, Any]]) -> bool:
+    """Publish an event analysis update event for SSE consumers."""
+    payload = {
+        "type": "event_analysis_update",
+        "events": events,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["news"], payload)
+
+
 def invalidate_strategy_cache_domain(strategy_ids: Iterable[int]) -> Dict[str, int]:
     """Invalidate strategy detail keys and strategy list keys under latest:strategies:*."""
     deleted_detail = 0

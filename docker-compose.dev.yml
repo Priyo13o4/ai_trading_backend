@@ -7,6 +7,8 @@ services:
   n8n:
     ports:
       - "127.0.0.1:5678:5678"
+    environment:
+      NODE_FUNCTION_ALLOW_BUILTIN: "crypto"
 
   api-web:
     env_file:

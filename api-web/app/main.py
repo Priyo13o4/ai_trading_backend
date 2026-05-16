@@ -1814,8 +1814,92 @@ async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
         raise HTTPException(500, "Internal server error")
 
 # ============================================================================
+# ============================================================================
 # NEWS ENDPOINTS
 # ============================================================================
+
+@app.post("/api/webhooks/n8n/news-updated")
+async def handle_n8n_news_update(request: Request):
+    """
+    Webhook for n8n to call when new news/events are ingested.
+    Clears related caches and triggers an SSE update.
+    Requires X-API-Key header.
+    """
+    api_key = request.headers.get("X-API-Key")
+    expected_key = os.getenv("N8N_MARKET_DATA_KEY")
+    
+    if not expected_key:
+        raise HTTPException(500, "API key authentication not configured")
+    if not api_key or api_key != expected_key:
+        logger.warning(f"[API] Invalid API key attempt for webhook from {request.client.host}")
+        raise HTTPException(401, "Invalid or missing API key")
+        
+    try:
+        # Check for optional JSON body to determine which news type was updated
+        news_type = "all"
+        try:
+            body = await request.json()
+            news_type = body.get("type", "all").lower()
+        except Exception:
+            # Fallback to "all" if body is missing or invalid
+            pass
+
+        cursor = 0
+        deleted_count = 0
+        
+        # Determine pattern based on type
+        pattern = "latest:news:*"
+        if news_type == "current": pattern = "latest:news:current:*"
+        elif news_type == "playbook": pattern = "latest:news:playbook*"
+        elif news_type == "events" or news_type == "event": pattern = "latest:news:events:*"
+
+        # Clear Redis caches
+        while True:
+            cursor, keys = await REDIS.scan(cursor, match=pattern, count=100)
+            if keys:
+                await REDIS.delete(*keys)
+                deleted_count += len(keys)
+            if cursor == 0:
+                break
+                
+        # Always clear the legacy global key
+        await REDIS.delete("news_cache:all")
+        
+        updates_sent = []
+
+        # Broadcast specific snapshots based on the updated type
+        if news_type in ["current", "all"]:
+            latest_news = await asyncio.to_thread(get_latest_news_from_db, 20, 0)
+            if latest_news:
+                NewsCache.set(latest_news, "all")
+                publish_news_snapshot(latest_news)
+                updates_sent.append("current_news")
+
+        if news_type in ["playbook", "all"]:
+            playbook = await asyncio.to_thread(get_latest_weekly_macro_playbook_from_db)
+            if playbook:
+                from .cache import publish_playbook_update
+                publish_playbook_update(playbook)
+                updates_sent.append("weekly_playbook")
+
+        if news_type in ["events", "event", "all"]:
+            events = await asyncio.to_thread(get_economic_event_analysis_from_db, 20, 0)
+            if events:
+                from .cache import publish_event_analysis_update
+                publish_event_analysis_update(events)
+                updates_sent.append("event_analysis")
+            
+        logger.info(f"[API] Webhook triggered ({news_type}): Cleared {deleted_count} caches, pushed: {', '.join(updates_sent)}")
+        return {
+            "status": "success", 
+            "news_type": news_type,
+            "cleared_count": deleted_count,
+            "updates_pushed": updates_sent
+        }
+    except Exception as e:
+        logger.error(f"[API ERROR] Webhook failed: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
 
 @app.get("/api/news/current")
 async def get_current_news(

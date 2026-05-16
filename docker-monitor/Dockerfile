@@ -2,9 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY docker-monitor/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY docker-monitor/ .
+COPY . .
 
 CMD ["python", "-u", "system_monitor.py"]

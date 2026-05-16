@@ -212,8 +212,12 @@ def get_latest_signal_from_db(pair: str):
                   SELECT 
                     strategy_id,
                     strategy_name,
-                                        symbol as pair,
-                    direction,
+                    symbol as pair,
+                    CASE 
+                      WHEN direction = 'long' THEN 'BUY' 
+                      WHEN direction = 'short' THEN 'SELL' 
+                      ELSE UPPER(direction) 
+                    END as direction,
                     confidence,
                     take_profit,
                     stop_loss,
@@ -222,10 +226,10 @@ def get_latest_signal_from_db(pair: str):
                     expiry_time,
                     timestamp as created_at,
                     detailed_analysis,
-                    entry_signal,
+                    CAST(entry_signal->>'level' AS numeric) as entry_signal,
                     status
                   FROM strategies
-                                    WHERE symbol = %s
+                  WHERE symbol = %s
                   AND status = 'active'
                   AND expiry_time > NOW()
                   ORDER BY confidence DESC, timestamp DESC
@@ -254,8 +258,12 @@ def get_old_signal_from_db(pair: str):
                   SELECT 
                     strategy_id,
                     strategy_name,
-                                        symbol as pair,
-                    direction,
+                    symbol as pair,
+                    CASE 
+                      WHEN direction = 'long' THEN 'BUY' 
+                      WHEN direction = 'short' THEN 'SELL' 
+                      ELSE UPPER(direction) 
+                    END as direction,
                     confidence,
                     take_profit,
                     stop_loss,
@@ -263,12 +271,12 @@ def get_old_signal_from_db(pair: str):
                     expiry_minutes,
                     timestamp as created_at,
                     detailed_analysis,
-                    entry_signal,
+                    CAST(entry_signal->>'level' AS numeric) as entry_signal,
                     status
                   FROM strategies
-                                    WHERE symbol = %s
+                  WHERE symbol = %s
                   ORDER BY timestamp DESC
-                                    LIMIT 1 OFFSET 2
+                  LIMIT 1 OFFSET 1
                 """, (pair.upper(),))
                 result = cur.fetchone()
                 if result:
@@ -868,8 +876,12 @@ def get_latest_weekly_macro_playbook_from_db():
                 cur.execute("""
                   SELECT *
                   FROM weekly_macro_playbook
-                  ORDER BY target_week_start DESC NULLS LAST, created_at DESC
-                  LIMIT 1
+                  WHERE target_week_start = (
+                      SELECT MAX(target_week_start)
+                      FROM weekly_macro_playbook
+                  )
+                  ORDER BY generated_at DESC
+                  LIMIT 1;
                 """)
                 result = cur.fetchone()
                 if result:

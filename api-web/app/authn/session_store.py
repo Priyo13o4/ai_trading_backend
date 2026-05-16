@@ -331,12 +331,25 @@ async def refresh_session_activity(sid: str, session: dict[str, Any]) -> Optiona
     # Keep refresh validity server-authoritative: stale Supabase access-token exp must
     # not invalidate an otherwise-active backend session before its own TTL/exp.
 
-    ttl = _compute_ttl_seconds(now=now, supabase_exp=supabase_exp, remember_me=remember_me)
-    exp = now + ttl
+    # 🛡️ EXPIRATION LOGIC: 
+    # If "Remember Me" is true, the absolute expiration time (30 days) remains fixed from login.
+    # If "Remember Me" is false, the 24-hour expiration window slides forward on activity.
+    exp = int(session.get("exp") or 0)
+    
+    if remember_me:
+        # Strict expiration, do not slide
+        if not exp or exp < now:
+            return None
+        ttl = max(1, exp - now)
+        new_exp = exp
+    else:
+        # Slide expiration forward by the standard TTL cap (24 hours)
+        ttl = _compute_ttl_seconds(now=now, supabase_exp=supabase_exp, remember_me=False)
+        new_exp = now + ttl
 
     updated = dict(session)
     updated["last_activity"] = now
-    updated["exp"] = exp
+    updated["exp"] = new_exp
 
     pipe = SESSION_REDIS.pipeline()
     pipe.setex(_session_key(sid), ttl, json_dumps(updated))

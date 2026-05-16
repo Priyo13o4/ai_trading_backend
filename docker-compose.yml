@@ -133,6 +133,7 @@ services:
       N8N_PROXY_HOPS: 1
       # Disable internal task runner - not needed in queue mode with a dedicated worker
       N8N_RUNNERS_ENABLED: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: "crypto"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz 2>/dev/null | grep -q ok || exit 1"]
       interval: 30s
@@ -171,6 +172,7 @@ services:
       # Disable internal task runner in worker mode - grant token flow only works
       # when the broker and runner are in the same process (non-worker deployments)
       N8N_RUNNERS_ENABLED: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: "crypto"
     volumes:
       - n8n_data:/home/node/.n8n
     command: worker
