@@ -382,7 +382,8 @@ services:
 
   docker-monitor:
     build:
-      context: ./docker-monitor
+      context: .
+      dockerfile: docker-monitor/Dockerfile
     container_name: docker-monitor
     restart: always
     environment:

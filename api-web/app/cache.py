@@ -168,6 +168,7 @@ class PubSubManager:
         'candles': 'updates:candles',
         'news': 'updates:news',
         'strategies': 'updates:strategies',
+        'regime': 'updates:regime',
     }
     
     @staticmethod
@@ -239,6 +240,15 @@ def publish_strategy_update(strategy: Dict[str, Any]) -> bool:
     }
     return _publish_payload(PubSubManager.CHANNELS["strategies"], payload)
 
+
+def publish_regime_update(regime: Dict[str, Any]) -> bool:
+    """Publish a single regime update event for SSE consumers."""
+    payload = {
+        "type": "regime_update",
+        "regime": regime,
+        "server_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return _publish_payload(PubSubManager.CHANNELS["regime"], payload)
 
 def publish_playbook_update(playbook: Dict[str, Any]) -> bool:
     """Publish a playbook update event for SSE consumers."""

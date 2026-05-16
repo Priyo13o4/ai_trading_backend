@@ -1888,6 +1888,35 @@ async def handle_n8n_news_update(request: Request):
                 from .cache import publish_event_analysis_update
                 publish_event_analysis_update(events)
                 updates_sent.append("event_analysis")
+
+        if news_type in ["strategies", "strategy", "all"]:
+            from .cache import invalidate_strategy_cache_domain, publish_strategies_snapshot
+            invalidate_strategy_cache_domain([]) 
+            
+            latest_strategies = await asyncio.to_thread(get_strategies_all_from_db, None)
+            
+            if latest_strategies:
+                StrategyCache.set(latest_strategies, "all")
+                publish_strategies_snapshot(latest_strategies)
+                updates_sent.append("strategies_snapshot")
+
+        if news_type in ["regime", "all"]:
+            from .cache import publish_regime_update
+            # Only clear the frontend-facing caches to preserve internal n8n pipeline caches
+            await REDIS.delete("latest:regime")
+            deleted_count += 1
+            
+            latest_regimes = await asyncio.to_thread(get_latest_regime_from_db)
+            if latest_regimes:
+                # Targeted deletion of pair-specific frontend caches (avoid wildcard regime:*)
+                pair_keys = [f"regime:{r['symbol'].upper()}" for r in latest_regimes]
+                if pair_keys:
+                    await REDIS.delete(*pair_keys)
+                    deleted_count += len(pair_keys)
+                    
+                for regime in latest_regimes:
+                    publish_regime_update(regime)
+                updates_sent.append("regime_updates")
             
         logger.info(f"[API] Webhook triggered ({news_type}): Cleared {deleted_count} caches, pushed: {', '.join(updates_sent)}")
         return {

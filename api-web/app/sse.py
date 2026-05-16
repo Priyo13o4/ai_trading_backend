@@ -687,6 +687,7 @@ async def multiplex_event_generator(
         PubSubManager.CHANNELS["candles"],
         PubSubManager.CHANNELS["news"],
         PubSubManager.CHANNELS["strategies"],
+        PubSubManager.CHANNELS.get("regime", "updates:regime"),
     ]
     client_key = f"{client_ip}:{pair}:{symbol}:{timeframe}"
     obs_connected = False
@@ -843,6 +844,15 @@ async def multiplex_event_generator(
                         filtered = [item for item in strategies_payload if _strategy_matches_pair(item, pair)]
                         data = {**data, "strategies": filtered}
                         _sse_obs_track_mux_topic("strategy")
+                        yield _format_typed_event(data, include_event_name=include_event_name, event_id=item["id"])
+                    continue
+
+                if event_type == "regime_update":
+                    regime_payload = data.get("regime") if isinstance(data.get("regime"), dict) else data
+                    # Frontend usually matches on symbol
+                    regime_symbol = regime_payload.get("symbol")
+                    if not regime_symbol or regime_symbol == pair or regime_symbol == symbol:
+                        # Assuming strategy topic tracker is fine, or we can use another if added.
                         yield _format_typed_event(data, include_event_name=include_event_name, event_id=item["id"])
                     continue
 
