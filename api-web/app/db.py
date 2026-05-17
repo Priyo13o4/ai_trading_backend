@@ -876,11 +876,7 @@ def get_latest_weekly_macro_playbook_from_db():
                 cur.execute("""
                   SELECT *
                   FROM weekly_macro_playbook
-                  WHERE target_week_start = (
-                      SELECT MAX(target_week_start)
-                      FROM weekly_macro_playbook
-                  )
-                  ORDER BY generated_at DESC
+                  ORDER BY DATE(target_week_start) DESC, generated_at DESC
                   LIMIT 1;
                 """)
                 result = cur.fetchone()
