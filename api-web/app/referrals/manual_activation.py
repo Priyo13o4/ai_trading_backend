@@ -7,11 +7,12 @@ months once users cross the configured threshold.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from app.db import async_db, get_supabase_client
+from app.db import supabase_db, get_supabase_client
 from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
@@ -98,7 +99,7 @@ async def activate_referral_reward_manual(*, current_user_id: str, referral_code
     }
 
     try:
-        response = await async_db(lambda: supabase.rpc(rpc_name, payload).execute())
+        response = await supabase_db(lambda: supabase.rpc(rpc_name, payload).execute())
         row = _normalize_rpc_result(getattr(response, "data", None))
         if not row:
             raise RuntimeError("empty_manual_activation_result")

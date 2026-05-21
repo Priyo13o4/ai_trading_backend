@@ -61,7 +61,9 @@ def _extract_referral_code_from_user(user_payload: dict[str, Any] | None) -> str
     if not isinstance(user_payload, dict):
         return None
 
-    raw_meta = user_payload.get("raw_user_meta_data") or user_payload.get("user_metadata")
+    # Security: only accept referral attribution from raw_user_meta_data.
+    # user_metadata can be user-controlled and is not safe as an attribution source.
+    raw_meta = user_payload.get("raw_user_meta_data")
     if isinstance(raw_meta, dict):
         normalized = normalize_referral_code(raw_meta.get("referral_code"))
         if normalized:

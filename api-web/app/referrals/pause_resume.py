@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from app.db import async_db, get_supabase_client
+from app.db import supabase_db, get_supabase_client
 from app.observability.debug import debug_log
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ async def _get_cycles_by_status(
     limit: int = 50,
 ) -> list[dict]:
     """Fetch pause cycles in a given status, ordered by creation time."""
-    response = await async_db(
+    response = await supabase_db(
         lambda: supabase.table("referral_reward_pause_cycles")
         .select(
             "reward_id, cycle_number, status, razorpay_subscription_id, "
@@ -80,7 +80,7 @@ async def _cas_cycle_status(
     if extra_fields:
         payload.update(extra_fields)
 
-    result = await async_db(
+    result = await supabase_db(
         lambda: supabase.table("referral_reward_pause_cycles")
         .update(payload)
         .eq("reward_id", reward_id)
@@ -252,7 +252,7 @@ async def _process_resume_pending_cycles(supabase) -> tuple[int, int, list[str]]
 
                 # Update the parent referral_rewards status to 'applied'
                 # (confirms the free month was delivered)
-                await async_db(
+                await supabase_db(
                     lambda: supabase.table("referral_rewards")
                     .update({"status": "applied", "updated_at": now_iso})
                     .eq("referral_id", reward_id)

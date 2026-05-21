@@ -11,10 +11,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from app.db import async_db, get_supabase_client
-from app.observability.debug import debug_log
+from app.db import supabase_db, get_supabase_client
+from app.observability.debug import debug_log, is_debug_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _is_debug_enabled() -> bool:
+    return is_debug_enabled("referrals.transitions")
 
 
 def _debug_log(message: str) -> None:
@@ -46,7 +50,7 @@ async def transition_rewards_on_hold_to_available() -> TransitionResult:
     supabase = get_supabase_client()
     
     try:
-        response = await async_db(
+        response = await supabase_db(
             lambda: supabase.rpc('transition_rewards_on_hold_to_available').execute()
         )
         
@@ -102,7 +106,7 @@ async def apply_available_rewards() -> TransitionResult:
     supabase = get_supabase_client()
     
     try:
-        response = await async_db(
+        response = await supabase_db(
             lambda: supabase.rpc('apply_available_rewards').execute()
         )
         

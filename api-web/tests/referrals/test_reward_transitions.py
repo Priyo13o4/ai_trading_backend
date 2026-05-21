@@ -40,7 +40,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.transition_rewards_on_hold_to_available()
         
         self.assertEqual(result.outcome, "success")
@@ -65,7 +65,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.transition_rewards_on_hold_to_available()
         
         self.assertEqual(result.outcome, "success")
@@ -103,7 +103,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.side_effect = side_effect
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 # First call
                 result1 = await mod.transition_rewards_on_hold_to_available()
                 self.assertEqual(result1.outcome, "success")
@@ -120,7 +120,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         
         mock_supabase = mock.Mock()
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=RuntimeError("db-error"))):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=RuntimeError("db-error"))):
                 result = await mod.transition_rewards_on_hold_to_available()
         
         self.assertEqual(result.outcome, "error_controlled")
@@ -142,7 +142,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.apply_available_rewards()
         
         self.assertEqual(result.outcome, "success")
@@ -167,7 +167,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.apply_available_rewards()
         
         self.assertEqual(result.outcome, "success")
@@ -191,7 +191,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase = mock.Mock()
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 # First call
                 mock_rpc_builder = mock.Mock()
                 mock_rpc_builder.execute.return_value = mock_response1
@@ -216,7 +216,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         
         mock_supabase = mock.Mock()
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=RuntimeError("db-error"))):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=RuntimeError("db-error"))):
                 result = await mod.apply_available_rewards()
         
         self.assertEqual(result.outcome, "error_controlled")
@@ -246,7 +246,7 @@ class RewardTransitionsTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
         
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 # Should succeed regardless of AUTHDBG_ENABLED status
                 result = await mod.transition_rewards_on_hold_to_available()
                 self.assertEqual(result.outcome, "success")

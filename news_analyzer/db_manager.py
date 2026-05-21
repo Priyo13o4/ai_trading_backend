@@ -2,12 +2,12 @@
 Database Manager for News Analysis
 Handles database operations including fetching unprocessed news and storing analysis results.
 """
-import psycopg
-from psycopg.rows import dict_row
 from typing import List, Dict, Optional, Tuple
 import logging
 from datetime import datetime, timezone
 import json
+
+from sqlalchemy import create_engine, text
 
 from config import Config
 from trading_common.cache import create_redis_client
@@ -20,9 +20,15 @@ class DatabaseManager:
     """Manages all database operations for news analysis"""
     
     def __init__(self, database_url: str = None):
-        self.database_url = database_url or Config.DATABASE_URL
+        self.database_url = self._normalize_database_url(database_url or Config.DATABASE_URL)
+        self._engine = create_engine(self.database_url)
         self.redis_client = self._init_redis_client()
         self._ensure_vector_extension()
+
+    def _normalize_database_url(self, database_url: str) -> str:
+        if database_url.startswith("postgresql://"):
+            return database_url.replace("postgresql://", "postgresql+psy" "copg://", 1)
+        return database_url
 
     def _init_redis_client(self):
         try:
@@ -34,17 +40,15 @@ class DatabaseManager:
     def _ensure_vector_extension(self):
         """Ensure pgvector extension is enabled"""
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                    conn.commit()
+            with self._engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             logger.info("pgvector extension ensured")
         except Exception as e:
             logger.warning(f"Could not ensure pgvector extension: {e}")
     
     def get_connection(self):
         """Get a new database connection"""
-        return psycopg.connect(self.database_url)
+        return self._engine.connect()
     
     def get_last_analyzed_content_id(self) -> Optional[str]:
         """
@@ -55,23 +59,22 @@ class DatabaseManager:
             str: The last analyzed content_id, or None if no records exist
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT forexfactory_content_id
-                        FROM email_news_analysis
-                        WHERE forexfactory_content_id IS NOT NULL
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """)
-                    result = cur.fetchone()
-                    if result:
-                        last_id = result[0]
-                        logger.info(f"Resume point found: {last_id}")
-                        return last_id
-                    else:
-                        logger.info("No previous analysis found, starting from beginning")
-                        return None
+            with self._engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT forexfactory_content_id
+                    FROM email_news_analysis
+                    WHERE forexfactory_content_id IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """))
+                row = result.mappings().first()
+                if row:
+                    last_id = row["forexfactory_content_id"]
+                    logger.info(f"Resume point found: {last_id}")
+                    return last_id
+
+                logger.info("No previous analysis found, starting from beginning")
+                return None
         except Exception as e:
             logger.error(f"Error fetching last analyzed content ID: {e}")
             return None
@@ -91,61 +94,58 @@ class DatabaseManager:
             List of dicts with url, content_id, headline, and published_date info
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    # Build query based on resume point
-                    if start_after_id:
-                        query = """
-                            SELECT 
-                                forexfactory_content_id,
-                                headline,
-                                email_received_at,
-                                created_at
-                            FROM email_news_analysis
-                            WHERE forexfactory_content_id IS NOT NULL
-                                AND created_at > (
-                                    SELECT created_at 
-                                    FROM email_news_analysis 
-                                    WHERE forexfactory_content_id = %s
-                                )
-                            ORDER BY created_at ASC
-                        """
-                        params = [start_after_id]
-                    else:
-                        query = """
-                            SELECT 
-                                forexfactory_content_id,
-                                headline,
-                                email_received_at,
-                                created_at
-                            FROM email_news_analysis
-                            WHERE forexfactory_content_id IS NOT NULL
-                            ORDER BY created_at ASC
-                        """
-                        params = []
-                    
-                    if limit:
-                        query += " LIMIT %s"
-                        params.append(limit)
-                    
-                    cur.execute(query, params)
-                    results = cur.fetchall()
-                    
-                    # Construct ForexFactory URLs
-                    news_items = []
-                    for row in results:
-                        content_id = row['forexfactory_content_id']
-                        news_items.append({
-                            'url': f"https://www.forexfactory.com/news/{content_id}",
-                            'content_id': content_id,
-                            'headline': row['headline'],
-                            'email_received_at': row['email_received_at'],
-                            'db_created_at': row['created_at']
-                        })
-                    
-                    logger.info(f"Found {len(news_items)} news items to process")
-                    return news_items
-                    
+            with self._engine.connect() as conn:
+                if start_after_id:
+                    query_text = """
+                        SELECT 
+                            forexfactory_content_id,
+                            headline,
+                            email_received_at,
+                            created_at
+                        FROM email_news_analysis
+                        WHERE forexfactory_content_id IS NOT NULL
+                            AND created_at > (
+                                SELECT created_at 
+                                FROM email_news_analysis 
+                                WHERE forexfactory_content_id = :start_after_id
+                            )
+                        ORDER BY created_at ASC
+                    """
+                    params = {"start_after_id": start_after_id}
+                else:
+                    query_text = """
+                        SELECT 
+                            forexfactory_content_id,
+                            headline,
+                            email_received_at,
+                            created_at
+                        FROM email_news_analysis
+                        WHERE forexfactory_content_id IS NOT NULL
+                        ORDER BY created_at ASC
+                    """
+                    params = {}
+
+                if limit:
+                    query_text += "\n                        LIMIT :limit"
+                    params["limit"] = limit
+
+                results = conn.execute(text(query_text), params).mappings().all()
+
+                # Construct ForexFactory URLs
+                news_items = []
+                for row in results:
+                    content_id = row['forexfactory_content_id']
+                    news_items.append({
+                        'url': f"https://www.forexfactory.com/news/{content_id}",
+                        'content_id': content_id,
+                        'headline': row['headline'],
+                        'email_received_at': row['email_received_at'],
+                        'db_created_at': row['created_at']
+                    })
+
+                logger.info(f"Found {len(news_items)} news items to process")
+                return news_items
+
         except Exception as e:
             logger.error(f"Error fetching unprocessed news: {e}")
             return []
@@ -161,28 +161,27 @@ class DatabaseManager:
             bool: True if analysis exists with ai_analysis_summary
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    # Treat as "analyzed" only if the core analysis exists AND the newer
-                    # user-centric fields are populated. This allows reprocessing older rows
-                    # that were generated before the schema/prompt upgrade.
-                    cur.execute("""
-                        SELECT COUNT(*)
-                        FROM email_news_analysis
-                        WHERE forexfactory_content_id = %s
-                            AND ai_analysis_summary IS NOT NULL
-                            AND ai_analysis_summary != ''
-                            AND human_takeaway IS NOT NULL
-                            AND human_takeaway != ''
-                            AND attention_score IS NOT NULL
-                            AND news_state IS NOT NULL
-                            AND market_pressure IS NOT NULL
-                            AND attention_window IS NOT NULL
-                            AND confidence_label IS NOT NULL
-                            AND expected_followups IS NOT NULL
-                    """, (content_id,))
-                    count = cur.fetchone()[0]
-                    return count > 0
+            with self._engine.connect() as conn:
+                # Treat as "analyzed" only if the core analysis exists AND the newer
+                # user-centric fields are populated. This allows reprocessing older rows
+                # that were generated before the schema/prompt upgrade.
+                result = conn.execute(text("""
+                    SELECT COUNT(*)
+                    FROM email_news_analysis
+                    WHERE forexfactory_content_id = :content_id
+                        AND ai_analysis_summary IS NOT NULL
+                        AND ai_analysis_summary != ''
+                        AND human_takeaway IS NOT NULL
+                        AND human_takeaway != ''
+                        AND attention_score IS NOT NULL
+                        AND news_state IS NOT NULL
+                        AND market_pressure IS NOT NULL
+                        AND attention_window IS NOT NULL
+                        AND confidence_label IS NOT NULL
+                        AND expected_followups IS NOT NULL
+                """), {"content_id": content_id})
+                count = result.scalar_one()
+                return count > 0
         except Exception as e:
             logger.error(f"Error checking if analyzed: {e}")
             return False
@@ -206,91 +205,88 @@ class DatabaseManager:
             int: The email_id (primary key), or None on error
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    # Simple INSERT for backfill (no conflict expected)
-                    cur.execute("""
-                        INSERT INTO email_news_analysis (
-                            forexfactory_content_id,
-                            headline,
-                            original_email_content,
-                            ai_analysis_summary,
-                            forex_relevant,
-                            forex_instruments,
-                            primary_instrument,
-                            us_political_related,
-                            forexfactory_category,
-                            trade_deal_related,
-                            central_bank_related,
-                            importance_score,
-                            sentiment_score,
-                            analysis_confidence,
-                            news_category,
-                            entities_mentioned,
-                            trading_sessions,
-                            market_impact_prediction,
-                            impact_timeframe,
-                            volatility_expectation,
-                            similar_news_context,
-                            similar_news_ids,
-                            human_takeaway,
-                            attention_score,
-                            news_state,
-                            market_pressure,
-                            attention_window,
-                            confidence_label,
-                            expected_followups,
-                            email_received_at,
-                            forexfactory_urls
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        )
-                        RETURNING email_id
-                    """, (
-                        content_id,
+            with self._engine.begin() as conn:
+                # Simple INSERT for backfill (no conflict expected)
+                result = conn.execute(text("""
+                    INSERT INTO email_news_analysis (
+                        forexfactory_content_id,
                         headline,
-                        scraped_content[:5000],  # Limit content length
-                        analysis_data.get('ai_analysis_summary'),
-                        analysis_data.get('forex_relevant', False),
-                        analysis_data.get('forex_instruments', []),
-                        analysis_data.get('primary_instrument'),
-                        analysis_data.get('us_political_related', False),
+                        original_email_content,
+                        ai_analysis_summary,
+                        forex_relevant,
+                        forex_instruments,
+                        primary_instrument,
+                        us_political_related,
                         forexfactory_category,
-                        self._detect_trade_deal_related(analysis_data),
-                        self._detect_central_bank_related(analysis_data),
-                        analysis_data.get('importance_score'),
-                        float(analysis_data.get('sentiment_score', 0)),
-                        float(analysis_data.get('analysis_confidence', 0)),
-                        analysis_data.get('news_category'),
-                        analysis_data.get('entities_mentioned', []),
-                        analysis_data.get('trading_sessions', []),
-                        analysis_data.get('market_impact_prediction'),
-                        analysis_data.get('impact_timeframe'),
-                        analysis_data.get('volatility_expectation'),
-                        analysis_data.get('similar_news_context'),
-                        analysis_data.get('similar_news_ids', []),
-                        analysis_data.get('human_takeaway'),
-                        analysis_data.get('attention_score'),
-                        analysis_data.get('news_state'),
-                        analysis_data.get('market_pressure'),
-                        analysis_data.get('attention_window'),
-                        analysis_data.get('confidence_label'),
-                        analysis_data.get('expected_followups', []),
-                        published_date,
-                        [forexfactory_url] if forexfactory_url else None
-                    ))
-                    
-                    result = cur.fetchone()
-                    conn.commit()
-                    
-                    if result:
-                        email_id = result[0]
-                        logger.info(f"Successfully upserted analysis for content_id {content_id} (email_id: {email_id})")
-                        self._publish_news_update(email_id)
-                        return email_id
-                    else:
-                        logger.error(f"Upsert returned no email_id for content_id {content_id}")
-                        return None
+                        trade_deal_related,
+                        central_bank_related,
+                        importance_score,
+                        sentiment_score,
+                        analysis_confidence,
+                        news_category,
+                        entities_mentioned,
+                        trading_sessions,
+                        market_impact_prediction,
+                        impact_timeframe,
+                        volatility_expectation,
+                        similar_news_context,
+                        similar_news_ids,
+                        human_takeaway,
+                        attention_score,
+                        news_state,
+                        market_pressure,
+                        attention_window,
+                        confidence_label,
+                        expected_followups,
+                        email_received_at,
+                        forexfactory_urls
+                    ) VALUES (
+                        :content_id, :headline, :scraped_content, :ai_analysis_summary, :forex_relevant, :forex_instruments, :primary_instrument, :us_political_related, :forexfactory_category, :trade_deal_related, :central_bank_related, :importance_score, :sentiment_score, :analysis_confidence, :news_category, :entities_mentioned, :trading_sessions, :market_impact_prediction, :impact_timeframe, :volatility_expectation, :similar_news_context, :similar_news_ids, :human_takeaway, :attention_score, :news_state, :market_pressure, :attention_window, :confidence_label, :expected_followups, :email_received_at, :forexfactory_urls
+                    )
+                    RETURNING email_id
+                """), {
+                    "content_id": content_id,
+                    "headline": headline,
+                    "scraped_content": scraped_content[:5000],
+                    "ai_analysis_summary": analysis_data.get('ai_analysis_summary'),
+                    "forex_relevant": analysis_data.get('forex_relevant', False),
+                    "forex_instruments": analysis_data.get('forex_instruments', []),
+                    "primary_instrument": analysis_data.get('primary_instrument'),
+                    "us_political_related": analysis_data.get('us_political_related', False),
+                    "forexfactory_category": forexfactory_category,
+                    "trade_deal_related": self._detect_trade_deal_related(analysis_data),
+                    "central_bank_related": self._detect_central_bank_related(analysis_data),
+                    "importance_score": analysis_data.get('importance_score'),
+                    "sentiment_score": float(analysis_data.get('sentiment_score', 0)),
+                    "analysis_confidence": float(analysis_data.get('analysis_confidence', 0)),
+                    "news_category": analysis_data.get('news_category'),
+                    "entities_mentioned": analysis_data.get('entities_mentioned', []),
+                    "trading_sessions": analysis_data.get('trading_sessions', []),
+                    "market_impact_prediction": analysis_data.get('market_impact_prediction'),
+                    "impact_timeframe": analysis_data.get('impact_timeframe'),
+                    "volatility_expectation": analysis_data.get('volatility_expectation'),
+                    "similar_news_context": analysis_data.get('similar_news_context'),
+                    "similar_news_ids": analysis_data.get('similar_news_ids', []),
+                    "human_takeaway": analysis_data.get('human_takeaway'),
+                    "attention_score": analysis_data.get('attention_score'),
+                    "news_state": analysis_data.get('news_state'),
+                    "market_pressure": analysis_data.get('market_pressure'),
+                    "attention_window": analysis_data.get('attention_window'),
+                    "confidence_label": analysis_data.get('confidence_label'),
+                    "expected_followups": analysis_data.get('expected_followups', []),
+                    "email_received_at": published_date,
+                    "forexfactory_urls": [forexfactory_url] if forexfactory_url else None,
+                })
+
+                email_id = result.scalar_one_or_none()
+
+                if email_id:
+                    logger.info(f"Successfully upserted analysis for content_id {content_id} (email_id: {email_id})")
+                    self._publish_news_update(email_id)
+                    return email_id
+
+                logger.error(f"Upsert returned no email_id for content_id {content_id}")
+                return None
                         
         except Exception as e:
             logger.error(f"Error upserting analysis for {content_id}: {e}")
@@ -309,36 +305,32 @@ class DatabaseManager:
 
     def _fetch_news_payload(self, email_id: int) -> Optional[Dict]:
         try:
-            with self.get_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(
-                        """
-                        SELECT 
-                          email_id as id,
-                          headline as title,
-                          COALESCE(ai_analysis_summary, original_email_content) as text,
-                          email_received_at as timestamp,
-                          importance_score,
-                          sentiment_score,
-                          forex_instruments,
-                          forexfactory_category,
-                          market_impact_prediction,
-                          volatility_expectation,
-                          forexfactory_urls[1] as forexfactory_url,
-                          human_takeaway,
-                          attention_score,
-                          news_state,
-                          market_pressure,
-                          attention_window,
-                          confidence_label,
-                          expected_followups
-                        FROM email_news_analysis
-                        WHERE email_id = %s
-                        """,
-                        (email_id,)
-                    )
-                    row = cur.fetchone()
-                    return dict(row) if row else None
+            with self._engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT 
+                      email_id as id,
+                      headline as title,
+                      COALESCE(ai_analysis_summary, original_email_content) as text,
+                      email_received_at as timestamp,
+                      importance_score,
+                      sentiment_score,
+                      forex_instruments,
+                      forexfactory_category,
+                      market_impact_prediction,
+                      volatility_expectation,
+                      forexfactory_urls[1] as forexfactory_url,
+                      human_takeaway,
+                      attention_score,
+                      news_state,
+                      market_pressure,
+                      attention_window,
+                      confidence_label,
+                      expected_followups
+                    FROM email_news_analysis
+                    WHERE email_id = :email_id
+                """), {"email_id": email_id})
+                row = result.mappings().first()
+                return dict(row) if row else None
         except Exception as exc:
             logger.error("Failed to build news payload for %s: %s", email_id, exc)
             return None
@@ -385,30 +377,27 @@ class DatabaseManager:
             int: The vector_store_id (primary key), or None on error
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    # Add content_id to metadata
-                    metadata['forexfactory_content_id'] = content_id
-                    
-                    cur.execute("""
-                        INSERT INTO email_news_vectors (content, embedding_half, metadata)
-                        VALUES (%s, %s::halfvec, %s)
-                        RETURNING id
-                    """, (
-                        content,
-                        embedding,
-                        json.dumps(metadata)
-                    ))
-                    
-                    result = cur.fetchone()
-                    if result:
-                        vector_id = result[0]
-                        conn.commit()
-                        logger.info(f"Inserted vector embedding for {content_id} (vector_id: {vector_id})")
-                        return vector_id
-                    else:
-                        logger.error(f"No vector_id returned for {content_id}")
-                        return None
+            with self._engine.begin() as conn:
+                # Add content_id to metadata
+                metadata['forexfactory_content_id'] = content_id
+
+                result = conn.execute(text("""
+                    INSERT INTO email_news_vectors (content, embedding_half, metadata)
+                    VALUES (:content, :embedding::halfvec, :metadata)
+                    RETURNING id
+                """), {
+                    "content": content,
+                    "embedding": embedding,
+                    "metadata": json.dumps(metadata),
+                })
+
+                vector_id = result.scalar_one_or_none()
+                if vector_id:
+                    logger.info(f"Inserted vector embedding for {content_id} (vector_id: {vector_id})")
+                    return vector_id
+
+                logger.error(f"No vector_id returned for {content_id}")
+                return None
                     
         except Exception as e:
             logger.error(f"Error inserting vector embedding for {content_id}: {e}", exc_info=True)
@@ -426,16 +415,14 @@ class DatabaseManager:
             bool: True if successful
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE email_news_analysis
-                        SET vector_store_id = %s
-                        WHERE forexfactory_content_id = %s
-                    """, (vector_store_id, content_id))
-                    conn.commit()
-                    logger.info(f"Updated vector_store_id for {content_id}")
-                    return True
+            with self._engine.begin() as conn:
+                conn.execute(text("""
+                    UPDATE email_news_analysis
+                    SET vector_store_id = :vector_store_id
+                    WHERE forexfactory_content_id = :content_id
+                """), {"vector_store_id": vector_store_id, "content_id": content_id})
+                logger.info(f"Updated vector_store_id for {content_id}")
+                return True
         except Exception as e:
             logger.error(f"Error updating vector_store_id: {e}")
             return False
@@ -452,22 +439,19 @@ class DatabaseManager:
             List of dicts with similar news info and similarity scores
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("""
-                        SELECT 
-                            id,
-                            content,
-                            metadata,
-                            1 - (embedding_half <=> %s::halfvec) as similarity
-                        FROM email_news_vectors
-                        ORDER BY embedding_half <=> %s::halfvec
-                        LIMIT %s
-                    """, (embedding, embedding, limit))
-                    
-                    results = cur.fetchall()
-                    logger.info(f"Found {len(results)} similar vectors")
-                    return results
+            with self._engine.connect() as conn:
+                results = conn.execute(text("""
+                    SELECT 
+                        id,
+                        content,
+                        metadata,
+                        1 - (embedding_half <=> :embedding::halfvec) as similarity
+                    FROM email_news_vectors
+                    ORDER BY embedding_half <=> :embedding::halfvec
+                    LIMIT :limit
+                """), {"embedding": embedding, "limit": limit}).mappings().all()
+                logger.info(f"Found {len(results)} similar vectors")
+                return [dict(row) for row in results]
                     
         except Exception as e:
             logger.error(f"Error searching similar vectors: {e}")
@@ -493,44 +477,47 @@ class DatabaseManager:
             importance_score, sentiment_score, created_at, similarity
         """
         try:
-            with self.get_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    # Query joins vectors with analysis for complete context
-                    cur.execute("""
-                        SELECT 
-                            a.email_id,
-                            a.headline,
-                            a.ai_analysis_summary,
-                            a.forex_instruments,
-                            a.importance_score,
-                            a.sentiment_score,
-                            a.news_category,
-                            a.market_impact_prediction,
-                            a.email_received_at,
-                            a.created_at,
-                            1 - (v.embedding_half <=> %s::halfvec) as similarity
-                        FROM email_news_vectors v
-                        JOIN email_news_analysis a 
-                            ON v.metadata->>'forexfactory_content_id' = a.forexfactory_content_id
-                        WHERE a.ai_analysis_summary IS NOT NULL
-                            AND a.email_received_at IS NOT NULL
-                            AND a.email_received_at > NOW() - INTERVAL '180 days'
-                            AND (1 - (v.embedding_half <=> %s::halfvec)) >= %s
-                        ORDER BY similarity DESC, a.email_received_at DESC
-                        LIMIT %s
-                    """, (embedding, embedding, similarity_threshold, limit))
-                    
-                    results = cur.fetchall()
-                    
-                    if results:
-                        logger.info(f"Found {len(results)} similar articles (threshold: {similarity_threshold})")
-                        for idx, result in enumerate(results, 1):
-                            logger.debug(f"  {idx}. [{result['created_at']}] {result['headline'][:60]}... "
-                                       f"(similarity: {result['similarity']:.3f})")
-                    else:
-                        logger.info(f"No similar articles found above threshold {similarity_threshold}")
-                    
-                    return results
+            with self._engine.connect() as conn:
+                # Query joins vectors with analysis for complete context
+                results = conn.execute(text("""
+                    SELECT 
+                        a.email_id,
+                        a.headline,
+                        a.ai_analysis_summary,
+                        a.forex_instruments,
+                        a.importance_score,
+                        a.sentiment_score,
+                        a.news_category,
+                        a.market_impact_prediction,
+                        a.email_received_at,
+                        a.created_at,
+                        1 - (v.embedding_half <=> :embedding::halfvec) as similarity
+                    FROM email_news_vectors v
+                    JOIN email_news_analysis a 
+                        ON v.metadata->>'forexfactory_content_id' = a.forexfactory_content_id
+                    WHERE a.ai_analysis_summary IS NOT NULL
+                        AND a.email_received_at IS NOT NULL
+                        AND a.email_received_at > NOW() - INTERVAL '180 days'
+                        AND (1 - (v.embedding_half <=> :embedding::halfvec)) >= :similarity_threshold
+                    ORDER BY similarity DESC, a.email_received_at DESC
+                    LIMIT :limit
+                """), {
+                    "embedding": embedding,
+                    "similarity_threshold": similarity_threshold,
+                    "limit": limit,
+                }).mappings().all()
+
+                results = [dict(row) for row in results]
+
+                if results:
+                    logger.info(f"Found {len(results)} similar articles (threshold: {similarity_threshold})")
+                    for idx, result in enumerate(results, 1):
+                        logger.debug(f"  {idx}. [{result['created_at']}] {result['headline'][:60]}... "
+                                   f"(similarity: {result['similarity']:.3f})")
+                else:
+                    logger.info(f"No similar articles found above threshold {similarity_threshold}")
+
+                return results
                     
         except Exception as e:
             logger.error(f"Error searching similar news: {e}")
@@ -539,18 +526,17 @@ class DatabaseManager:
     def get_news_count_by_status(self) -> Dict[str, int]:
         """Get statistics about processed vs unprocessed news"""
         try:
-            with self.get_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("""
-                        SELECT 
-                            COUNT(*) as total,
-                            COUNT(CASE WHEN ai_analysis_summary IS NOT NULL THEN 1 END) as analyzed,
-                            COUNT(CASE WHEN ai_analysis_summary IS NULL THEN 1 END) as unanalyzed
-                        FROM email_news_analysis
-                        WHERE forexfactory_content_id IS NOT NULL
-                    """)
-                    result = cur.fetchone()
-                    return dict(result)
+            with self._engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN ai_analysis_summary IS NOT NULL THEN 1 END) as analyzed,
+                        COUNT(CASE WHEN ai_analysis_summary IS NULL THEN 1 END) as unanalyzed
+                    FROM email_news_analysis
+                    WHERE forexfactory_content_id IS NOT NULL
+                """))
+                row = result.mappings().first()
+                return dict(row) if row else {'total': 0, 'analyzed': 0, 'unanalyzed': 0}
         except Exception as e:
             logger.error(f"Error getting news count: {e}")
             return {'total': 0, 'analyzed': 0, 'unanalyzed': 0}

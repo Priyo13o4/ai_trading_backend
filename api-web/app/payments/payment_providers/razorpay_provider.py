@@ -13,7 +13,7 @@ from dateutil import parser
 from typing import Dict, Any, Optional
 from fastapi import HTTPException
 
-from app.db import get_supabase_client, async_db
+from app.db import get_supabase_client, supabase_db
 from app.payments.payment_providers.base import PaymentProvider
 from app.payments.constants import PaymentTransactionStatus
 
@@ -55,7 +55,7 @@ class RazorpayProvider(PaymentProvider):
             headers["X-Razorpay-Idempotency"] = idempotency_key
 
         # Run the blocking HTTP call in a thread pool to avoid blocking the event loop.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         _blocking_call = partial(
             requests.post,
             url,
@@ -144,7 +144,7 @@ class RazorpayProvider(PaymentProvider):
         try:
             supabase = get_supabase_client()
             now_iso = datetime.utcnow().isoformat()
-            result = await async_db(lambda user_id=user_id, now_iso=now_iso: (
+            result = await supabase_db(lambda user_id=user_id, now_iso=now_iso: (
                 supabase.table("user_subscriptions")
                 .select("status, expires_at, cancel_at_period_end")
                 .eq("user_id", user_id)

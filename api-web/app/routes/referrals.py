@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.authn.deps import require_session
-from app.db import async_db, get_supabase_client
+from app.db import supabase_db, get_supabase_client
 from app.referrals.manual_activation import activate_referral_reward_manual
 from app.referrals.utils import validate_uuid
 
@@ -57,7 +57,7 @@ async def get_referral_profile(
     supabase = get_supabase_client()
 
     # H5: Run all 3 DB queries concurrently instead of sequentially
-    code_coro = async_db(
+    code_coro = supabase_db(
         lambda: supabase.table("referral_codes")
         .select("code")
         .eq("user_id", user_id)
@@ -65,14 +65,14 @@ async def get_referral_profile(
         .limit(1)
         .execute()
     )
-    tracking_coro = async_db(
+    tracking_coro = supabase_db(
         lambda: supabase.table("referral_tracking")
         .select("id,status")
         .eq("referrer_id", user_id)
         .limit(500)  # H5: bound the row count
         .execute()
     )
-    rewards_coro = async_db(
+    rewards_coro = supabase_db(
         lambda: supabase.table("referral_rewards")
         .select("referral_id,status")
         .eq("user_id", user_id)

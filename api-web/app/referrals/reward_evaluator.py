@@ -1,9 +1,10 @@
+import os
 import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from app.db import async_db, get_supabase_client
+from app.db import supabase_db, get_supabase_client
 from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
@@ -93,7 +94,7 @@ def _extract_security_value(
 
 
 async def _get_pending_referral_row(*, supabase: Any, referred_user_id: str) -> dict[str, Any] | None:
-    query = await async_db(
+    query = await supabase_db(
         lambda: supabase.table("referral_tracking")
         .select("id,referrer_id,referred_id,registration_ip_prefix,registration_ua_hash,audit_metadata")
         .eq("referred_id", referred_user_id)
@@ -109,7 +110,7 @@ async def _get_pending_referral_row(*, supabase: Any, referred_user_id: str) -> 
 
 
 async def _get_referrer_signup_security(*, supabase: Any, referrer_id: str) -> tuple[str, str]:
-    query = await async_db(
+    query = await supabase_db(
         lambda: supabase.table("referral_tracking")
         .select("registration_ip_prefix,registration_ua_hash,audit_metadata")
         .eq("referred_id", referrer_id)
@@ -128,7 +129,7 @@ async def _get_referrer_signup_security(*, supabase: Any, referrer_id: str) -> t
 
 
 async def _get_payment_identity_hash(*, supabase: Any, trigger_payment_id: str) -> str:
-    query = await async_db(
+    query = await supabase_db(
         lambda: supabase.table("payment_transactions")
         .select("payment_identity_hash")
         .eq("id", trigger_payment_id)
@@ -155,7 +156,7 @@ async def _has_duplicate_identity_under_referrer(
     Uses check_duplicate_payment_identity(referrer_id, hash, exclude_user_id)
     which performs an EXISTS JOIN internally — no row limit, O(1) queries.
     """
-    result = await async_db(
+    result = await supabase_db(
         lambda: supabase.rpc(
             DEFAULT_FRAUD_IDENTITY_RPC_NAME,
             {
@@ -332,7 +333,7 @@ async def evaluate_referral_reward(*, referred_user_id: str, trigger_payment_id:
     }
 
     try:
-        response = await async_db(
+        response = await supabase_db(
             lambda: supabase.rpc(rpc_name, payload).execute()
         )
         row = _normalize_rpc_result(getattr(response, "data", None))

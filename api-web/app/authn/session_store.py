@@ -103,15 +103,10 @@ def public_session_id(sid: str) -> str:
 def _compute_ttl_seconds(*, now: int, supabase_exp: int, remember_me: bool) -> int:
     supabase_remaining = int(supabase_exp) - now
     selected_cap = _session_cap_ttl_seconds(bool(remember_me))
-    
-    # 🛡️ AI AUDIT SAFEGUARD: SESSION DECOUPLING
-    # We DO NOT cap the backend session by the ephemeral 1-hour Supabase access token TTL.
-    # Our backend is the authority on session longevity. 
-    # Normal sessions: 24 hours. Remember Me: 30 days.
-    # We ignore supabase_remaining here to avoid capping the UX to 1 hour.
-    if remember_me or selected_cap > supabase_remaining:
-        return selected_cap
-        
+
+    # Server sessions are bounded by both:
+    # - Supabase token expiry (remaining time), and
+    # - Server-side caps (normal vs remember-me).
     return max(1, min(supabase_remaining, selected_cap))
 
 
@@ -354,7 +349,7 @@ async def refresh_session_activity(sid: str, session: dict[str, Any]) -> Optiona
     pipe = SESSION_REDIS.pipeline()
     pipe.setex(_session_key(sid), ttl, json_dumps(updated))
     if updated.get("user_id"):
-        pipe.zadd(_user_sessions_index_key(updated["user_id"]), {sid: exp})
+        pipe.zadd(_user_sessions_index_key(updated["user_id"]), {sid: new_exp})
     await pipe.execute()
 
     logger.info(

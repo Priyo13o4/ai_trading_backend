@@ -367,7 +367,8 @@ async def post_error_alert(path_suffix: str, payload: Mapping[str, Any]) -> bool
     headers = {"Content-Type": "application/json"}
     secret = (os.getenv("N8N_ERROR_ALERT_SECRET") or "").strip()
     if secret:
-        headers["X-Error-Alert-Secret"] = secret
+        header_name = (os.getenv("N8N_ERROR_ALERT_HEADER_NAME") or "X-Error-Alert-Secret").strip()
+        headers[header_name] = secret
 
     for attempt in range(1, attempts + 1):
         try:

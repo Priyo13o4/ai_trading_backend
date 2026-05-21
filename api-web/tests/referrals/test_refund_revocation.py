@@ -58,7 +58,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -83,7 +83,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -113,7 +113,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -151,7 +151,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -191,7 +191,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -231,7 +231,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -277,7 +277,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,
@@ -333,7 +333,7 @@ class RefundRevocationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-            with mock.patch.object(mod, "async_db", new=async_db_mock):
+            with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                 result = await mod.revoke_referral_reward_on_refund(
                     trigger_payment_id=tx_id,
                     refund_trigger_event_id=event_id,

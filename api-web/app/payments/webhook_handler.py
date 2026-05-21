@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Header, HTTPException
 from typing import Optional, Any
 
 from app.observability.debug import debug_log
-from app.db import get_supabase_client, async_db
+from app.db import get_supabase_client, supabase_db
 from app.config.retry_policies import get_provider_webhook_policy
 from app.notifications.dead_letter import notify_dead_letter
 from app.redis_cache import CACHE_REDIS
@@ -56,7 +56,7 @@ async def _fetch_webhook_event(
     provider_name: str,
     event_id: str,
 ) -> Optional[dict]:
-    query = await async_db(
+    query = await supabase_db(
         lambda: supabase.table("webhook_events")
         .select("*")
         .eq("provider", provider_name)
@@ -108,7 +108,7 @@ async def _mark_webhook_processed(
         "last_error": processing_error,
         "processing_error": processing_error,
     }
-    await async_db(
+    await supabase_db(
         lambda: supabase.table("webhook_events")
         .update(update_payload)
         .eq("provider", provider_name)
@@ -138,7 +138,7 @@ async def _record_webhook_failure(
     }
 
     if next_retry_count >= policy.max_retries:
-        await async_db(
+        await supabase_db(
             lambda: supabase.table("webhook_events")
             .update(
                 {
@@ -166,7 +166,7 @@ async def _record_webhook_failure(
 
     backoff_seconds = policy.calculate_backoff(retry_count)
     next_retry_at = now + timedelta(seconds=backoff_seconds)
-    await async_db(
+    await supabase_db(
         lambda: supabase.table("webhook_events")
         .update(
             {
@@ -251,7 +251,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
             await _set_webhook_cache_hint(redis_key)
             return
 
-        tx_query = await async_db(
+        tx_query = await supabase_db(
             lambda: supabase.table("payment_transactions")
             .select("*")
             .eq("provider_payment_id", provider_payment_id)
@@ -298,7 +298,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                 )
                 logger.warning("%s event_id=%s tx_id=%s", mismatch_reason, event_id, tx_id)
 
-                await async_db(
+                await supabase_db(
                     lambda: supabase.table("payment_audit_logs").insert(
                         {
                             "transaction_id": tx_id,
@@ -376,7 +376,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                     amount_mismatch_reason,
                 )
 
-                await async_db(
+                await supabase_db(
                     lambda: supabase.table("payment_audit_logs").insert(
                         {
                             "transaction_id": tx_id,
@@ -431,7 +431,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
         latest_status = previous_status
 
         if is_recurring_charge or allow_plisio_late_success or allow_refund_on_terminal or previous_status not in terminal_statuses:
-            update_result = await async_db(
+            update_result = await supabase_db(
                 lambda: supabase.table("payment_transactions")
                 .update(
                     {
@@ -447,7 +447,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
             status_updated = bool(getattr(update_result, "data", None))
 
             refetched_rows = (
-                await async_db(
+                await supabase_db(
                     lambda: supabase.table("payment_transactions")
                     .select("id,status")
                     .eq("id", tx_id)
@@ -480,7 +480,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                 )
 
             if status_updated:
-                await async_db(
+                await supabase_db(
                     lambda: supabase.table("payment_audit_logs").insert(
                         {
                             "transaction_id": tx_id,
@@ -514,7 +514,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                         event_id,
                         tx_id,
                     )
-                    await async_db(
+                    await supabase_db(
                         lambda: supabase.table("payment_audit_logs").insert(
                             {
                                 "transaction_id": tx_id,
@@ -543,7 +543,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                             if not subscription_id:
                                 raise ValueError(f"renewal transaction {tx_id} missing subscription_id")
 
-                            existing_sub = await async_db(
+                            existing_sub = await supabase_db(
                                 lambda: supabase.table("user_subscriptions")
                                 .select("id,status")
                                 .eq("id", subscription_id)
@@ -560,7 +560,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                                 )
                                 subscription_state_changed = False
                             else:
-                                renew_response = await async_db(
+                                renew_response = await supabase_db(
                                     lambda: supabase.rpc(
                                         "renew_subscription",
                                         {
@@ -580,7 +580,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                                 try:
                                     uuid.UUID(str(plan_id))
                                 except (ValueError, TypeError):
-                                    plan_lookup = await async_db(
+                                    plan_lookup = await supabase_db(
                                         lambda: supabase.table("subscription_plans")
                                         .select("id")
                                         .eq("name", plan_id)
@@ -596,7 +596,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                                     f"first-time transaction {tx_id} missing plan_id for subscription creation"
                                 )
 
-                            sub_response = await async_db(
+                            sub_response = await supabase_db(
                                 lambda: supabase.rpc(
                                     "create_subscription",
                                     {
@@ -613,7 +613,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                             if not new_sub_id:
                                 raise ValueError(f"create_subscription returned empty result for tx={tx_id}")
 
-                            await async_db(
+                            await supabase_db(
                                 lambda: supabase.table("payment_transactions")
                                 .update({"subscription_id": new_sub_id})
                                 .eq("id", tx_id)
@@ -650,7 +650,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                         retry_metadata["activation_retry_updated_at"] = datetime.utcnow().isoformat()
                         retry_metadata["activation_retry_last_error"] = str(sub_err)[:500]
 
-                        await async_db(
+                        await supabase_db(
                             lambda: supabase.table("payment_transactions")
                             .update(
                                 {
@@ -662,7 +662,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                             .execute()
                         )
 
-                        await async_db(
+                        await supabase_db(
                             lambda: supabase.table("payment_audit_logs").insert(
                                 {
                                     "transaction_id": tx_id,
@@ -863,7 +863,7 @@ async def handle_webhook(
 
     supabase = get_supabase_client()
 
-    await async_db(
+    await supabase_db(
         lambda: supabase.table("webhook_events")
         .upsert(
             {

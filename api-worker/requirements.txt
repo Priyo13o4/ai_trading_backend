@@ -1,5 +1,7 @@
 redis==7.1.0
 psycopg[binary]==3.3.2
+sqlalchemy[asyncio]==2.0.43
+alembic==1.18.4
 python-dotenv>=1.2.2
 pandas==2.3.3
 pandas-ta>=0.4.67b0

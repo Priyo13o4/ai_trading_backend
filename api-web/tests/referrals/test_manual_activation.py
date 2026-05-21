@@ -66,7 +66,7 @@ class ManualActivationTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.activate_referral_reward_manual(
                     current_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     referral_code="ABCD1234",
@@ -100,7 +100,7 @@ class ManualActivationTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.activate_referral_reward_manual(
                     current_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 )
@@ -126,7 +126,7 @@ class ManualActivationTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 result = await mod.activate_referral_reward_manual(
                     current_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 )
@@ -139,7 +139,7 @@ class ManualActivationTests(unittest.IsolatedAsyncioTestCase):
 
         mock_supabase = mock.Mock()
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=RuntimeError("db down"))):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=RuntimeError("db down"))):
                 result = await mod.activate_referral_reward_manual(
                     current_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 )

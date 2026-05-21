@@ -5,6 +5,7 @@ import psycopg
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 from .auth import REDIS, log_redis_connection_health
 from .authn.deps import require_session
 from .authn.authz import require_permission
@@ -22,7 +23,9 @@ from .authn.session_store import (
 )
 from .db import (
     POSTGRES_DSN,
-    async_db,
+    AsyncSessionLocal,
+    get_db,
+    supabase_db,
     get_supabase_client,
     shutdown_db_executor,
     get_latest_signal_from_db, 
@@ -451,21 +454,22 @@ def _strategy_cache_ttl(rows: list[dict]) -> int:
 async def _run_strategy_expiry_janitor_tick() -> int:
     expired_ids: set[int] = set()
 
-    for _ in range(STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK):
-        rows = await asyncio.to_thread(
-            expire_elapsed_strategies_batch,
-            STRATEGY_EXPIRY_JANITOR_BATCH_SIZE,
-        )
-        if not rows:
-            break
+    async with AsyncSessionLocal() as db:
+        for _ in range(STRATEGY_EXPIRY_JANITOR_MAX_BATCHES_PER_TICK):
+            rows = await expire_elapsed_strategies_batch(
+                db,
+                STRATEGY_EXPIRY_JANITOR_BATCH_SIZE,
+            )
+            if not rows:
+                break
 
-        for row in rows:
-            strategy_id = row.get("strategy_id")
-            if strategy_id is not None:
-                expired_ids.add(int(strategy_id))
+            for row in rows:
+                strategy_id = row.get("strategy_id")
+                if strategy_id is not None:
+                    expired_ids.add(int(strategy_id))
 
-        if len(rows) < STRATEGY_EXPIRY_JANITOR_BATCH_SIZE:
-            break
+            if len(rows) < STRATEGY_EXPIRY_JANITOR_BATCH_SIZE:
+                break
 
     if expired_ids:
         invalidated = await asyncio.to_thread(invalidate_strategy_cache_domain, expired_ids)
@@ -800,7 +804,8 @@ async def startup_event():
 
     if is_first:
         try:
-            missing_tables = await asyncio.to_thread(get_missing_core_tables)
+            async with AsyncSessionLocal() as _startup_db:
+                missing_tables = await get_missing_core_tables(_startup_db)
             if missing_tables:
                 logger.warning(
                     "[BOOTSTRAP WARNING] Missing core API tables in public schema: %s. "
@@ -1075,7 +1080,7 @@ async def _supabase_health_check() -> dict:
     started_at = time.perf_counter()
     try:
         supabase = get_supabase_client()
-        await async_db(
+        await supabase_db(
             lambda: supabase.table("subscription_plans").select("id").limit(1).execute(),
             timeout=2.0,
         )
@@ -1135,7 +1140,13 @@ async def health():
 # ============================================================================
 
 @app.get("/api/signals/{pair}")
-async def get_signal(pair: str, request: Request, response: Response, ctx=Depends(require_session)):
+async def get_signal(
+    pair: str,
+    request: Request,
+    response: Response,
+    ctx=Depends(require_session),
+    db: AsyncSession = Depends(get_db),
+):
     """Get latest active strategy for a trading pair (requires auth)"""
     logger.info(f"[API] GET /api/signals/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1152,7 +1163,7 @@ async def get_signal(pair: str, request: Request, response: Response, ctx=Depend
 
         # Cache miss - fetch from database
         logger.info(f"[API] Cache MISS for signal: {pair}, querying database")
-        row = await asyncio.to_thread(get_latest_signal_from_db, pair)
+        row = await get_latest_signal_from_db(db, pair)
         
         if not row: 
             logger.warning(f"[API] No active strategy found for pair: {pair}")
@@ -1173,7 +1184,7 @@ async def get_signal(pair: str, request: Request, response: Response, ctx=Depend
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/preview/{pair}")
-async def get_signal_preview(pair: str, request: Request):
+async def get_signal_preview(pair: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Get old strategy preview for main page (no auth required)"""
     logger.info(f"[API] GET /api/preview/{pair} - Public access")
     
@@ -1195,7 +1206,7 @@ async def get_signal_preview(pair: str, request: Request):
 
         # Cache miss - get old signal
         logger.info(f"[API] Cache MISS for preview: {normalized_pair}, querying database")
-        row = await asyncio.to_thread(get_old_signal_from_db, normalized_pair)
+        row = await get_old_signal_from_db(db, normalized_pair)
         
         if not row: 
             logger.warning(f"[API] No preview strategy found for pair: {normalized_pair}")
@@ -1216,7 +1227,7 @@ async def get_signal_preview(pair: str, request: Request):
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/preview")
-async def get_news_preview(request: Request):
+async def get_news_preview(request: Request, db: AsyncSession = Depends(get_db)):
     """Get latest high-impact news item for landing page (no auth required)."""
     logger.info("[API] GET /api/news/preview - Public access")
 
@@ -1230,7 +1241,7 @@ async def get_news_preview(request: Request):
             return JSONResponse(content=json.loads(cached))
 
         logger.info("[API] Cache MISS for news preview, querying database")
-        row = await asyncio.to_thread(get_news_preview_from_db)
+        row = await get_news_preview_from_db(db)
 
         if not row:
             logger.warning("[API] No high-impact news found for preview")
@@ -1250,7 +1261,11 @@ async def get_news_preview(request: Request):
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/strategies")
-async def get_all_active_strategies(pair: str = None, ctx=Depends(require_signals_context)):
+async def get_all_active_strategies(
+    pair: str = None,
+    ctx=Depends(require_signals_context),
+    db: AsyncSession = Depends(get_db),
+):
     """Get all active strategies, optionally filtered by pair"""
     logger.info(f"[API] GET /api/strategies?pair={pair} - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -1265,7 +1280,7 @@ async def get_all_active_strategies(pair: str = None, ctx=Depends(require_signal
             return JSONResponse(content=json.loads(cached))
 
         logger.info("[API] Cache MISS for /api/strategies, querying database")
-        strategies = await asyncio.to_thread(get_active_strategies, pair)
+        strategies = await get_active_strategies(db, pair)
         logger.info(f"[API] Found {len(strategies)} active strategies")
         StrategyCache.set(strategies, pair or "all")
         publish_strategies_snapshot(strategies)
@@ -1289,6 +1304,7 @@ async def get_strategies_all(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     ctx=Depends(require_signals_context),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get strategies with optional filters + pagination (requires signals permission)."""
     logger.info(
@@ -1327,8 +1343,8 @@ async def get_strategies_all(
             return JSONResponse(content=json.loads(cached))
 
         logger.info("[API] Cache MISS for /api/strategies/all, querying database")
-        rows, total = await asyncio.to_thread(
-            get_strategies_all_from_db,
+        rows, total = await get_strategies_all_from_db(
+            db,
             normalized_symbol,
             normalized_direction,
             normalized_status,
@@ -1378,7 +1394,8 @@ async def publish_strategy_update_endpoint(request: Request):
 
     pair = payload.get("trading_pair") or payload.get("symbol") or payload.get("pair")
     try:
-        strategies = await asyncio.to_thread(get_active_strategies, pair)
+        async with AsyncSessionLocal() as db:
+            strategies = await get_active_strategies(db, pair)
         StrategyCache.set(strategies, pair or "all")
     except Exception as exc:
         logger.warning("Failed to refresh strategies cache after publish: %s", exc)
@@ -1392,6 +1409,7 @@ async def get_strategy_by_id(
     request: Request,
     response: Response,
     ctx=Depends(require_session),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get a single strategy by ID (requires signals permission)."""
     logger.info(f"[API] GET /api/strategies/{strategy_id} - User: {ctx.get('user_id', 'anonymous')}")
@@ -1406,7 +1424,7 @@ async def get_strategy_by_id(
             return JSONResponse(content=json.loads(cached))
 
         logger.info(f"[API] Cache MISS for strategy id={strategy_id}, querying database")
-        row = await asyncio.to_thread(get_strategy_by_id_from_db, strategy_id)
+        row = await get_strategy_by_id_from_db(db, strategy_id)
         if not row:
             raise HTTPException(404, f"Strategy {strategy_id} not found")
 
@@ -1440,7 +1458,8 @@ async def get_regime(request: Request, response: Response, ctx=Depends(require_s
         
         # Cache miss
         logger.info("[API] Cache MISS for regime, querying database")
-        rows = await asyncio.to_thread(get_latest_regime_from_db)
+        async with AsyncSessionLocal() as db:
+            rows = await get_latest_regime_from_db(db)
         
         if not rows:
             logger.warning("[API] No regime data found in database")
@@ -1461,7 +1480,7 @@ async def get_regime(request: Request, response: Response, ctx=Depends(require_s
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/regime/market-data")
-async def get_regime_market_data_markdown(request: Request):
+async def get_regime_market_data_markdown(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get comprehensive market data for regime analysis (n8n workflow endpoint)
     Returns JSON with markdown split by symbol for LLM processing
@@ -1493,7 +1512,7 @@ async def get_regime_market_data_markdown(request: Request):
         
         # Cache miss - fetch from database
         logger.info("[API] Cache MISS for regime market data, querying database")
-        data = await asyncio.to_thread(get_regime_market_data_from_db)
+        data = await get_regime_market_data_from_db(db)
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
@@ -1683,7 +1702,8 @@ async def get_regime_market_data_markdown(request: Request):
 async def get_regime_market_data_json(
     request: Request,
     symbol: Optional[str] = Query(None, description="Single symbol filter, e.g. XAUUSD"),
-    symbols: Optional[str] = Query(None, description="Comma-separated symbols filter, e.g. XAUUSD,EURUSD")
+    symbols: Optional[str] = Query(None, description="Comma-separated symbols filter, e.g. XAUUSD,EURUSD"),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Get comprehensive market data for regime analysis (JSON format)
@@ -1757,7 +1777,7 @@ async def get_regime_market_data_json(
         
         # Cache miss - fetch from database
         logger.info("[API] Cache MISS for JSON market data, querying database")
-        data = await asyncio.to_thread(get_regime_market_data_from_db)
+        data = await get_regime_market_data_from_db(db)
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
@@ -1793,7 +1813,8 @@ async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
         
         # Cache miss
         logger.info(f"[API] Cache MISS for regime: {pair}, querying database")
-        row = await asyncio.to_thread(get_regime_for_pair, pair)
+        async with AsyncSessionLocal() as db:
+            row = await get_regime_for_pair(db, pair)
         
         if not row:
             logger.warning(f"[API] No regime data found for pair: {pair}")
@@ -1869,21 +1890,25 @@ async def handle_n8n_news_update(request: Request):
 
         # Broadcast specific snapshots based on the updated type
         if news_type in ["current", "all"]:
-            latest_news = await asyncio.to_thread(get_latest_news_from_db, 20, 0)
+            async with AsyncSessionLocal() as db:
+                latest_news = await get_latest_news_from_db(db, 20, 0)
             if latest_news:
                 NewsCache.set(latest_news, "all")
                 publish_news_snapshot(latest_news)
                 updates_sent.append("current_news")
 
         if news_type in ["playbook", "all"]:
-            playbook = await asyncio.to_thread(get_latest_weekly_macro_playbook_from_db)
+            async with AsyncSessionLocal() as db:
+                playbook = await get_latest_weekly_macro_playbook_from_db(db)
             if playbook:
                 from .cache import publish_playbook_update
                 publish_playbook_update(playbook)
                 updates_sent.append("weekly_playbook")
 
         if news_type in ["events", "event", "all"]:
-            events = await asyncio.to_thread(get_economic_event_analysis_from_db, 20, 0)
+            async with AsyncSessionLocal() as db:
+                event_payload = await get_economic_event_analysis_from_db(db, 20, 0)
+            events = event_payload.get("events") if isinstance(event_payload, dict) else None
             if events:
                 from .cache import publish_event_analysis_update
                 publish_event_analysis_update(events)
@@ -1893,7 +1918,8 @@ async def handle_n8n_news_update(request: Request):
             from .cache import invalidate_strategy_cache_domain, publish_strategies_snapshot
             invalidate_strategy_cache_domain([]) 
             
-            latest_strategies = await asyncio.to_thread(get_strategies_all_from_db, None)
+            async with AsyncSessionLocal() as db:
+                latest_strategies, _ = await get_strategies_all_from_db(db, None)
             
             if latest_strategies:
                 StrategyCache.set(latest_strategies, "all")
@@ -1906,7 +1932,8 @@ async def handle_n8n_news_update(request: Request):
             await REDIS.delete("latest:regime")
             deleted_count += 1
             
-            latest_regimes = await asyncio.to_thread(get_latest_regime_from_db)
+            async with AsyncSessionLocal() as db:
+                latest_regimes = await get_latest_regime_from_db(db)
             if latest_regimes:
                 # Targeted deletion of pair-specific frontend caches (avoid wildcard regime:*)
                 pair_keys = [f"regime:{r['symbol'].upper()}" for r in latest_regimes]
@@ -1936,7 +1963,8 @@ async def get_current_news(
     response: Response, 
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    ctx=Depends(require_session)
+    ctx=Depends(require_session),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get current/recent high-impact forex news with pagination"""
     logger.info(f"[API] GET /api/news/current - User: {ctx.get('user_id', 'anonymous')}, limit={limit}, offset={offset}")
@@ -1959,8 +1987,8 @@ async def get_current_news(
         
         # Cache miss
         logger.info(f"[API] Cache MISS for current news, querying database (offset={offset})")
-        rows = await asyncio.to_thread(get_latest_news_from_db, limit, offset)
-        total = await asyncio.to_thread(get_news_count)
+        rows = await get_latest_news_from_db(db, limit, offset)
+        total = await get_news_count(db)
         
         if not rows:
             logger.info("[API] No current news found in database")
@@ -1984,7 +2012,7 @@ async def get_current_news(
 
 
 @app.get("/api/news/{item_id:int}")
-async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_session)):
+async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Fetch a specific news record securely with TTL caching"""
     logger.info(f"[API] GET /api/news/{item_id} - User: {ctx.get('user_id', 'anonymous')}")
     try:
@@ -1997,7 +2025,7 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
             return JSONResponse(content=json.loads(cached))
             
         logger.info(f"[API] Cache MISS for news ID {item_id}")
-        row = await asyncio.to_thread(get_news_by_id_from_db, item_id)
+        row = await get_news_by_id_from_db(db, item_id)
         
         if not row:
             raise HTTPException(404, "News item not found")
@@ -2014,7 +2042,7 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
         raise HTTPException(500, "Internal server error")
 
 @app.get("/api/news/upcoming")
-async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session)):
+async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Get upcoming high-impact forex events"""
     logger.info(f"[API] GET /api/news/upcoming - User: {ctx.get('user_id', 'anonymous')}")
     
@@ -2033,7 +2061,7 @@ async def get_upcoming_news(request: Request, response: Response, ctx=Depends(re
         
         # Cache miss
         logger.info("[API] Cache MISS for upcoming news, querying database")
-        rows = await asyncio.to_thread(get_upcoming_news_from_db)
+        rows = await get_upcoming_news_from_db(db)
         normalized_rows = rows if isinstance(rows, list) else []
         
         if not normalized_rows:
@@ -2054,7 +2082,7 @@ async def get_upcoming_news(request: Request, response: Response, ctx=Depends(re
 
 
 @app.get("/api/news/playbook")
-async def get_news_playbook(request: Request, response: Response, ctx=Depends(require_session)):
+async def get_news_playbook(request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Get the latest weekly macro playbook (authenticated session required)."""
     logger.info(f"[API] GET /api/news/playbook - User: {ctx.get('user_id', 'anonymous')}")
 
@@ -2066,7 +2094,7 @@ async def get_news_playbook(request: Request, response: Response, ctx=Depends(re
             return JSONResponse(content=json.loads(cached))
 
         logger.info("[API] Cache MISS for /api/news/playbook, querying database")
-        row = await asyncio.to_thread(get_latest_weekly_macro_playbook_from_db)
+        row = await get_latest_weekly_macro_playbook_from_db(db)
         result = {"playbook": [row] if row else []}
         ttl = 5 * 60
         serialized = json_dumps(result)
@@ -2085,6 +2113,7 @@ async def get_news_events(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     ctx=Depends(require_session),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get economic event analysis rows with optional upcoming-only filter."""
     logger.info(
@@ -2096,12 +2125,13 @@ async def get_news_events(
     )
 
     async def _query_events_payload() -> str:
-        rows, total = await asyncio.to_thread(
-            get_economic_event_analysis_from_db,
+        row_data = await get_economic_event_analysis_from_db(
+            db,
             limit,
             offset,
             upcoming_only,
         )
+        rows, total = row_data["events"], row_data["total"]
         result = {
             "events": rows,
             "total": total,
@@ -2208,6 +2238,7 @@ async def get_news_markers(
     before: Optional[str] = Query(default=None, description="ISO UTC timestamp cursor for older pages"),
     limit: int = Query(default=500, ge=50, le=1000),
     ctx=Depends(require_signals_context),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get news markers for chart annotations
     
@@ -2221,8 +2252,6 @@ async def get_news_markers(
     Returns:
         List of news events with timestamps for chart markers
     """
-    import psycopg
-    from psycopg.rows import dict_row
     from datetime import datetime, timedelta, timezone
     from .cache import NewsMarkersCache
     
@@ -2271,19 +2300,10 @@ async def get_news_markers(
     logger.info(f"Cache MISS: news markers for {symbol}, querying database")
     
     try:
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if not DATABASE_URL:
-            pg_host = os.getenv("POSTGRES_HOST", "localhost")
-            pg_port = os.getenv("POSTGRES_PORT", "5432")
-            pg_db = os.getenv("POSTGRES_DB", "ai_trading_bot_data")
-            pg_user = os.getenv("POSTGRES_USER", "postgres")
-            pg_password = os.getenv("POSTGRES_PASSWORD", "")
-            DATABASE_URL = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
-        
         # Calculate time range
         range_end = cursor_before or datetime.now(timezone.utc)
         start_time = range_end - timedelta(hours=hours)
-        
+
         # Map symbol to instruments (handle different naming conventions)
         symbol_map = {
             'XAUUSD': ['XAU/USD', 'GOLD', 'XAUUSD'],
@@ -2291,42 +2311,46 @@ async def get_news_markers(
             'GBPUSD': ['GBP/USD', 'GBPUSD', 'GBP'],
             'USDJPY': ['USD/JPY', 'USDJPY', 'JPY'],
             'USDCAD': ['USD/CAD', 'USDCAD', 'CAD'],
-            'AUDUSD': ['AUD/USD', 'AUDUSD', 'AUD']
+            'AUDUSD': ['AUD/USD', 'AUDUSD', 'AUD'],
         }
-        
+
         instruments = symbol_map.get(symbol, [symbol])
-        
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            with conn.cursor() as cur:
-                # Query news relevant to this symbol within time range
-                query = """
-                    SELECT 
-                        email_id,
-                        headline,
-                        email_received_at as time,
-                        importance_score,
-                        sentiment_score,
-                        market_impact_prediction,
-                        volatility_expectation,
-                        forex_instruments,
-                        breaking_news,
-                        central_bank_related,
-                        news_category
-                    FROM email_news_analysis
-                    WHERE forex_relevant = true
-                        AND email_received_at >= %s
-                        AND email_received_at < %s
-                        AND importance_score >= %s
-                        AND (
-                            primary_instrument = ANY(%s::text[])
-                            OR COALESCE(forex_instruments, '[]'::jsonb) ?| %s::text[]
-                        )
-                    ORDER BY email_received_at DESC
-                    LIMIT %s
-                """
-                
-                cur.execute(query, (start_time, range_end, min_importance, instruments, instruments, limit + 1))
-                news_items = cur.fetchall()
+
+        res = await db.execute(
+            text("""
+                SELECT
+                    email_id,
+                    headline,
+                    email_received_at as time,
+                    importance_score,
+                    sentiment_score,
+                    market_impact_prediction,
+                    volatility_expectation,
+                    forex_instruments,
+                    breaking_news,
+                    central_bank_related,
+                    news_category
+                FROM email_news_analysis
+                WHERE forex_relevant = true
+                    AND email_received_at >= :start_time
+                    AND email_received_at < :range_end
+                    AND importance_score >= :min_importance
+                    AND (
+                        primary_instrument = ANY(:instruments)
+                        OR COALESCE(forex_instruments, '[]'::jsonb) ?| :instruments
+                    )
+                ORDER BY email_received_at DESC
+                LIMIT :fetch_limit
+            """),
+            {
+                "start_time": start_time,
+                "range_end": range_end,
+                "min_importance": min_importance,
+                "instruments": instruments,
+                "fetch_limit": limit + 1,
+            },
+        )
+        news_items = [dict(r) for r in res.mappings().fetchall()]
 
         has_more = len(news_items) > limit
         if has_more:
@@ -2387,12 +2411,12 @@ async def get_news_markers(
 # ============================================================================
 
 @app.get("/api/performance/{pair}")
-async def get_performance(pair: str, ctx=Depends(require_session)):
+async def get_performance(pair: str, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Get performance metrics for a trading pair"""
     logger.info(f"[API] GET /api/performance/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     
     try:
-        metrics = await asyncio.to_thread(get_pair_performance, pair)
+        metrics = await get_pair_performance(db, pair)
         if not metrics:
             logger.warning(f"[API] No performance data found for pair: {pair}")
             return JSONResponse(content={"message": f"No trade history for {pair}"})
@@ -2409,7 +2433,7 @@ async def get_performance(pair: str, ctx=Depends(require_session)):
 # ============================================================================
 
 @app.post("/api/trades/outcome")
-async def record_trade_outcome(request: Request):
+async def record_trade_outcome(request: Request, db: AsyncSession = Depends(get_db)):
     """Record MT5 trade execution (called by EA when opening position)"""
     auth_source = _require_internal_api_key(
         request,
@@ -2422,7 +2446,7 @@ async def record_trade_outcome(request: Request):
         trade_data = await request.json()
         logger.info(f"[API] Recording trade outcome for ticket: {trade_data.get('ticket')}")
         
-        result = await asyncio.to_thread(insert_trade_outcome, trade_data)
+        result = await insert_trade_outcome(db, trade_data)
         logger.info(f"[API] Trade recorded with signal_id: {result['signal_id']}")
         
         return JSONResponse(content={"signal_id": result['signal_id'], "status": "recorded"})
@@ -2431,7 +2455,7 @@ async def record_trade_outcome(request: Request):
         raise HTTPException(500, "Internal server error")
 
 @app.put("/api/trades/{ticket}/close")
-async def close_trade(ticket: int, request: Request):
+async def close_trade(ticket: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Update trade when closed in MT5 (records P/L, exit price, outcome)"""
     auth_source = _require_internal_api_key(
         request,
@@ -2444,7 +2468,7 @@ async def close_trade(ticket: int, request: Request):
         outcome_data = await request.json()
         logger.info(f"[API] Closing trade {ticket} with P/L: {outcome_data.get('pnl')}")
         
-        result = await asyncio.to_thread(update_trade_outcome, ticket, outcome_data)
+        result = await update_trade_outcome(db, ticket, outcome_data)
         
         if not result:
             logger.warning(f"[API] No signal found with ticket: {ticket}")

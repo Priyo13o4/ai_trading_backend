@@ -13,7 +13,7 @@ from plisio import PlisioAioClient
 import plisio as plisio_sdk
 
 from app.observability.debug import debug_log
-from app.db import get_supabase_client, async_db
+from app.db import get_supabase_client, supabase_db
 from app.payments.constants import PaymentTransactionStatus
 from app.payments.payment_providers.base import PaymentProvider
 
@@ -184,13 +184,13 @@ class PlisioProvider(PaymentProvider):
         except (ValueError, TypeError):
             plan_query = plan_query.eq("name", plan_id)
 
-        plan_res = await async_db(lambda: plan_query.execute())
+        plan_res = await supabase_db(lambda: plan_query.execute())
         if not plan_res.data:
             raise HTTPException(status_code=404, detail=f"Active subscription plan not found: {plan_id}")
         plan_row = plan_res.data[0]
         resolved_plan_name = str(plan_row.get("name") or plan_id)
 
-        profile_res = await async_db(lambda user_id=user_id: (
+        profile_res = await supabase_db(lambda user_id=user_id: (
             supabase.table("profiles")
             .select("email")
             .eq("id", user_id)

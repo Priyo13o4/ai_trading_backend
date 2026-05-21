@@ -26,13 +26,13 @@ import os
 import sys
 import argparse
 import time
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import logging
 import pandas as pd
 from tqdm import tqdm
-import psycopg
-from psycopg.rows import dict_row
+from sqlalchemy import text
 
 # Allow importing app modules when running from repo/container.
 scripts_dir = os.path.abspath(os.path.dirname(__file__))
@@ -67,6 +67,10 @@ if not DATABASE_URL:
     if not user or password is None or password == "":
         raise RuntimeError("Set DATABASE_URL or POSTGRES_USER/POSTGRES_PASSWORD")
     DATABASE_URL = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+os.environ.setdefault("DATABASE_URL", DATABASE_URL)
+
+from app.db import AsyncSessionLocal, async_engine
 
 # Legacy fallbacks (used only if DB discovery fails)
 FALLBACK_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
@@ -176,8 +180,8 @@ def _resample_rule_for_timeframe(timeframe: str) -> str:
     return TIMEFRAME_RESAMPLE_RULES[tf]
 
 
-def _fetch_candlesticks_window(
-    conn: psycopg.Connection,
+async def _fetch_candlesticks_window(
+    db,
     *,
     symbol: str,
     timeframe: str,
@@ -186,42 +190,56 @@ def _fetch_candlesticks_window(
     max_rows: int,
 ) -> pd.DataFrame:
     relation = _ohlcv_relation_for_timeframe(timeframe)
-    with conn.cursor(row_factory=dict_row) as cur:
-        if relation == "candlesticks":
-            cur.execute(
+    if relation == "candlesticks":
+        result = await db.execute(
+            text(
                 """
                 SELECT time AS datetime, open, high, low, close, volume
                 FROM candlesticks
-                WHERE symbol = %s
-                  AND timeframe = %s
-                  AND time >= %s
-                  AND time <= %s
+                WHERE symbol = :symbol
+                  AND timeframe = :timeframe
+                  AND time >= :lower_bound
+                  AND time <= :upper_bound
                 ORDER BY time ASC
-                LIMIT %s
-                """,
-                (symbol, timeframe, lower_bound, upper_bound, max_rows),
-            )
-        else:
-            end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
-            cur.execute(
+                LIMIT :max_rows
+                """
+            ),
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "lower_bound": lower_bound,
+                "upper_bound": upper_bound,
+                "max_rows": max_rows,
+            },
+        )
+    else:
+        end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
+        result = await db.execute(
+            text(
                 f"""
                 SELECT time AS datetime, open, high, low, close, volume
                 FROM {relation}
-                WHERE symbol = %s
-                  AND time >= %s
-                  AND time <= LEAST(%s, NOW() - INTERVAL '{end_offset_seconds} seconds')
+                WHERE symbol = :symbol
+                  AND time >= :lower_bound
+                  AND time <= LEAST(:upper_bound, NOW() - INTERVAL '{end_offset_seconds} seconds')
                 ORDER BY time ASC
-                LIMIT %s
-                """,
-                (symbol, lower_bound, upper_bound, max_rows),
-            )
-        rows = cur.fetchall()
+                LIMIT :max_rows
+                """
+            ),
+            {
+                "symbol": symbol,
+                "lower_bound": lower_bound,
+                "upper_bound": upper_bound,
+                "max_rows": max_rows,
+            },
+        )
 
-    return _normalize_ohlcv_frame(pd.DataFrame(rows))
+    rows = result.mappings().all()
+    return _normalize_ohlcv_frame(pd.DataFrame(list(rows)))
 
 
-def _build_intraday_forming_candle(
-    conn: psycopg.Connection,
+async def _build_intraday_forming_candle(
+    db,
     *,
     symbol: str,
     timeframe: str,
@@ -231,25 +249,30 @@ def _build_intraday_forming_candle(
         return pd.DataFrame(), None
 
     max_rows = _safe_positive_int(os.getenv("INDICATOR_COMPOSITE_M1_MAX_ROWS", "4000"), fallback=4000, minimum=200)
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
+    result = await db.execute(
+        text(
             """
             SELECT time AS datetime, open, high, low, close, volume
             FROM candlesticks
-            WHERE symbol = %s
+            WHERE symbol = :symbol
               AND timeframe = 'M1'
-              AND time > %s
+              AND time > :latest_finalized_time
             ORDER BY time DESC
-            LIMIT %s
-            """,
-            (symbol, latest_finalized_time, max_rows),
-        )
-        rows = cur.fetchall()
+            LIMIT :max_rows
+            """
+        ),
+        {
+            "symbol": symbol,
+            "latest_finalized_time": latest_finalized_time,
+            "max_rows": max_rows,
+        },
+    )
+    rows = result.mappings().all()
 
     if not rows:
         return pd.DataFrame(), None
 
-    m1_df = _normalize_ohlcv_frame(pd.DataFrame(rows))
+    m1_df = _normalize_ohlcv_frame(pd.DataFrame(list(rows)))
     if m1_df.empty:
         return pd.DataFrame(), None
 
@@ -275,9 +298,9 @@ def _build_intraday_forming_candle(
     return forming_df, forming_time
 
 
-def _ensure_indicator_watermarks_table(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
+async def _ensure_indicator_watermarks_table(db) -> None:
+    await db.execute(
+        text(
             """
             CREATE TABLE IF NOT EXISTS indicator_update_watermarks (
                 symbol VARCHAR(20) NOT NULL,
@@ -288,58 +311,61 @@ def _ensure_indicator_watermarks_table(conn: psycopg.Connection) -> None:
             )
             """
         )
+    )
 
 
-def _acquire_watermark_pair_lock(
-    conn: psycopg.Connection,
+async def _acquire_watermark_pair_lock(
+    db,
     *,
     symbol: str,
     timeframe: str,
 ) -> None:
     """Serialize watermark reads/writes per (symbol, timeframe) within a transaction."""
-    with conn.cursor() as cur:
-        cur.execute(
+    await db.execute(
+        text(
             """
-            SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))
-            """,
-            (symbol, timeframe),
-        )
+            SELECT pg_advisory_xact_lock(hashtext(:symbol), hashtext(:timeframe))
+            """
+        ),
+        {"symbol": symbol, "timeframe": timeframe},
+    )
 
 
-def _get_watermark_for_update(
-    conn: psycopg.Connection,
+async def _get_watermark_for_update(
+    db,
     *,
     symbol: str,
     timeframe: str,
 ):
-    with conn.cursor() as cur:
-        cur.execute(
+    result = await db.execute(
+        text(
             """
             SELECT watermark_time, updated_at
             FROM indicator_update_watermarks
-            WHERE symbol = %s AND timeframe = %s
+            WHERE symbol = :symbol AND timeframe = :timeframe
             FOR UPDATE
-            """,
-            (symbol, timeframe),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None, None
-        return row[0], row[1]
+            """
+        ),
+        {"symbol": symbol, "timeframe": timeframe},
+    )
+    row = result.mappings().first()
+    if not row:
+        return None, None
+    return row["watermark_time"], row["updated_at"]
 
 
-def _upsert_watermark(
-    conn: psycopg.Connection,
+async def _upsert_watermark(
+    db,
     *,
     symbol: str,
     timeframe: str,
     watermark_time: datetime,
 ) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
+    await db.execute(
+        text(
             """
             INSERT INTO indicator_update_watermarks (symbol, timeframe, watermark_time)
-            VALUES (%s, %s, %s)
+            VALUES (:symbol, :timeframe, :watermark_time)
             ON CONFLICT (symbol, timeframe)
             DO UPDATE SET
                 watermark_time = GREATEST(
@@ -347,13 +373,14 @@ def _upsert_watermark(
                     EXCLUDED.watermark_time
                 ),
                 updated_at = NOW()
-            """,
-            (symbol, timeframe, watermark_time),
-        )
+            """
+        ),
+        {"symbol": symbol, "timeframe": timeframe, "watermark_time": watermark_time},
+    )
 
 
-def _fetch_candle_times_since(
-    conn: psycopg.Connection,
+async def _fetch_candle_times_since(
+    db,
     *,
     symbol: str,
     timeframe: str,
@@ -362,35 +389,50 @@ def _fetch_candle_times_since(
     max_rows: int,
 ) -> List[datetime]:
     relation = _ohlcv_relation_for_timeframe(timeframe)
-    with conn.cursor() as cur:
-        if relation == "candlesticks":
-            cur.execute(
+    if relation == "candlesticks":
+        result = await db.execute(
+            text(
                 """
                 SELECT time
                 FROM candlesticks
-                WHERE symbol = %s
-                  AND timeframe = %s
-                  AND time > %s
-                  AND time <= %s
+                WHERE symbol = :symbol
+                  AND timeframe = :timeframe
+                  AND time > :lower_bound
+                  AND time <= :upper_bound
                 ORDER BY time ASC
-                LIMIT %s
-                """,
-                (symbol, timeframe, lower_bound, upper_bound, max_rows),
-            )
-        else:
-            cur.execute(
+                LIMIT :max_rows
+                """
+            ),
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "lower_bound": lower_bound,
+                "upper_bound": upper_bound,
+                "max_rows": max_rows,
+            },
+        )
+    else:
+        result = await db.execute(
+            text(
                 f"""
                 SELECT time
                 FROM {relation}
-                WHERE symbol = %s
-                  AND time > %s
-                  AND time <= %s
+                WHERE symbol = :symbol
+                  AND time > :lower_bound
+                  AND time <= :upper_bound
                 ORDER BY time ASC
-                LIMIT %s
-                """,
-                (symbol, lower_bound, upper_bound, max_rows),
-            )
-        return [row[0] for row in cur.fetchall()]
+                LIMIT :max_rows
+                """
+            ),
+            {
+                "symbol": symbol,
+                "lower_bound": lower_bound,
+                "upper_bound": upper_bound,
+                "max_rows": max_rows,
+            },
+        )
+    rows = result.mappings().all()
+    return [row["time"] for row in rows]
 
 
 def _use_timescale_caggs() -> bool:
@@ -423,16 +465,17 @@ def _ohlcv_relation_for_timeframe(timeframe: str) -> str:
     return mapping[tf]
 
 
-def _check_broker_htf_exists(conn: psycopg.Connection) -> List[str]:
+async def _check_broker_htf_exists(db) -> List[str]:
     """Check which broker-provided HTF timeframes have data.
     
     Returns list of available HTF timeframes (D1, W1, MN1).
     Empty list if no broker data exists yet.
     """
-    with conn.cursor() as cur:
-        # NOTE: Postgres requires ORDER BY expressions to appear in the select list
-        # when using DISTINCT. Using GROUP BY avoids that restriction.
-        cur.execute("""
+    # NOTE: Postgres requires ORDER BY expressions to appear in the select list
+    # when using DISTINCT. Using GROUP BY avoids that restriction.
+    result = await db.execute(
+        text(
+            """
             SELECT timeframe
             FROM candlesticks
             WHERE timeframe IN ('D1', 'W1', 'MN1')
@@ -444,12 +487,15 @@ def _check_broker_htf_exists(conn: psycopg.Connection) -> List[str]:
                     WHEN 'MN1' THEN 3
                     ELSE 999
                 END
-        """)
-        return [row[0] for row in cur.fetchall()]
+            """
+        )
+    )
+    rows = result.mappings().all()
+    return [row["timeframe"] for row in rows]
 
 
-def fetch_recent_candlesticks(
-    conn: psycopg.Connection,
+async def fetch_recent_candlesticks(
+    db,
     symbol: str,
     timeframe: str,
     limit: int = 1000,
@@ -461,66 +507,90 @@ def fetch_recent_candlesticks(
     This prevents indicator calculation on partial/unmaterialized candles.
     """
     relation = _ohlcv_relation_for_timeframe(timeframe)
-    with conn.cursor(row_factory=dict_row) as cur:
-        if relation == "candlesticks":
-            if at_or_before is None:
-                cur.execute("""
-                    SELECT 
+    if relation == "candlesticks":
+        if at_or_before is None:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT
                         time as datetime,
                         open, high, low, close, volume
                     FROM candlesticks
-                    WHERE symbol = %s AND timeframe = %s
+                    WHERE symbol = :symbol AND timeframe = :timeframe
                     ORDER BY time DESC
-                    LIMIT %s
-                """, (symbol, timeframe, limit))
-            else:
-                cur.execute("""
-                    SELECT 
-                        time as datetime,
-                        open, high, low, close, volume
-                    FROM candlesticks
-                    WHERE symbol = %s
-                      AND timeframe = %s
-                      AND time <= %s
-                    ORDER BY time DESC
-                    LIMIT %s
-                """, (symbol, timeframe, at_or_before, limit))
+                    LIMIT :limit
+                    """
+                ),
+                {"symbol": symbol, "timeframe": timeframe, "limit": limit},
+            )
         else:
-            # CAGG query: exclude incomplete current bucket using end_offset
-            # This matches the policy settings in continuous_aggregates.sql
-            end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
-            if at_or_before is None:
-                cur.execute(f"""
+            result = await db.execute(
+                text(
+                    """
+                    SELECT
+                        time as datetime,
+                        open, high, low, close, volume
+                    FROM candlesticks
+                    WHERE symbol = :symbol
+                      AND timeframe = :timeframe
+                      AND time <= :at_or_before
+                    ORDER BY time DESC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "at_or_before": at_or_before,
+                    "limit": limit,
+                },
+            )
+    else:
+        # CAGG query: exclude incomplete current bucket using end_offset
+        # This matches the policy settings in continuous_aggregates.sql
+        end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
+        if at_or_before is None:
+            result = await db.execute(
+                text(
+                    f"""
                     SELECT
                         time as datetime,
                         open, high, low, close, volume
                     FROM {relation}
-                    WHERE symbol = %s
+                    WHERE symbol = :symbol
                       AND time <= NOW() - INTERVAL '{end_offset_seconds} seconds'
                     ORDER BY time DESC
-                    LIMIT %s
-                """, (symbol, limit))
-            else:
-                cur.execute(f"""
+                    LIMIT :limit
+                    """
+                ),
+                {"symbol": symbol, "limit": limit},
+            )
+        else:
+            result = await db.execute(
+                text(
+                    f"""
                     SELECT
                         time as datetime,
                         open, high, low, close, volume
                     FROM {relation}
-                    WHERE symbol = %s
-                      AND time <= LEAST(%s, NOW() - INTERVAL '{end_offset_seconds} seconds')
+                    WHERE symbol = :symbol
+                      AND time <= LEAST(:at_or_before, NOW() - INTERVAL '{end_offset_seconds} seconds')
                     ORDER BY time DESC
-                    LIMIT %s
-                """, (symbol, at_or_before, limit))
-        
-        rows = cur.fetchall()
-    
+                    LIMIT :limit
+                    """
+                ),
+                {"symbol": symbol, "at_or_before": at_or_before, "limit": limit},
+            )
+
+    rows = result.mappings().all()
+
     if not rows:
         return pd.DataFrame()
     
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(list(rows))
     df = df.sort_values('datetime').reset_index(drop=True)
 
-    # Normalize DB numeric types (psycopg may return Decimal for NUMERIC aggregates).
+    # Normalize DB numeric types (the driver may return Decimal for NUMERIC aggregates).
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -528,7 +598,7 @@ def fetch_recent_candlesticks(
     return df
 
 
-def _discover_symbols(conn: psycopg.Connection) -> List[str]:
+async def _discover_symbols(db) -> List[str]:
     # Prefer shared Redis-backed symbol cache if available.
     try:
         import redis
@@ -547,12 +617,12 @@ def _discover_symbols(conn: psycopg.Connection) -> List[str]:
     except Exception:
         pass
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT symbol FROM candlesticks ORDER BY symbol")
-        return [row[0] for row in cur.fetchall()]
+    result = await db.execute(text("SELECT DISTINCT symbol FROM candlesticks ORDER BY symbol"))
+    rows = result.mappings().all()
+    return [row["symbol"] for row in rows]
 
 
-def _discover_timeframes(conn: psycopg.Connection, include_m1: bool = False) -> List[str]:
+async def _discover_timeframes(db, include_m1: bool = False) -> List[str]:
     """Discover available timeframes, checking for broker-provided HTF existence.
     
     CRITICAL: Only includes D1/W1/MN1 if broker data actually exists.
@@ -568,7 +638,7 @@ def _discover_timeframes(conn: psycopg.Connection, include_m1: bool = False) -> 
         tfs = ["M5", "M15", "M30", "H1", "H4"]
         
         # Check if broker-provided HTF data exists before including
-        broker_tfs = _check_broker_htf_exists(conn)
+        broker_tfs = await _check_broker_htf_exists(db)
         if broker_tfs:
             print(f"✅ Broker HTF found: {broker_tfs}")
             tfs.extend(broker_tfs)
@@ -580,97 +650,102 @@ def _discover_timeframes(conn: psycopg.Connection, include_m1: bool = False) -> 
             tfs.insert(0, "M1")
         return tfs
 
-    with conn.cursor() as cur:
-        if include_m1:
-            cur.execute("SELECT DISTINCT timeframe FROM candlesticks ORDER BY timeframe")
-        else:
-            cur.execute("SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe != 'M1' ORDER BY timeframe")
-        return [row[0] for row in cur.fetchall()]
+    if include_m1:
+        result = await db.execute(text("SELECT DISTINCT timeframe FROM candlesticks ORDER BY timeframe"))
+    else:
+        result = await db.execute(text("SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe != 'M1' ORDER BY timeframe"))
+    rows = result.mappings().all()
+    return [row["timeframe"] for row in rows]
 
 
-def _get_latest_candle_time(conn: psycopg.Connection, *, symbol: str, timeframe: str):
+async def _get_latest_candle_time(db, *, symbol: str, timeframe: str):
     relation = _ohlcv_relation_for_timeframe(timeframe)
-    with conn.cursor() as cur:
-        if relation == "candlesticks":
-            cur.execute(
-                "SELECT MAX(time) FROM candlesticks WHERE symbol = %s AND timeframe = %s",
-                (symbol, timeframe),
-            )
-        else:
-            # CAGG: exclude incomplete bucket
-            end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
-            cur.execute(
-                f"SELECT MAX(time) FROM {relation} WHERE symbol = %s AND time <= NOW() - INTERVAL '{end_offset_seconds} seconds'",
-                (symbol,),
-            )
-        return cur.fetchone()[0]
+    if relation == "candlesticks":
+        result = await db.execute(
+            text("SELECT MAX(time) AS latest_time FROM candlesticks WHERE symbol = :symbol AND timeframe = :timeframe"),
+            {"symbol": symbol, "timeframe": timeframe},
+        )
+    else:
+        # CAGG: exclude incomplete bucket
+        end_offset_seconds = CAGG_END_OFFSETS.get(timeframe.upper(), 60)
+        result = await db.execute(
+            text(
+                f"SELECT MAX(time) AS latest_time FROM {relation} WHERE symbol = :symbol AND time <= NOW() - INTERVAL '{end_offset_seconds} seconds'"
+            ),
+            {"symbol": symbol},
+        )
+    row = result.mappings().first()
+    return None if not row else row["latest_time"]
 
 
-def _get_latest_indicator_time(
-    conn: psycopg.Connection,
+async def _get_latest_indicator_time(
+    db,
     *,
     symbol: str,
     timeframe: str,
     at_or_before: datetime | None = None,
 ):
-    with conn.cursor() as cur:
-        if at_or_before is None:
-            cur.execute(
-                "SELECT MAX(time) FROM technical_indicators WHERE symbol = %s AND timeframe = %s",
-                (symbol, timeframe),
-            )
-        else:
-            cur.execute(
+    if at_or_before is None:
+        result = await db.execute(
+            text("SELECT MAX(time) AS latest_time FROM technical_indicators WHERE symbol = :symbol AND timeframe = :timeframe"),
+            {"symbol": symbol, "timeframe": timeframe},
+        )
+    else:
+        result = await db.execute(
+            text(
                 """
-                SELECT MAX(time)
+                SELECT MAX(time) AS latest_time
                 FROM technical_indicators
-                WHERE symbol = %s AND timeframe = %s AND time <= %s
-                """,
-                (symbol, timeframe, at_or_before),
-            )
-        return cur.fetchone()[0]
+                WHERE symbol = :symbol AND timeframe = :timeframe AND time <= :at_or_before
+                """
+            ),
+            {"symbol": symbol, "timeframe": timeframe, "at_or_before": at_or_before},
+        )
+    row = result.mappings().first()
+    return None if not row else row["latest_time"]
 
 
-def _indicator_row_has_values(
-        conn: psycopg.Connection,
-        *,
-        symbol: str,
-        timeframe: str,
-        at_time: datetime,
+async def _indicator_row_has_values(
+    db,
+    *,
+    symbol: str,
+    timeframe: str,
+    at_time: datetime,
 ) -> bool:
-        """Return True if the indicator row at `at_time` has any populated values.
+    """Return True if the indicator row at `at_time` has any populated values.
 
-        We have seen placeholder rows where only (symbol,timeframe,time) existed
-        but all indicator columns were NULL. Those must be treated as missing.
-        """
-        with conn.cursor() as cur:
-                cur.execute(
-                        """
-                        SELECT 1
-                        FROM technical_indicators
-                        WHERE symbol = %s
-                            AND timeframe = %s
-                            AND time = %s
-                            AND (
-                                ema_9 IS NOT NULL
-                                OR ema_21 IS NOT NULL
-                                OR ema_50 IS NOT NULL
-                                OR ema_100 IS NOT NULL
-                                OR ema_200 IS NOT NULL
-                                OR rsi IS NOT NULL
-                                OR macd_main IS NOT NULL
-                                OR atr IS NOT NULL
-                                OR adx IS NOT NULL
-                            )
-                        LIMIT 1
-                        """,
-                        (symbol, timeframe, at_time),
+    We have seen placeholder rows where only (symbol,timeframe,time) existed
+    but all indicator columns were NULL. Those must be treated as missing.
+    """
+    result = await db.execute(
+        text(
+            """
+            SELECT 1
+            FROM technical_indicators
+            WHERE symbol = :symbol
+                AND timeframe = :timeframe
+                AND time = :at_time
+                AND (
+                    ema_9 IS NOT NULL
+                    OR ema_21 IS NOT NULL
+                    OR ema_50 IS NOT NULL
+                    OR ema_100 IS NOT NULL
+                    OR ema_200 IS NOT NULL
+                    OR rsi IS NOT NULL
+                    OR macd_main IS NOT NULL
+                    OR atr IS NOT NULL
+                    OR adx IS NOT NULL
                 )
-                return cur.fetchone() is not None
+            LIMIT 1
+            """
+        ),
+        {"symbol": symbol, "timeframe": timeframe, "at_time": at_time},
+    )
+    return result.mappings().first() is not None
 
 
-def store_latest_indicators(
-    conn: psycopg.Connection,
+async def store_latest_indicators(
+    db,
     *,
     symbol: str,
     timeframe: str,
@@ -680,8 +755,8 @@ def store_latest_indicators(
 ) -> int:
     """Upsert the latest computed indicator snapshot for a symbol/timeframe."""
     emas = (indicators or {}).get("emas") or {}
-    with conn.cursor() as cur:
-        cur.execute(
+    result = await db.execute(
+        text(
             """
             INSERT INTO technical_indicators (
                 symbol, timeframe, time,
@@ -692,12 +767,12 @@ def store_latest_indicators(
                 adx, dmp, dmn, obv_slope
             )
             VALUES (
-                %s, %s, %s,
-                %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s,
-                %s, %s,
-                %s, %s, %s, %s
+                :symbol, :timeframe, :at_time,
+                :ema_9, :ema_21, :ema_50, :ema_100, :ema_200, :ema_momentum_slope,
+                :rsi, :macd_main, :macd_signal, :macd_histogram, :roc_percent,
+                :atr, :atr_percentile, :bb_upper, :bb_middle, :bb_lower,
+                :bb_squeeze_ratio, :bb_width_percentile,
+                :adx, :dmp, :dmn, :obv_slope
             )
             ON CONFLICT (symbol, timeframe, time)
             DO UPDATE SET
@@ -724,38 +799,39 @@ def store_latest_indicators(
                 dmn = EXCLUDED.dmn,
                 obv_slope = EXCLUDED.obv_slope,
                 updated_at = NOW()
-            """,
-            (
-                symbol,
-                timeframe,
-                at_time,
-                emas.get("EMA_9"),
-                emas.get("EMA_21"),
-                emas.get("EMA_50"),
-                emas.get("EMA_100"),
-                emas.get("EMA_200"),
-                (indicators or {}).get("ema_momentum_slope"),
-                (indicators or {}).get("rsi"),
-                (indicators or {}).get("macd_main"),
-                (indicators or {}).get("macd_signal"),
-                (indicators or {}).get("macd_histogram"),
-                (indicators or {}).get("roc_percent"),
-                (indicators or {}).get("atr"),
-                (indicators or {}).get("atr_percentile"),
-                (indicators or {}).get("bb_upper"),
-                (indicators or {}).get("bb_middle"),
-                (indicators or {}).get("bb_lower"),
-                (indicators or {}).get("bb_squeeze_ratio"),
-                (indicators or {}).get("bb_width_percentile"),
-                (indicators or {}).get("adx"),
-                (indicators or {}).get("dmp"),
-                (indicators or {}).get("dmn"),
-                (indicators or {}).get("obv_slope"),
-            ),
-        )
-        inserted = cur.rowcount
+            """
+        ),
+        {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "at_time": at_time,
+            "ema_9": emas.get("EMA_9"),
+            "ema_21": emas.get("EMA_21"),
+            "ema_50": emas.get("EMA_50"),
+            "ema_100": emas.get("EMA_100"),
+            "ema_200": emas.get("EMA_200"),
+            "ema_momentum_slope": (indicators or {}).get("ema_momentum_slope"),
+            "rsi": (indicators or {}).get("rsi"),
+            "macd_main": (indicators or {}).get("macd_main"),
+            "macd_signal": (indicators or {}).get("macd_signal"),
+            "macd_histogram": (indicators or {}).get("macd_histogram"),
+            "roc_percent": (indicators or {}).get("roc_percent"),
+            "atr": (indicators or {}).get("atr"),
+            "atr_percentile": (indicators or {}).get("atr_percentile"),
+            "bb_upper": (indicators or {}).get("bb_upper"),
+            "bb_middle": (indicators or {}).get("bb_middle"),
+            "bb_lower": (indicators or {}).get("bb_lower"),
+            "bb_squeeze_ratio": (indicators or {}).get("bb_squeeze_ratio"),
+            "bb_width_percentile": (indicators or {}).get("bb_width_percentile"),
+            "adx": (indicators or {}).get("adx"),
+            "dmp": (indicators or {}).get("dmp"),
+            "dmn": (indicators or {}).get("dmn"),
+            "obv_slope": (indicators or {}).get("obv_slope"),
+        },
+    )
+    inserted = result.rowcount
     if commit:
-        conn.commit()
+        await db.commit()
     return inserted
 
 
@@ -801,8 +877,8 @@ def _calculate_snapshot_at_time(
     )
 
 
-def calculate_and_store_indicators(
-    conn: psycopg.Connection,
+async def calculate_and_store_indicators(
+    db,
     symbol: str,
     timeframe: str,
     *,
@@ -824,38 +900,38 @@ def calculate_and_store_indicators(
         fallback=60,
     )
 
-    latest_candle_time = _get_latest_candle_time(conn, symbol=symbol, timeframe=timeframe)
-    if latest_candle_time is None:
-        if verbose:
-            print("   ⚠️  No candles found")
-        return {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "status": "skipped_no_data",
-            "bars_processed": 0,
-            "bars_stored": 0,
-            "success": False,
-        }
-
     try:
-        with conn.transaction():
-            _acquire_watermark_pair_lock(conn, symbol=symbol, timeframe=timeframe)
+        async with db.begin():
+            latest_candle_time = await _get_latest_candle_time(db, symbol=symbol, timeframe=timeframe)
+            if latest_candle_time is None:
+                if verbose:
+                    print("   ⚠️  No candles found")
+                return {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "status": "skipped_no_data",
+                    "bars_processed": 0,
+                    "bars_stored": 0,
+                    "success": False,
+                }
 
-            watermark_time, watermark_updated_at = _get_watermark_for_update(
-                conn,
+            await _acquire_watermark_pair_lock(db, symbol=symbol, timeframe=timeframe)
+
+            watermark_time, watermark_updated_at = await _get_watermark_for_update(
+                db,
                 symbol=symbol,
                 timeframe=timeframe,
             )
 
             if watermark_time is None:
-                seeded_indicator_time = _get_latest_indicator_time(
-                    conn,
+                seeded_indicator_time = await _get_latest_indicator_time(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     at_or_before=latest_candle_time,
                 )
-                if seeded_indicator_time and _indicator_row_has_values(
-                    conn,
+                if seeded_indicator_time and await _indicator_row_has_values(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     at_time=seeded_indicator_time,
@@ -867,8 +943,8 @@ def calculate_and_store_indicators(
 
             if watermark_time is None:
                 lower_bound = latest_candle_time - (timeframe_step * max_new_bars_per_cycle)
-                candidate_times = _fetch_candle_times_since(
-                    conn,
+                candidate_times = await _fetch_candle_times_since(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     lower_bound=lower_bound,
@@ -876,8 +952,8 @@ def calculate_and_store_indicators(
                     max_rows=max_new_bars_per_cycle,
                 )
             else:
-                new_candle_times = _fetch_candle_times_since(
-                    conn,
+                new_candle_times = await _fetch_candle_times_since(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     lower_bound=watermark_time,
@@ -894,8 +970,8 @@ def calculate_and_store_indicators(
 
                     if should_force_overlap:
                         overlap_lower_bound = watermark_time - (timeframe_step * safety_backfill_bars)
-                        candidate_times = _fetch_candle_times_since(
-                            conn,
+                        candidate_times = await _fetch_candle_times_since(
+                            db,
                             symbol=symbol,
                             timeframe=timeframe,
                             lower_bound=overlap_lower_bound,
@@ -909,8 +985,8 @@ def calculate_and_store_indicators(
                             )
                 else:
                     overlap_lower_bound = watermark_time - (timeframe_step * safety_backfill_bars)
-                    candidate_times = _fetch_candle_times_since(
-                        conn,
+                    candidate_times = await _fetch_candle_times_since(
+                        db,
                         symbol=symbol,
                         timeframe=timeframe,
                         lower_bound=overlap_lower_bound,
@@ -930,8 +1006,8 @@ def calculate_and_store_indicators(
                     lookback_bars + max_new_bars_per_cycle + safety_backfill_bars + 32,
                     lookback_bars + 32,
                 )
-                backlog_history_df = _fetch_candlesticks_window(
-                    conn,
+                backlog_history_df = await _fetch_candlesticks_window(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     lower_bound=backlog_window_start,
@@ -944,8 +1020,8 @@ def calculate_and_store_indicators(
                 lookback_bars + 32,
             )
             realtime_history_df = _normalize_ohlcv_frame(
-                fetch_recent_candlesticks(
-                    conn,
+                await fetch_recent_candlesticks(
+                    db,
                     symbol,
                     timeframe,
                     limit=realtime_window_limit,
@@ -953,8 +1029,8 @@ def calculate_and_store_indicators(
                 )
             )
 
-            forming_df, forming_time = _build_intraday_forming_candle(
-                conn,
+            forming_df, forming_time = await _build_intraday_forming_candle(
+                db,
                 symbol=symbol,
                 timeframe=timeframe,
                 latest_finalized_time=latest_candle_time,
@@ -995,8 +1071,8 @@ def calculate_and_store_indicators(
                     continue
 
                 processed_count += 1
-                inserted = store_latest_indicators(
-                    conn,
+                inserted = await store_latest_indicators(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     at_time=candle_time,
@@ -1035,8 +1111,8 @@ def calculate_and_store_indicators(
                     continue
 
                 processed_count += 1
-                inserted = store_latest_indicators(
-                    conn,
+                inserted = await store_latest_indicators(
+                    db,
                     symbol=symbol,
                     timeframe=timeframe,
                     at_time=realtime_time,
@@ -1081,8 +1157,8 @@ def calculate_and_store_indicators(
                     "success": False,
                 }
 
-            _upsert_watermark(
-                conn,
+            await _upsert_watermark(
+                db,
                 symbol=symbol,
                 timeframe=timeframe,
                 watermark_time=last_success_time,
@@ -1122,7 +1198,7 @@ def calculate_and_store_indicators(
         }
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Calculate indicators for recent data")
     parser.add_argument("--symbol", help="Single symbol (e.g., XAUUSD)")
     parser.add_argument("--timeframe", help="Single timeframe (e.g., H1)")
@@ -1196,166 +1272,166 @@ def main():
     if not args.verbose:
         # Keep stdout clean in batch runs; the indicator engine logs warnings for short histories.
         logging.getLogger("app.indicators.technical").setLevel(logging.ERROR)
-    
-    print("="*70)
+
+    print("=" * 70)
     print("📈 Post-Backfill Indicator Calculation (v2.0 - DST-Safe)")
-    print("="*70)
+    print("=" * 70)
     print(
         f"Incremental mode: backfill_bars={_safe_positive_int(args.safety_backfill_bars, fallback=2)} "
         f"max_new_per_cycle={_safe_positive_int(args.max_new_bars_per_cycle, fallback=8)} "
         f"lookback_bars={_safe_positive_int(args.lookback_bars, fallback=300)} "
         f"force_overlap_recompute_minutes={_safe_non_negative_int(args.force_overlap_recompute_minutes, fallback=60)}"
     )
-    print("="*70)
-    
-    try:
-        conn = psycopg.connect(DATABASE_URL)
-    except Exception as e:
-        print(f"❌ Database connection failed: {e}")
-        return 1
-    
+    print("=" * 70)
+
     def _parse_csv(value: str) -> List[str]:
         return [s.strip().upper() for s in (value or "").split(",") if s.strip()]
 
     try:
-        _ensure_indicator_watermarks_table(conn)
-        conn.commit()
+        async with AsyncSessionLocal() as db:
+            try:
+                await db.execute(text("SELECT 1"))
+                await db.commit()
+            except Exception as e:
+                print(f"❌ Database connection failed: {e}")
+                return 1
 
-        # Pre-flight check mode
-        if args.check_htf:
-            print("\n🔍 Checking broker HTF data availability...")
-            broker_tfs = _check_broker_htf_exists(conn)
-            if broker_tfs:
-                print(f"✅ Broker HTF found: {broker_tfs}")
-                print("\nCounts per symbol:")
-                with conn.cursor() as cur:
+            await _ensure_indicator_watermarks_table(db)
+            await db.commit()
+
+            # Pre-flight check mode
+            if args.check_htf:
+                print("\n🔍 Checking broker HTF data availability...")
+                broker_tfs = await _check_broker_htf_exists(db)
+                if broker_tfs:
+                    print(f"✅ Broker HTF found: {broker_tfs}")
+                    print("\nCounts per symbol:")
                     for tf in broker_tfs:
-                        cur.execute(
-                            "SELECT symbol, COUNT(*) FROM candlesticks WHERE timeframe = %s GROUP BY symbol ORDER BY symbol",
-                            (tf,)
+                        result = await db.execute(
+                            text(
+                                "SELECT symbol, COUNT(*) AS candle_count FROM candlesticks WHERE timeframe = :timeframe GROUP BY symbol ORDER BY symbol"
+                            ),
+                            {"timeframe": tf},
                         )
                         print(f"\n  {tf}:")
-                        for symbol, count in cur.fetchall():
-                            print(f"    {symbol}: {count:,} candles")
-                return 0
+                        for row in result.mappings().all():
+                            print(f"    {row['symbol']}: {int(row['candle_count']):,} candles")
+                    return 0
+                else:
+                    print("❌ No broker HTF data (D1/W1/MN1) found")
+                    print("\n⚠️  REQUIRED: Connect MT5 EA to backfill D1/W1/MN1 before running indicators")
+                    print("   See: docs/DST_FIX_MIGRATION.md")
+                    return 1
+
+            # Normal indicator calculation mode
+            if args.symbol and args.timeframe:
+                symbols = [args.symbol.upper()]
+                timeframes = [args.timeframe.upper()]
             else:
-                print("❌ No broker HTF data (D1/W1/MN1) found")
-                print("\n⚠️  REQUIRED: Connect MT5 EA to backfill D1/W1/MN1 before running indicators")
-                print("   See: docs/DST_FIX_MIGRATION.md")
-                return 1
-        
-        # Normal indicator calculation mode
-        if args.symbol and args.timeframe:
-            symbols = [args.symbol.upper()]
-            timeframes = [args.timeframe.upper()]
-        else:
-            if args.symbols:
-                symbols = _parse_csv(args.symbols)
-            else:
-                symbols = _discover_symbols(conn)
-                if not symbols:
-                    symbols = FALLBACK_SYMBOLS
-                    print(f"⚠️  Using fallback symbols: {symbols}")
+                if args.symbols:
+                    symbols = _parse_csv(args.symbols)
+                else:
+                    symbols = await _discover_symbols(db)
+                    if not symbols:
+                        symbols = FALLBACK_SYMBOLS
+                        print(f"⚠️  Using fallback symbols: {symbols}")
 
-            if args.timeframes:
-                timeframes = _parse_csv(args.timeframes)
-            else:
-                timeframes = _discover_timeframes(conn, include_m1=args.include_m1)
-                if not timeframes:
-                    timeframes = FALLBACK_TIMEFRAMES
-                    print(f"⚠️  Using fallback timeframes: {timeframes}")
-        
-        print(f"\n📋 Processing:")
-        print(f"   Symbols: {', '.join(symbols)}")
-        print(f"   Timeframes: {', '.join(timeframes)}")
+                if args.timeframes:
+                    timeframes = _parse_csv(args.timeframes)
+                else:
+                    timeframes = await _discover_timeframes(db, include_m1=args.include_m1)
+                    if not timeframes:
+                        timeframes = FALLBACK_TIMEFRAMES
+                        print(f"⚠️  Using fallback timeframes: {timeframes}")
 
-        # Ensure discovery SELECTs do not keep an outer transaction open.
-        # Per-pair writes rely on top-level transaction scopes inside calculate_and_store_indicators.
-        conn.commit()
+            print(f"\n📋 Processing:")
+            print(f"   Symbols: {', '.join(symbols)}")
+            print(f"   Timeframes: {', '.join(timeframes)}")
 
-        pairs = [(s, tf) for s in symbols for tf in timeframes]
-        max_pairs = _safe_non_negative_int(args.max_symbol_timeframes_per_run, fallback=0)
-        if max_pairs > 0 and len(pairs) > max_pairs:
-            rotation_seed = int(datetime.now(timezone.utc).timestamp() // 300)
-            start_idx = rotation_seed % len(pairs)
-            rotated_pairs = pairs[start_idx:] + pairs[:start_idx]
-            pairs = rotated_pairs[:max_pairs]
-            print(
-                f"⚙️  Guardrail active: limiting run to {len(pairs)} pair(s) "
-                f"from total {len(symbols) * len(timeframes)}"
-            )
+            # Ensure discovery SELECTs do not keep an outer transaction open.
+            # Per-pair writes rely on top-level transaction scopes inside calculate_and_store_indicators.
+            await db.commit()
 
-        runtime_budget_seconds = _safe_non_negative_int(args.max_runtime_seconds, fallback=0)
-        run_started = time.monotonic()
-        deferred_pairs = 0
-        
-        results = []
-        for idx, (symbol, timeframe) in enumerate(pairs, start=1):
-            if runtime_budget_seconds > 0 and idx > 1:
-                elapsed = time.monotonic() - run_started
-                if elapsed >= runtime_budget_seconds:
-                    deferred_pairs = len(pairs) - idx + 1
-                    print(
-                        f"⏱️  Runtime budget reached ({elapsed:.1f}s >= {runtime_budget_seconds}s); "
-                        f"deferring {deferred_pairs} pair(s) to next run"
-                    )
-                    break
+            pairs = [(s, tf) for s in symbols for tf in timeframes]
+            max_pairs = _safe_non_negative_int(args.max_symbol_timeframes_per_run, fallback=0)
+            if max_pairs > 0 and len(pairs) > max_pairs:
+                rotation_seed = int(datetime.now(timezone.utc).timestamp() // 300)
+                start_idx = rotation_seed % len(pairs)
+                rotated_pairs = pairs[start_idx:] + pairs[:start_idx]
+                pairs = rotated_pairs[:max_pairs]
+                print(
+                    f"⚙️  Guardrail active: limiting run to {len(pairs)} pair(s) "
+                    f"from total {len(symbols) * len(timeframes)}"
+                )
 
-            result = calculate_and_store_indicators(
-                conn,
-                symbol,
-                timeframe,
-                verbose=args.verbose,
-                safety_backfill_bars=args.safety_backfill_bars,
-                max_new_bars_per_cycle=args.max_new_bars_per_cycle,
-                lookback_bars=args.lookback_bars,
-                force_overlap_recompute_minutes=args.force_overlap_recompute_minutes,
-            )
-            results.append(result)
-            if result.get("success"):
-                conn.commit()
-        
-        # Summary
-        print("\n" + "="*70)
-        print("SUMMARY")
-        print("="*70)
-        
-        stored = [r for r in results if r.get("status") == "stored"]
-        stored_realtime_only = [r for r in results if r.get("status") == "stored_realtime_only"]
-        up_to_date = [r for r in results if r.get("status") == "up_to_date"]
-        skipped_insufficient = [r for r in results if r.get("status") == "skipped_insufficient_data"]
-        skipped_no_data = [r for r in results if r.get("status") == "skipped_no_data"]
-        errors = [r for r in results if r.get("status") == "error"]
+            runtime_budget_seconds = _safe_non_negative_int(args.max_runtime_seconds, fallback=0)
+            run_started = time.monotonic()
+            deferred_pairs = 0
 
-        print(f"✅ Stored: {len(stored)}")
-        if stored_realtime_only:
-            print(f"🧩 Stored (realtime-only): {len(stored_realtime_only)}")
-        print(f"⏭️  Up-to-date: {len(up_to_date)}")
-        if deferred_pairs:
-            print(f"⏸️  Deferred pairs: {deferred_pairs}")
-        if skipped_insufficient:
-            tfs = sorted({r['timeframe'] for r in skipped_insufficient})
-            print(f"⚠️  Skipped (insufficient history): {len(skipped_insufficient)} (tfs={tfs})")
-        if skipped_no_data:
-            tfs = sorted({r['timeframe'] for r in skipped_no_data})
-            print(f"⚠️  Skipped (no data): {len(skipped_no_data)} (tfs={tfs})")
-        if errors:
-            print(f"❌ Errors: {len(errors)}")
-            preview_count = 5
-            for r in errors[:preview_count]:
-                print(f"   - {r['symbol']} @ {r['timeframe']}")
-            if len(errors) > preview_count:
-                print(f"   - ... and {len(errors) - preview_count} more")
+            results = []
+            for idx, (symbol, timeframe) in enumerate(pairs, start=1):
+                if runtime_budget_seconds > 0 and idx > 1:
+                    elapsed = time.monotonic() - run_started
+                    if elapsed >= runtime_budget_seconds:
+                        deferred_pairs = len(pairs) - idx + 1
+                        print(
+                            f"⏱️  Runtime budget reached ({elapsed:.1f}s >= {runtime_budget_seconds}s); "
+                            f"deferring {deferred_pairs} pair(s) to next run"
+                        )
+                        break
 
-        total_bars = sum(r.get("bars_stored", 0) for r in results if r.get("success"))
-        print(f"📊 Total indicator rows stored: {total_bars:,}")
-        print("="*70)
+                result = await calculate_and_store_indicators(
+                    db,
+                    symbol,
+                    timeframe,
+                    verbose=args.verbose,
+                    safety_backfill_bars=args.safety_backfill_bars,
+                    max_new_bars_per_cycle=args.max_new_bars_per_cycle,
+                    lookback_bars=args.lookback_bars,
+                    force_overlap_recompute_minutes=args.force_overlap_recompute_minutes,
+                )
+                results.append(result)
 
-        return 0 if not errors else 1
-        
+            # Summary
+            print("\n" + "=" * 70)
+            print("SUMMARY")
+            print("=" * 70)
+
+            stored = [r for r in results if r.get("status") == "stored"]
+            stored_realtime_only = [r for r in results if r.get("status") == "stored_realtime_only"]
+            up_to_date = [r for r in results if r.get("status") == "up_to_date"]
+            skipped_insufficient = [r for r in results if r.get("status") == "skipped_insufficient_data"]
+            skipped_no_data = [r for r in results if r.get("status") == "skipped_no_data"]
+            errors = [r for r in results if r.get("status") == "error"]
+
+            print(f"✅ Stored: {len(stored)}")
+            if stored_realtime_only:
+                print(f"🧩 Stored (realtime-only): {len(stored_realtime_only)}")
+            print(f"⏭️  Up-to-date: {len(up_to_date)}")
+            if deferred_pairs:
+                print(f"⏸️  Deferred pairs: {deferred_pairs}")
+            if skipped_insufficient:
+                tfs = sorted({r['timeframe'] for r in skipped_insufficient})
+                print(f"⚠️  Skipped (insufficient history): {len(skipped_insufficient)} (tfs={tfs})")
+            if skipped_no_data:
+                tfs = sorted({r['timeframe'] for r in skipped_no_data})
+                print(f"⚠️  Skipped (no data): {len(skipped_no_data)} (tfs={tfs})")
+            if errors:
+                print(f"❌ Errors: {len(errors)}")
+                preview_count = 5
+                for r in errors[:preview_count]:
+                    print(f"   - {r['symbol']} @ {r['timeframe']}")
+                if len(errors) > preview_count:
+                    print(f"   - ... and {len(errors) - preview_count} more")
+
+            total_bars = sum(r.get("bars_stored", 0) for r in results if r.get("success"))
+            print(f"📊 Total indicator rows stored: {total_bars:,}")
+            print("=" * 70)
+
+            return 0 if not errors else 1
     finally:
-        conn.close()
+        await async_engine.dispose()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

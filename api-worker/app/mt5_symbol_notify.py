@@ -48,6 +48,12 @@ class _NotifyThread:
 
     def _run(self) -> None:
         try:
+            # NOTE: psycopg.connect here is INTENTIONAL and correct.
+            # PostgreSQL LISTEN/NOTIFY requires a persistent, autocommit connection whose
+            # .notifies() iterator blocks the thread indefinitely.
+            # SQLAlchemy AsyncSession does not expose LISTEN/NOTIFY primitives.
+            # This call runs inside a daemon thread (_NotifyThread), NOT the event loop.
+            # Do NOT migrate this to AsyncSession.
             with psycopg.connect(POSTGRES_DSN, autocommit=True) as conn:
                 try:
                     with conn.cursor() as cur:

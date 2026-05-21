@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.observability.debug import debug_log
 from app.authn.deps import require_session
-from app.db import get_supabase_client, async_db
+from app.db import get_supabase_client, supabase_db
 from app.payments.payment_providers.router import get_provider
 from app.payments.constants import PaymentTransactionStatus
 from app.redis_cache import CACHE_REDIS, safe_unlock
@@ -111,7 +111,7 @@ async def create_checkout(
 
     # Validate Plan against DB
     supabase = get_supabase_client()
-    plan_response = await async_db(lambda: supabase.table("subscription_plans").select("*").eq("name", req.plan_id).eq("is_active", True).execute())
+    plan_response = await supabase_db(lambda: supabase.table("subscription_plans").select("*").eq("name", req.plan_id).eq("is_active", True).execute())
     
     if not plan_response.data:
         raise HTTPException(status_code=404, detail="Active subscription plan not found")
@@ -138,7 +138,7 @@ async def create_checkout(
     renewal_cycle_marker: Optional[str] = None
     if req.provider == "plisio":
         renewal_candidate = (
-            (await async_db(lambda: supabase.table("user_subscriptions")
+            (await supabase_db(lambda: supabase.table("user_subscriptions")
             .select("id, expires_at, status, payment_provider")
             .eq("user_id", user_id)
             .eq("payment_provider", "plisio")
@@ -156,7 +156,7 @@ async def create_checkout(
 
     if req.provider == "plisio":
         latest_same_cycle_rows = (
-            (await async_db(lambda: supabase.table("payment_transactions")
+            (await supabase_db(lambda: supabase.table("payment_transactions")
             .select("id, provider_payment_id, status, metadata, created_at")
             .eq("user_id", user_id)
             .eq("provider", "plisio")
@@ -199,7 +199,7 @@ async def create_checkout(
                 )
 
         existing_same_cycle = (
-            (await async_db(lambda: supabase.table("payment_transactions")
+            (await supabase_db(lambda: supabase.table("payment_transactions")
             .select("id, provider_payment_id, amount, currency, status, created_at, last_provider_event_time, metadata")
             .eq("user_id", user_id)
             .eq("provider", "plisio")
@@ -271,7 +271,7 @@ async def create_checkout(
     if req.provider == "razorpay":
         now_iso = datetime.now(timezone.utc).isoformat()
         active_subscription_rows = (
-            (await async_db(lambda: supabase.table("user_subscriptions")
+            (await supabase_db(lambda: supabase.table("user_subscriptions")
             .select("id, cancel_at_period_end, expires_at")
             .eq("user_id", user_id)
             .eq("status", "active")
@@ -320,7 +320,7 @@ async def create_checkout(
 
         # Supersede unresolved attempts across all providers so users can switch provider safely.
         now_iso = datetime.now(timezone.utc).isoformat()
-        existing_attempts = await async_db(lambda: (
+        existing_attempts = await supabase_db(lambda: (
             supabase.table("payment_transactions")
             .select("id, provider, provider_payment_id, status, amount, currency, metadata, created_at, last_provider_event_time")
             .eq("user_id", user_id)
@@ -380,7 +380,7 @@ async def create_checkout(
                         cancel_exc,
                     )
 
-            await async_db(lambda prev=previous, ts=now_iso: (
+            await supabase_db(lambda prev=previous, ts=now_iso: (
                 supabase.table("payment_transactions")
                 .update(
                     {
@@ -446,13 +446,13 @@ async def create_checkout(
         
         try:
             if provider_payment_id:
-                tx_insert_res = await async_db(
+                tx_insert_res = await supabase_db(
                     lambda: supabase.table("payment_transactions")
                     .upsert(tx_data, on_conflict="provider,provider_payment_id")
                     .execute()
                 )
             else:
-                tx_insert_res = await async_db(
+                tx_insert_res = await supabase_db(
                     lambda: supabase.table("payment_transactions").insert(tx_data).execute()
                 )
         except Exception as insert_exc:
@@ -465,7 +465,7 @@ async def create_checkout(
                 req.provider,
             )
             retry_now = datetime.now(timezone.utc).isoformat()
-            await async_db(lambda: (
+            await supabase_db(lambda: (
                 supabase.table("payment_transactions")
                 .update(
                     {
@@ -481,13 +481,13 @@ async def create_checkout(
             ))
 
             if provider_payment_id:
-                tx_insert_res = await async_db(
+                tx_insert_res = await supabase_db(
                     lambda: supabase.table("payment_transactions")
                     .upsert(tx_data, on_conflict="provider,provider_payment_id")
                     .execute()
                 )
             else:
-                tx_insert_res = await async_db(
+                tx_insert_res = await supabase_db(
                     lambda: supabase.table("payment_transactions").insert(tx_data).execute()
                 )
 
@@ -533,7 +533,7 @@ async def cancel_checkout_attempt(
 
     supabase = get_supabase_client()
     try:
-        tx_query = await async_db(lambda: (
+        tx_query = await supabase_db(lambda: (
             supabase.table("payment_transactions")
             .select("id, status, provider, provider_payment_id")
             .eq("user_id", user_id)
@@ -562,7 +562,7 @@ async def cancel_checkout_attempt(
                 cancel_exc,
             )
 
-        await async_db(lambda: (
+        await supabase_db(lambda: (
             supabase.table("payment_transactions")
             .update(
                 {
@@ -597,7 +597,7 @@ async def cancel_subscription(
     
     # 1. Find active subscription that is not already flagged for cancellation
     try:
-        sub_query = await async_db(lambda: supabase.table("user_subscriptions") \
+        sub_query = await supabase_db(lambda: supabase.table("user_subscriptions") \
             .select("*") \
             .eq("user_id", user_id) \
             .eq("status", "active") \
@@ -606,7 +606,7 @@ async def cancel_subscription(
         
         if not sub_query.data:
             # Maybe it is already cancelled at period end
-            check_query = await async_db(lambda: supabase.table("user_subscriptions") \
+            check_query = await supabase_db(lambda: supabase.table("user_subscriptions") \
                 .select("*") \
                 .eq("user_id", user_id) \
                 .eq("status", "active") \
@@ -656,10 +656,10 @@ async def cancel_subscription(
             # Stop future renewals in DB regardless of provider API outcome.
             update_payload["auto_renew"] = False
 
-        await async_db(lambda: supabase.table("user_subscriptions").update(update_payload).eq("id", subscription["id"]).execute())
+        await supabase_db(lambda: supabase.table("user_subscriptions").update(update_payload).eq("id", subscription["id"]).execute())
         
         # Log the user intent
-        await async_db(lambda: supabase.table("payment_audit_logs").insert({
+        await supabase_db(lambda: supabase.table("payment_audit_logs").insert({
             "entity_type": "user_subscription",
             "entity_id": subscription["id"],
             "previous_state": "active",
@@ -695,7 +695,7 @@ async def resume_subscription(
     supabase = get_supabase_client()
     
     try:
-        sub_query = await async_db(lambda: supabase.table("user_subscriptions") \
+        sub_query = await supabase_db(lambda: supabase.table("user_subscriptions") \
             .select("*") \
             .eq("user_id", user_id) \
             .eq("status", "active") \
@@ -713,11 +713,11 @@ async def resume_subscription(
             raise HTTPException(status_code=400, detail="Subscription cancellation has already been finalized by the provider. You must wait for expiration to resubscribe.")
             
         # Revert the flag
-        await async_db(lambda: supabase.table("user_subscriptions").update({
+        await supabase_db(lambda: supabase.table("user_subscriptions").update({
             "cancel_at_period_end": False
         }).eq("id", subscription["id"]).execute())
         
-        await async_db(lambda: supabase.table("payment_audit_logs").insert({
+        await supabase_db(lambda: supabase.table("payment_audit_logs").insert({
             "entity_type": "user_subscription",
             "entity_id": subscription["id"],
             "previous_state": "cancelling_deferred",
@@ -748,7 +748,7 @@ async def payment_history(
     supabase = get_supabase_client()
     
     try:
-        query = await async_db(lambda: supabase.table("payment_transactions") \
+        query = await supabase_db(lambda: supabase.table("payment_transactions") \
             .select("id, provider_payment_id, provider_subscription_id, amount, currency, status, created_at, payment_type, metadata, provider") \
             .eq("user_id", user_id) \
             .order("created_at", desc=True) \

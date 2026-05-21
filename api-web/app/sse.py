@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.utils import json_dumps
 
 from .cache import NewsCache, StrategyCache, get_last_candle_update, PubSubManager
-from .db import get_news_count
+from .db import get_news_count, AsyncSessionLocal
 from .authn.authz import require_permission
 
 logger = logging.getLogger(__name__)
@@ -1068,7 +1068,8 @@ async def stream_news(request: Request, _ctx=Depends(_sse_auth)):
     """Stream real-time news updates."""
     logger.debug("[SSE] news stream requested")
     snapshot = await asyncio.to_thread(NewsCache.get, "all") or []
-    total = await asyncio.to_thread(get_news_count)
+    async with AsyncSessionLocal() as _news_db:
+        total = await get_news_count(_news_db)
     initial_payloads = None
     if snapshot:
         initial_payloads = [{"type": "news_snapshot", "news": snapshot, "total": total, "server_ts": _server_timestamp()}]

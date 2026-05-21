@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from app.db import async_db, get_supabase_client, get_supabase_project_host, reset_supabase_client
+from app.db import supabase_db, get_supabase_client, get_supabase_project_host, reset_supabase_client
 from app.payments.constants import PaymentTransactionStatus
 from app.payments.payment_providers.plisio_provider import PlisioProvider
 from app.payments.payment_providers.router import get_provider
@@ -227,7 +227,7 @@ def _has_pending_renewal_for_cycle(rows: list[dict], cycle_marker: str, order_nu
 
 async def _claim_ready_webhooks_batch() -> list[dict]:
     supabase = get_supabase_client()
-    claim_response = await async_db(
+    claim_response = await supabase_db(
         lambda: supabase.rpc(
             "claim_ready_webhooks",
             {
@@ -305,7 +305,7 @@ async def _run_deferred_cancellation_tick() -> int:
         supabase = get_supabase_client()
         
         # 1. Fetch active subscriptions flagged for cancellation
-        query = await async_db(lambda: supabase.table("user_subscriptions") \
+        query = await supabase_db(lambda: supabase.table("user_subscriptions") \
             .select("id, user_id, payment_provider, external_subscription_id, expires_at") \
             .eq("status", "active") \
             .eq("cancel_at_period_end", True) \
@@ -340,7 +340,7 @@ async def _run_deferred_cancellation_tick() -> int:
                     
                     if provider_name == "manual" or not external_id:
                         # Manual subscriptions are just cancelled internally
-                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
+                        await supabase_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
                         }).eq("id", sub["id"]).execute())
@@ -350,7 +350,7 @@ async def _run_deferred_cancellation_tick() -> int:
                     if provider_name == "plisio":
                         # Plisio path is invoice-based in Phase 1; skip provider-side cancellation calls.
                         logger.info("[DEFERRED CANCEL] Plisio skip provider cancel for sub %s", sub["id"])
-                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
+                        await supabase_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
                         }).eq("id", sub["id"]).execute())
@@ -364,7 +364,7 @@ async def _run_deferred_cancellation_tick() -> int:
                     if success:
                         # Update DB
                         # Note: status is still 'active', expire_subscriptions cron will flip it to 'expired'
-                        await async_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
+                        await supabase_db(lambda sub=sub, now_utc=now_utc: supabase.table("user_subscriptions").update({
                             "cancelled_at": now_utc.isoformat(),
                             "auto_renew": False
                         }).eq("id", sub["id"]).execute())
@@ -461,7 +461,7 @@ async def _run_stale_pending_attempts_tick() -> int:
         cutoff_iso = cutoff_dt.isoformat()
 
         stale_candidates = (
-            await async_db(lambda: supabase.table("payment_transactions")
+            await supabase_db(lambda: supabase.table("payment_transactions")
             .select("id, provider, provider_payment_id, status, created_at, last_provider_event_time, metadata")
             .in_(
                 "status",
@@ -563,7 +563,7 @@ async def _run_stale_pending_attempts_tick() -> int:
                 continue
 
             update_result = (
-                await async_db(lambda tx_id=tx_id, target_status=target_status, now_iso=now_iso: supabase.table("payment_transactions")
+                await supabase_db(lambda tx_id=tx_id, target_status=target_status, now_iso=now_iso: supabase.table("payment_transactions")
                 .update(
                     {
                         "status": target_status.value,
@@ -585,7 +585,7 @@ async def _run_stale_pending_attempts_tick() -> int:
             if not update_result.data:
                 continue
 
-            await async_db(lambda tx_id=tx_id, previous_status=previous_status, target_status=target_status: supabase.table("payment_audit_logs").insert(
+            await supabase_db(lambda tx_id=tx_id, previous_status=previous_status, target_status=target_status: supabase.table("payment_audit_logs").insert(
                 {
                     "transaction_id": tx_id,
                     "entity_type": "payment_transaction",
@@ -613,7 +613,7 @@ async def _run_subscription_activation_retry_tick() -> int:
     try:
         supabase = get_supabase_client()
         candidates = (
-            await async_db(lambda: supabase.table("payment_transactions")
+            await supabase_db(lambda: supabase.table("payment_transactions")
             .select("id, user_id, provider, provider_payment_id, subscription_id, metadata, updated_at")
             .eq("status", PaymentTransactionStatus.SUCCEEDED.value)
             .contains("metadata", {"activation_retry_required": True})
@@ -644,7 +644,7 @@ async def _run_subscription_activation_retry_tick() -> int:
             claimed_metadata["activation_retry_claimed_at"] = now_iso
 
             claim_result = (
-                await async_db(lambda tx_id=tx_id, claimed_metadata=claimed_metadata, now_iso=now_iso, tx_updated_at=tx_updated_at: supabase.table("payment_transactions")
+                await supabase_db(lambda tx_id=tx_id, claimed_metadata=claimed_metadata, now_iso=now_iso, tx_updated_at=tx_updated_at: supabase.table("payment_transactions")
                 .update(
                     {
                         "metadata": claimed_metadata,
@@ -670,7 +670,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                     if not subscription_id:
                         raise ValueError("renewal retry missing subscription_id")
 
-                    renew_response = await async_db(lambda subscription_id=subscription_id, tx_id=tx_id: supabase.rpc(
+                    renew_response = await supabase_db(lambda subscription_id=subscription_id, tx_id=tx_id: supabase.rpc(
                         "renew_subscription",
                         {
                             "p_subscription_id": subscription_id,
@@ -688,7 +688,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                         uuid.UUID(str(plan_id))
                     except (ValueError, TypeError):
                         plan_lookup = (
-                            await async_db(lambda plan_id=plan_id: supabase.table("subscription_plans")
+                            await supabase_db(lambda plan_id=plan_id: supabase.table("subscription_plans")
                             .select("id")
                             .eq("name", plan_id)
                             .limit(1)
@@ -699,7 +699,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                         else:
                             raise ValueError(f"could not resolve plan name to UUID: {plan_id}")
 
-                    sub_response = await async_db(lambda tx_user_id=tx_user_id, plan_id=plan_id, provider_name=provider_name, provider_payment_id=provider_payment_id: supabase.rpc(
+                    sub_response = await supabase_db(lambda tx_user_id=tx_user_id, plan_id=plan_id, provider_name=provider_name, provider_payment_id=provider_payment_id: supabase.rpc(
                         "create_subscription",
                         {
                             "p_user_id": tx_user_id,
@@ -714,7 +714,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                     if not new_sub_id:
                         raise ValueError("create_subscription returned empty result")
 
-                    await async_db(lambda new_sub_id=new_sub_id, tx_id=tx_id: supabase.table("payment_transactions").update(
+                    await supabase_db(lambda new_sub_id=new_sub_id, tx_id=tx_id: supabase.table("payment_transactions").update(
                         {
                             "subscription_id": new_sub_id,
                         }
@@ -737,7 +737,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                 cleared_metadata.pop("activation_retry_claimed_at", None)
 
                 complete_update = (
-                    await async_db(lambda tx_id=tx_id, cleared_metadata=cleared_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
+                    await supabase_db(lambda tx_id=tx_id, cleared_metadata=cleared_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
                     .update(
                         {
                             "metadata": cleared_metadata,
@@ -753,7 +753,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                     logger.info("[ACTIVATION RETRY] Lost claim before completion tx=%s", tx_id)
                     continue
 
-                await async_db(lambda tx_id=tx_id: supabase.table("payment_audit_logs").insert(
+                await supabase_db(lambda tx_id=tx_id: supabase.table("payment_audit_logs").insert(
                     {
                         "transaction_id": tx_id,
                         "entity_type": "payment_transaction",
@@ -778,7 +778,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                 failed_metadata.pop("activation_retry_claimed_at", None)
 
                 failed_update = (
-                    await async_db(lambda tx_id=tx_id, failed_metadata=failed_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
+                    await supabase_db(lambda tx_id=tx_id, failed_metadata=failed_metadata, now_iso=now_iso, claim_token=claim_token: supabase.table("payment_transactions")
                     .update(
                         {
                             "metadata": failed_metadata,
@@ -794,7 +794,7 @@ async def _run_subscription_activation_retry_tick() -> int:
                     logger.info("[ACTIVATION RETRY] Lost claim before failure write tx=%s", tx_id)
                     continue
 
-                await async_db(lambda tx_id=tx_id, exc=exc: supabase.table("payment_audit_logs").insert(
+                await supabase_db(lambda tx_id=tx_id, exc=exc: supabase.table("payment_audit_logs").insert(
                     {
                         "transaction_id": tx_id,
                         "entity_type": "payment_transaction",
@@ -829,7 +829,7 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
             try:
                 supabase = get_supabase_client()
                 query = (
-                    await async_db(lambda: supabase.table("user_subscriptions")
+                    await supabase_db(lambda: supabase.table("user_subscriptions")
                     .select("id, user_id, plan_id, plan_snapshot, expires_at, payment_provider, auto_renew, status")
                     .eq("payment_provider", "plisio")
                     .eq("status", "active")
@@ -889,7 +889,7 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
             marker = f"plisio:renewal:{sub_id}:{cycle_marker}"
 
             pending_rows = (
-                await async_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
+                await supabase_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
                 .select("id, provider_payment_id, metadata")
                 .eq("provider", "plisio")
                 .eq("payment_type", "subscription")
@@ -915,7 +915,7 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
             try:
                 # Double-check after lock to avoid duplicate inserts when workers race.
                 pending_rows_post_lock = (
-                    await async_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
+                    await supabase_db(lambda sub_id=sub_id: supabase.table("payment_transactions")
                     .select("id, provider_payment_id, metadata")
                     .eq("provider", "plisio")
                     .eq("payment_type", "subscription")
@@ -973,13 +973,13 @@ async def _run_plisio_renewal_invoice_janitor_tick() -> int:
                 }
 
                 if tx_data.get("provider_payment_id"):
-                    await async_db(
+                    await supabase_db(
                         lambda tx_data=tx_data: supabase.table("payment_transactions")
                         .upsert(tx_data, on_conflict="provider,provider_payment_id")
                         .execute()
                     )
                 else:
-                    await async_db(
+                    await supabase_db(
                         lambda tx_data=tx_data: supabase.table("payment_transactions").insert(tx_data).execute()
                     )
                 created_count += 1

@@ -25,11 +25,11 @@ from datetime import datetime, timezone, timedelta
 import time
 from typing import Optional, Deque
 
-import psycopg
+from sqlalchemy import text
 
 from .cache import CandleCache, PubSubManager
 from .cache import redis_client
-from .db import POSTGRES_DSN
+from .db import AsyncSessionLocal, POSTGRES_DSN
 from trading_common.symbols import get_active_symbols, refresh_active_symbols
 from .mt5_wire import (
     Frame,
@@ -262,53 +262,33 @@ async def _update_forming_state_from_closed_m1(*, symbol: str, ts_open: int, can
     )
 
 
-def _get_latest_m1_ts_by_symbol_sync(symbols: list[str]) -> dict[str, int]:
+async def _get_latest_m1_ts_by_symbol(db, symbols: list[str]) -> dict[str, int]:
     """Return latest DB M1 candle open timestamp per symbol (seconds since epoch)."""
     if not symbols:
         return {}
 
     out: dict[str, int] = {}
     try:
-        with psycopg.connect(POSTGRES_DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT symbol, EXTRACT(EPOCH FROM MAX(time))::bigint AS ts
-                    FROM candlesticks
-                    WHERE timeframe='M1' AND symbol = ANY(%s)
-                    GROUP BY symbol
-                    """,
-                    (symbols,),
-                )
-                for sym, ts in cur.fetchall():
-                    if sym and ts:
-                        out[str(sym).upper()] = int(ts)
+        result = await db.execute(
+            text(
+                """
+                SELECT symbol, EXTRACT(EPOCH FROM MAX(time))::bigint AS ts
+                FROM candlesticks
+                WHERE timeframe = 'M1' AND symbol = ANY(CAST(:symbols AS TEXT[]))
+                GROUP BY symbol
+                """
+            ),
+            {"symbols": symbols},
+        )
+        for sym, ts in result.all():
+            if sym and ts:
+                out[str(sym).upper()] = int(ts)
     except Exception:
         return {}
     return out
 
 
-def _get_earliest_candle_ts_sync() -> Optional[int]:
-    """Return earliest candle timestamp from database (any symbol/timeframe).
-    Used as fallback for HTF history fetch when DB is empty."""
-    try:
-        with psycopg.connect(POSTGRES_DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT EXTRACT(EPOCH FROM MIN(time))::bigint AS earliest_ts
-                    FROM candlesticks
-                    """
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    return int(row[0])
-    except Exception:
-        return None
-    return None
-
-
-def _get_latest_htf_ts_by_symbol_sync(symbols: list[str], timeframe: str) -> dict[str, int]:
+async def _get_latest_htf_ts_by_symbol(db, symbols: list[str], timeframe: str) -> dict[str, int]:
     """Return latest DB HTF (D1/W1/MN1) candle open timestamp per symbol.
     Used to skip history fetch if HTF data is already fresh."""
     if not symbols or not timeframe:
@@ -316,28 +296,28 @@ def _get_latest_htf_ts_by_symbol_sync(symbols: list[str], timeframe: str) -> dic
 
     out: dict[str, int] = {}
     try:
-        with psycopg.connect(POSTGRES_DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT symbol, EXTRACT(EPOCH FROM MAX(time))::bigint AS ts
-                    FROM candlesticks
-                    WHERE timeframe=%s AND symbol = ANY(%s)
-                    GROUP BY symbol
-                    """,
-                    (timeframe, symbols),
-                )
-                for sym, ts in cur.fetchall():
-                    if sym and ts:
-                        out[str(sym).upper()] = int(ts)
+        result = await db.execute(
+            text(
+                """
+                SELECT symbol, EXTRACT(EPOCH FROM MAX(time))::bigint AS ts
+                FROM candlesticks
+                WHERE timeframe = :timeframe AND symbol = ANY(CAST(:symbols AS TEXT[]))
+                GROUP BY symbol
+                """
+            ),
+            {"timeframe": timeframe, "symbols": symbols},
+        )
+        for sym, ts in result.all():
+            if sym and ts:
+                out[str(sym).upper()] = int(ts)
     except Exception:
         return {}
     return out
 
 
-def _get_latest_ts_by_symbol_sync(symbols: list[str], timeframe: str) -> dict[str, int]:
+async def _get_latest_ts_by_symbol(db, symbols: list[str], timeframe: str) -> dict[str, int]:
     """Return latest DB candle open timestamp per symbol for a given timeframe."""
-    return _get_latest_htf_ts_by_symbol_sync(symbols, timeframe)
+    return await _get_latest_htf_ts_by_symbol(db, symbols, timeframe)
 
 
 @dataclass
@@ -858,13 +838,14 @@ class MT5IngestServer:
 
         overlap_bars = max(0, int(self._bootstrap_overlap_bars))
 
-        # For M1: check latest timestamps per symbol
-        latest_m1 = await asyncio.to_thread(_get_latest_m1_ts_by_symbol_sync, symbols)
+        async with AsyncSessionLocal() as db:
+            # For M1: check latest timestamps per symbol
+            latest_m1 = await _get_latest_m1_ts_by_symbol(db, symbols)
 
-        # For HTF: latest timestamps per symbol
-        latest_d1 = await asyncio.to_thread(_get_latest_ts_by_symbol_sync, symbols, "D1")
-        latest_w1 = await asyncio.to_thread(_get_latest_ts_by_symbol_sync, symbols, "W1")
-        latest_mn1 = await asyncio.to_thread(_get_latest_ts_by_symbol_sync, symbols, "MN1")
+            # For HTF: latest timestamps per symbol
+            latest_d1 = await _get_latest_ts_by_symbol(db, symbols, "D1")
+            latest_w1 = await _get_latest_ts_by_symbol(db, symbols, "W1")
+            latest_mn1 = await _get_latest_ts_by_symbol(db, symbols, "MN1")
 
         def _tf_overlap_seconds(tf_code: int) -> int:
             tf_name = TF_TO_NAME.get(tf_code, "M1")
@@ -1189,40 +1170,9 @@ async def _write_candle(
     volume: int,
     upsert: bool,
 ) -> None:
-    await asyncio.to_thread(
-        _write_candle_sync,
-        symbol,
-        timeframe,
-        int(ts_open),
-        float(open_),
-        float(high),
-        float(low),
-        float(close),
-        int(volume),
-        bool(upsert),
-    )
-
-
-async def _write_candles_bulk(*, symbol: str, timeframe: str, rows: list[dict], upsert: bool) -> None:
-    if not rows:
-        return
-
-    await asyncio.to_thread(_write_candles_bulk_sync, symbol, timeframe, rows, bool(upsert))
-
-
-def _write_candle_sync(
-    symbol: str,
-    timeframe: str,
-    ts_open: int,
-    open_: float,
-    high: float,
-    low: float,
-    close: float,
-    volume: int,
-    upsert: bool,
-) -> None:
     # Fail fast: the base candlesticks table is reserved for broker-provided TFs only.
     from trading_common.timeframes import assert_timeframe_policy
+
     assert_timeframe_policy(timeframe, "broker_raw")
 
     dt = datetime.fromtimestamp(int(ts_open), tz=timezone.utc)
@@ -1230,7 +1180,7 @@ def _write_candle_sync(
     if upsert:
         sql = """
             INSERT INTO candlesticks(time, symbol, timeframe, open, high, low, close, volume)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (:time, :symbol, :timeframe, :open, :high, :low, :close, :volume)
             ON CONFLICT (symbol, timeframe, time)
             DO UPDATE SET
                 open = EXCLUDED.open,
@@ -1242,26 +1192,41 @@ def _write_candle_sync(
     else:
         sql = """
             INSERT INTO candlesticks(time, symbol, timeframe, open, high, low, close, volume)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (:time, :symbol, :timeframe, :open, :high, :low, :close, :volume)
             ON CONFLICT (symbol, timeframe, time)
             DO NOTHING
         """
 
-    with psycopg.connect(POSTGRES_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (dt, symbol, timeframe, open_, high, low, close, volume))
-        conn.commit()
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(
+                text(sql),
+                {
+                    "time": dt,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "open": float(open_),
+                    "high": float(high),
+                    "low": float(low),
+                    "close": float(close),
+                    "volume": int(volume),
+                },
+            )
 
 
-def _write_candles_bulk_sync(symbol: str, timeframe: str, rows: list[dict], upsert: bool) -> None:
+async def _write_candles_bulk(*, symbol: str, timeframe: str, rows: list[dict], upsert: bool) -> None:
+    if not rows:
+        return
+
     # Fail fast: the base candlesticks table is reserved for broker-provided TFs only.
     from trading_common.timeframes import assert_timeframe_policy
+
     assert_timeframe_policy(timeframe, "broker_raw")
 
     if upsert:
         sql = """
             INSERT INTO candlesticks(time, symbol, timeframe, open, high, low, close, volume)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (:time, :symbol, :timeframe, :open, :high, :low, :close, :volume)
             ON CONFLICT (symbol, timeframe, time)
             DO UPDATE SET
                 open = EXCLUDED.open,
@@ -1273,31 +1238,30 @@ def _write_candles_bulk_sync(symbol: str, timeframe: str, rows: list[dict], upse
     else:
         sql = """
             INSERT INTO candlesticks(time, symbol, timeframe, open, high, low, close, volume)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (:time, :symbol, :timeframe, :open, :high, :low, :close, :volume)
             ON CONFLICT (symbol, timeframe, time)
             DO NOTHING
         """
 
-    values = []
+    params_list: list[dict] = []
     for r in rows:
         dt = datetime.fromtimestamp(int(r["ts_open"]), tz=timezone.utc)
-        values.append(
-            (
-                dt,
-                symbol,
-                timeframe,
-                float(r["open"]),
-                float(r["high"]),
-                float(r["low"]),
-                float(r["close"]),
-                int(r.get("volume", 0)),
-            )
+        params_list.append(
+            {
+                "time": dt,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": int(r.get("volume", 0) or 0),
+            }
         )
 
-    with psycopg.connect(POSTGRES_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, values)
-        conn.commit()
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(text(sql), params_list)
 
 
 def _pack_subscribe_payload(symbols: list[str]) -> bytes:

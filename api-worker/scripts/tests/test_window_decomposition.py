@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 
 scripts_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 repo_root = os.path.abspath(os.path.join(scripts_root, '..'))
-api_web_root = os.path.join(repo_root, 'api-web')
+api_worker_root = os.path.join(repo_root, 'api-worker')
 
-if os.path.isdir(api_web_root):
-    sys.path.insert(0, api_web_root)
+if os.path.isdir(api_worker_root):
+    sys.path.insert(0, api_worker_root)
 else:
     sys.path.insert(0, scripts_root)
 

@@ -79,7 +79,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     result = await mod.evaluate_referral_reward(
                         referred_user_id="11111111-1111-1111-1111-111111111111",
@@ -109,7 +109,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     result = await mod.evaluate_referral_reward(
                         referred_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -134,7 +134,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     result = await mod.evaluate_referral_reward(
                         referred_user_id="11111111-2222-3333-4444-555555555555",
@@ -149,7 +149,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
         mock_supabase = mock.Mock()
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=RuntimeError("db-down"))):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=RuntimeError("db-down"))):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     result = await mod.evaluate_referral_reward(
                         referred_user_id="11111111-1111-1111-1111-111111111111",
@@ -180,7 +180,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     with mock.patch.object(mod, "fraud_detect_referral_pattern", new=mock.AsyncMock(return_value=fraud_result)):
                         result = await mod.evaluate_referral_reward(
@@ -230,7 +230,7 @@ class RewardEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         mock_supabase.rpc.return_value = mock_rpc_builder
 
         with mock.patch.object(mod, "get_supabase_client", return_value=mock_supabase):
-            with mock.patch.object(mod, "async_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
+            with mock.patch.object(mod, "supabase_db", new=mock.AsyncMock(side_effect=lambda fn: fn())):
                 with mock.patch.object(mod, "is_reward_evaluation_enabled", return_value=True):
                     with mock.patch.object(
                         mod,

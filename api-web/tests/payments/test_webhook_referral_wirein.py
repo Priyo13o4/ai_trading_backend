@@ -80,7 +80,7 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.SUCCEEDED)):
             with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                with mock.patch.object(mod, "async_db", new=async_db_mock):
+                with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                     with mock.patch.object(mod, "evaluate_referral_reward", new=eval_mock):
                         with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                             with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):
@@ -125,7 +125,7 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.FAILED)):
             with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                with mock.patch.object(mod, "async_db", new=async_db_mock):
+                with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                     with mock.patch.object(mod, "evaluate_referral_reward", new=eval_mock):
                         with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                             with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):
@@ -173,7 +173,7 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.SUCCEEDED)):
             with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                with mock.patch.object(mod, "async_db", new=async_db_mock):
+                with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                     with mock.patch.object(mod, "evaluate_referral_reward", new=eval_mock):
                         with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                             with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):
@@ -228,8 +228,8 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(os.environ, {"REFERRAL_REWARD_EVALUATION_ENABLED": "0"}, clear=False):
             with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.SUCCEEDED)):
                 with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                    with mock.patch.object(mod, "async_db", new=async_db_mock):
-                        with mock.patch.object(reward_mod, "async_db", new=mock.AsyncMock()) as reward_async_db_mock:
+                    with mock.patch.object(mod, "supabase_db", new=async_db_mock):
+                        with mock.patch.object(reward_mod, "supabase_db", new=mock.AsyncMock()) as reward_async_db_mock:
                             with mock.patch.object(reward_mod, "get_supabase_client", new=mock.Mock()) as reward_client_mock:
                                 with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                                     with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):
@@ -283,7 +283,7 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.SUCCEEDED)):
             with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                with mock.patch.object(mod, "async_db", new=async_db_mock):
+                with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                     with mock.patch.object(mod, "evaluate_referral_reward", new=eval_mock):
                         with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                             with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):
@@ -336,7 +336,7 @@ class WebhookReferralWireInTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(mod, "get_provider", return_value=_ProviderSuccess(mod.PaymentTransactionStatus.REFUNDED)):
             with mock.patch.object(mod, "get_supabase_client", return_value=mock.Mock()):
-                with mock.patch.object(mod, "async_db", new=async_db_mock):
+                with mock.patch.object(mod, "supabase_db", new=async_db_mock):
                     with mock.patch.object(mod, "revoke_referral_reward_on_refund", new=revoke_mock):
                         with mock.patch.object(mod, "_mark_webhook_processed", new=mock.AsyncMock()) as mark_mock:
                             with mock.patch.object(mod, "_set_webhook_cache_hint", new=mock.AsyncMock()):

@@ -163,6 +163,13 @@ if AUTH_EXCHANGE_TURNSTILE_ENFORCE and not _is_development_environment():
     )
 
 
+if not AUTH_INVALIDATION_USE_SIGNED and not _is_development_environment():
+    raise RuntimeError(
+        "AUTH_INVALIDATION_USE_SIGNED=0 is not allowed in non-development environments. "
+        "Enable signed invalidation or set APP_ENV=development for local testing."
+    )
+
+
 def _rid(request: Request) -> str:
     return (
         (request.headers.get("x-request-id") or "").strip()

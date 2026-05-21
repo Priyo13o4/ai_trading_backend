@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from app.db import async_db, get_supabase_client
+from app.db import supabase_db, get_supabase_client
 from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
 
@@ -73,7 +73,7 @@ async def revoke_referral_reward_on_refund(
     supabase = get_supabase_client()
 
     # Fetch the payment transaction to verify it exists and get user_id.
-    tx_query = await async_db(
+    tx_query = await supabase_db(
         lambda: supabase.table("payment_transactions")
         .select("id,user_id,status")
         .eq("id", normalized_trigger_payment_id)
@@ -94,7 +94,7 @@ async def revoke_referral_reward_on_refund(
     tx_user_id = str(tx_row.get("user_id") or "")
 
     # Fetch any referral reward tied to this trigger_payment_id.
-    reward_query = await async_db(
+    reward_query = await supabase_db(
         lambda: supabase.table("referral_rewards")
         .select("referral_id,status,user_id,trigger_payment_id,hold_expires_at")
         .eq("trigger_payment_id", normalized_trigger_payment_id)
@@ -144,7 +144,7 @@ async def revoke_referral_reward_on_refund(
 
     # Attempt atomic CAS update: on_hold -> revoked.
     now_iso = now_utc.isoformat()
-    update_result = await async_db(
+    update_result = await supabase_db(
         lambda: supabase.table("referral_rewards")
         .update(
             {
@@ -161,7 +161,7 @@ async def revoke_referral_reward_on_refund(
     if not getattr(update_result, "data", None):
         # CAS failed, likely already revoked by concurrent call.
         # Re-fetch to confirm actual status.
-        refetch_result = await async_db(
+        refetch_result = await supabase_db(
             lambda: supabase.table("referral_rewards")
             .select("status")
             .eq("referral_id", reward_id)
@@ -194,7 +194,7 @@ async def revoke_referral_reward_on_refund(
 
     # Record audit trail for the revocation.
     try:
-        await async_db(
+        await supabase_db(
             lambda: supabase.table("payment_audit_logs").insert(
                 {
                     "transaction_id": tx_id,
