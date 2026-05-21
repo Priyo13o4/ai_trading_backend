@@ -101,13 +101,8 @@ def public_session_id(sid: str) -> str:
 
 
 def _compute_ttl_seconds(*, now: int, supabase_exp: int, remember_me: bool) -> int:
-    supabase_remaining = int(supabase_exp) - now
-    selected_cap = _session_cap_ttl_seconds(bool(remember_me))
-
-    # Server sessions are bounded by both:
-    # - Supabase token expiry (remaining time), and
-    # - Server-side caps (normal vs remember-me).
-    return max(1, min(supabase_remaining, selected_cap))
+    # Decouple backend session lifetime from short-lived Supabase token exp
+    return max(1, _session_cap_ttl_seconds(bool(remember_me)))
 
 
 def _extract_sid_from_session_key(key: str) -> Optional[str]:
