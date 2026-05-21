@@ -115,22 +115,7 @@ async def get_strategies_all_from_db(
             )
 
         row_stmt = (
-            select(
-                Strategy.strategy_id,
-                Strategy.strategy_name,
-                Strategy.symbol.label("pair"),
-                Strategy.direction,
-                Strategy.confidence,
-                Strategy.take_profit,
-                Strategy.stop_loss,
-                Strategy.risk_reward_ratio,
-                Strategy.expiry_minutes,
-                Strategy.expiry_time,
-                Strategy.timestamp.label("created_at"),
-                Strategy.detailed_analysis,
-                Strategy.entry_signal,
-                Strategy.status,
-            )
+            select(Strategy)
             .where(*filters)
             .order_by(Strategy.timestamp.desc())
             .limit(limit)
@@ -138,7 +123,7 @@ async def get_strategies_all_from_db(
         )
         count_stmt = select(func.count()).select_from(Strategy).where(*filters)
 
-        rows = [dict(row) for row in (await db.execute(row_stmt)).mappings().all()]
+        rows = [row.to_dict() for row in (await db.execute(row_stmt)).scalars().all()]
         total = int((await db.execute(count_stmt)).scalar_one())
         logger.info("[DB] Found %s strategies (total=%s)", len(rows), total)
         return rows, total
@@ -152,22 +137,7 @@ async def get_strategy_by_id_from_db(db: AsyncSession, strategy_id: int):
     logger.info("[DB] Fetching strategy by id=%s", strategy_id)
     try:
         stmt = (
-            select(
-                Strategy.strategy_id,
-                Strategy.strategy_name,
-                Strategy.symbol.label("pair"),
-                Strategy.direction,
-                Strategy.confidence,
-                Strategy.take_profit,
-                Strategy.stop_loss,
-                Strategy.risk_reward_ratio,
-                Strategy.expiry_minutes,
-                Strategy.expiry_time,
-                Strategy.timestamp.label("created_at"),
-                Strategy.detailed_analysis,
-                Strategy.entry_signal,
-                Strategy.status,
-            )
+            select(Strategy)
             .where(
                 Strategy.strategy_id == strategy_id,
                 Strategy.status == "active",
@@ -175,8 +145,8 @@ async def get_strategy_by_id_from_db(db: AsyncSession, strategy_id: int):
             )
             .limit(1)
         )
-        result = (await db.execute(stmt)).mappings().first()
-        row = dict(result) if result else None
+        result = (await db.execute(stmt)).scalars().first()
+        row = result.to_dict() if result else None
         if row:
             logger.info("[DB] Found strategy id=%s", strategy_id)
         else:
