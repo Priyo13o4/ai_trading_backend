@@ -190,6 +190,7 @@ services:
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 1000
       DEFAULT_POOL_SIZE: 50
+      AUTH_TYPE: scram-sha-256
       IGNORE_STARTUP_PARAMETERS: extra_float_digits
     ports:
       - "6432:5432"
@@ -219,7 +220,7 @@ services:
       REDIS_PORT: 6379
       REDIS_DB: 0
       POSTGRES_HOST: pgbouncer
-      POSTGRES_PORT: 6432
+      POSTGRES_PORT: 5432
       POSTGRES_DB: ${TRADING_BOT_DB}
       USE_TIMESCALE_CAGGS: "true"
       SESSION_REDIS_HOST: redis-sessions
@@ -272,7 +273,7 @@ services:
       REDIS_PORT: 6379
       REDIS_DB: 0
       POSTGRES_HOST: pgbouncer
-      POSTGRES_PORT: 6432
+      POSTGRES_PORT: 5432
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       POSTGRES_DB: ${TRADING_BOT_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -323,7 +324,7 @@ services:
       REDIS_PORT: 6379
       REDIS_DB: 0
       POSTGRES_HOST: pgbouncer
-      POSTGRES_PORT: 6432
+      POSTGRES_PORT: 5432
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       POSTGRES_DB: ${TRADING_BOT_DB}
       POSTGRES_USER: ${POSTGRES_USER}
