@@ -17,6 +17,7 @@ if POSTGRES_ASYNC_DSN.startswith("postgresql://"):
 async_engine = create_async_engine(
     POSTGRES_ASYNC_DSN,
     pool_pre_ping=True,
+    connect_args={"prepared_statement_cache_size": 0},
 )
 AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,

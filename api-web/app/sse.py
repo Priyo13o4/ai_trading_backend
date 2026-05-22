@@ -1068,8 +1068,18 @@ async def stream_news(request: Request, _ctx=Depends(_sse_auth)):
     """Stream real-time news updates."""
     logger.debug("[SSE] news stream requested")
     snapshot = await asyncio.to_thread(NewsCache.get, "all") or []
-    async with AsyncSessionLocal() as _news_db:
-        total = await get_news_count(_news_db)
+    pubsub_redis = _get_pubsub_redis()
+    total_str = await pubsub_redis.get("news:count")
+    if total_str is not None:
+        try:
+            total = int(total_str)
+        except ValueError:
+            total = 0
+    else:
+        async with AsyncSessionLocal() as _news_db:
+            total = await get_news_count(_news_db)
+        # Cache for 1 hour; webhook invalidates this on actual update
+        await pubsub_redis.setex("news:count", 3600, str(total))
     initial_payloads = None
     if snapshot:
         initial_payloads = [{"type": "news_snapshot", "news": snapshot, "total": total, "server_ts": _server_timestamp()}]

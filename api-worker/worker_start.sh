@@ -47,6 +47,10 @@ shutdown_children() {
 		echo "Stopping staleness watchdog (pid=${WATCHDOG_PID})..."
 		kill "${WATCHDOG_PID}" >/dev/null 2>&1
 	fi
+	if [[ -n "${SYMBOL_REFRESH_PID}" ]] && kill -0 "${SYMBOL_REFRESH_PID}" >/dev/null 2>&1; then
+		echo "Stopping symbol refresh worker (pid=${SYMBOL_REFRESH_PID})..."
+		kill "${SYMBOL_REFRESH_PID}" >/dev/null 2>&1
+	fi
 	wait >/dev/null 2>&1
 	set -e
 }
@@ -64,6 +68,10 @@ is_scheduler_required() {
 echo "Starting staleness watchdog..."
 python -u /app/scripts/worker/mt5_staleness_watchdog.py &
 WATCHDOG_PID=$!
+
+echo "Starting symbol refresh background worker..."
+python -u /app/scripts/worker/symbol_refresh_worker.py &
+SYMBOL_REFRESH_PID=$!
 
 echo "Starting MT5 ingest server (TCP port 9001)..."
 python -u /app/scripts/mt5_ingest_server.py &
