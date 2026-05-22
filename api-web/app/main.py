@@ -74,7 +74,6 @@ from .payments.tasks import (
 )
 from .notifications.error_alerts import notify_runtime_error_event
 from .observability.debug import debug_log
-from .singleflight import singleflight_cache
 
 # Configure logging with UTC
 import time
@@ -1024,14 +1023,10 @@ async def get_symbols():
     Frontend should call this on startup to dynamically populate symbol lists.
     """
     # Import POSTGRES_DSN from db module
-    # Only read from Redis, let the background cron handle DB sync to prevent cache stampedes.
-    from trading_common.symbols import _read_symbols_from_redis_async, _env_override_symbols
+    from .db import POSTGRES_DSN
     
-    symbols = _env_override_symbols()
-    if not symbols:
-        symbols = await _read_symbols_from_redis_async(REDIS)
-    if not symbols:
-        symbols = []
+    # DB/Redis is the source of truth for symbols.
+    symbols = await get_active_symbols(redis_client=REDIS, postgres_dsn=POSTGRES_DSN, fallback=[])
 
     # Build metadata for all symbols (with defaults for unknown symbols)
     metadata = {}
@@ -1265,14 +1260,6 @@ async def get_news_preview(request: Request, db: AsyncSession = Depends(get_db))
         logger.error(f"[API ERROR] /api/news/preview: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
-@singleflight_cache("latest:strategies", ttl_func=lambda data: _strategy_cache_ttl(data["strategies"]))
-async def _fetch_and_cache_strategies(cache_pair: str, db: AsyncSession):
-    strategies = await get_active_strategies(db, None if cache_pair == "all" else cache_pair)
-    logger.info(f"[API] Found {len(strategies)} active strategies")
-    StrategyCache.set(strategies, cache_pair)
-    publish_strategies_snapshot(strategies)
-    return {"strategies": strategies}
-
 @app.get("/api/strategies")
 async def get_all_active_strategies(
     pair: str = None,
@@ -1281,41 +1268,30 @@ async def get_all_active_strategies(
 ):
     """Get all active strategies, optionally filtered by pair"""
     logger.info(f"[API] GET /api/strategies?pair={pair} - User: {ctx.get('user_id', 'anonymous')}")
+    
     try:
         normalized_pair = _normalize_optional_query_value(pair, lowercase=True)
         cache_pair = normalized_pair or "all"
-        data = await _fetch_and_cache_strategies(cache_pair, db=db)
-        return JSONResponse(content=data)
+        key = f"latest:strategies:{cache_pair}"
+
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/strategies")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for /api/strategies, querying database")
+        strategies = await get_active_strategies(db, pair)
+        logger.info(f"[API] Found {len(strategies)} active strategies")
+        StrategyCache.set(strategies, pair or "all")
+        publish_strategies_snapshot(strategies)
+        serialized = json_dumps({"strategies": strategies})
+        ttl = _strategy_cache_ttl(strategies)
+        await REDIS.setex(key, ttl, serialized)
+        return JSONResponse(content=json.loads(serialized))
     except Exception as e:
         logger.error(f"[API ERROR] /api/strategies: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
-
-@singleflight_cache("latest:strategies:all", ttl_func=lambda data: _strategy_cache_ttl(data["strategies"]))
-async def _fetch_and_cache_strategies_all(
-    normalized_symbol: Optional[str],
-    normalized_direction: Optional[str],
-    normalized_status: Optional[str],
-    normalized_search: Optional[str],
-    limit: int,
-    offset: int,
-    db: AsyncSession
-):
-    rows, total = await get_strategies_all_from_db(
-        db,
-        normalized_symbol,
-        normalized_direction,
-        normalized_status,
-        normalized_search,
-        limit,
-        offset,
-    )
-    return {
-        "strategies": rows,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }
 
 @app.get("/api/strategies/all")
 async def get_strategies_all(
@@ -1333,28 +1309,60 @@ async def get_strategies_all(
     """Get strategies with optional filters + pagination (requires signals permission)."""
     logger.info(
         "[API] GET /api/strategies/all - User: %s, symbol=%s, direction=%s, status=%s, search=%s, limit=%s, offset=%s",
-        ctx.get("user_id", "anonymous"), symbol, direction, status, search, limit, offset
+        ctx.get("user_id", "anonymous"),
+        symbol,
+        direction,
+        status,
+        search,
+        limit,
+        offset,
     )
 
     try:
         normalized_symbol = _normalize_optional_query_value(symbol)
+        cache_symbol = normalized_symbol.lower() if normalized_symbol else None
+
         normalized_direction = _normalize_optional_query_value(direction, lowercase=True)
         if normalized_direction and normalized_direction not in {"buy", "sell"}:
             raise HTTPException(422, "direction must be one of: buy, sell")
 
         normalized_status = _normalize_optional_query_value(status, lowercase=True)
         normalized_search = _normalize_optional_query_value(search)
+        cache_search = normalized_search.lower() if normalized_search else None
 
-        data = await _fetch_and_cache_strategies_all(
+        key = (
+            f"latest:strategies:all:{_cache_key_token(cache_symbol)}:"
+            f"{_cache_key_token(normalized_direction)}:"
+            f"{_cache_key_token(normalized_status)}:"
+            f"{_cache_key_token(cache_search)}:"
+            f"{_cache_key_token(limit)}:{_cache_key_token(offset)}"
+        )
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/strategies/all")
+            return JSONResponse(content=json.loads(cached))
+
+        logger.info("[API] Cache MISS for /api/strategies/all, querying database")
+        rows, total = await get_strategies_all_from_db(
+            db,
             normalized_symbol,
             normalized_direction,
             normalized_status,
             normalized_search,
             limit,
             offset,
-            db=db
         )
-        return JSONResponse(content=data)
+
+        result = {
+            "strategies": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+        ttl = _strategy_cache_ttl(rows)
+        serialized = json_dumps(result)
+        await REDIS.setex(key, ttl, serialized)
+        return JSONResponse(content=json.loads(serialized))
     except HTTPException:
         raise
     except Exception as e:
@@ -1434,208 +1442,42 @@ async def get_strategy_by_id(
 # REGIME ANALYSIS ENDPOINTS
 # ============================================================================
 
-@singleflight_cache("latest:regime", ttl=900)
-async def _fetch_and_cache_latest_regime():
-    async with AsyncSessionLocal() as db:
-        rows = await get_latest_regime_from_db(db)
-    if not rows:
-        raise HTTPException(404, "No regime data found")
-    return rows
-
 @app.get("/api/regime")
 async def get_regime(request: Request, response: Response, ctx=Depends(require_session)):
     """Get latest regime analysis for all trading pairs"""
     logger.info(f"[API] GET /api/regime - User: {ctx.get('user_id', 'anonymous')}")
+    
     try:
-        data = await _fetch_and_cache_latest_regime()
-        return JSONResponse(content=data)
+        key = "latest:regime"
+        
+        # Try cache
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for regime data")
+            return JSONResponse(content=json.loads(cached))
+        
+        # Cache miss
+        logger.info("[API] Cache MISS for regime, querying database")
+        async with AsyncSessionLocal() as db:
+            rows = await get_latest_regime_from_db(db)
+        
+        if not rows:
+            logger.warning("[API] No regime data found in database")
+            raise HTTPException(404, "No regime data found")
+        
+        # Cache for 15 minutes
+        ttl = 15 * 60
+        serialized = json_dumps(rows)
+        await REDIS.setex(key, ttl, serialized)
+        logger.info(f"[API] Cached regime data for {len(rows)} pairs with TTL={ttl}s")
+        
+        return JSONResponse(content=json.loads(serialized))
+    
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[API ERROR] /api/regime: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
-
-
-@singleflight_cache("regime:market-data:markdown", ttl=300)
-async def _fetch_and_cache_regime_market_data_markdown(db):
-    data = await get_regime_market_data_from_db(db)
-
-    if not data or not data.get("market_data"):
-    logger.warning("[API] No market data available")
-    raise HTTPException(404, "No market data available")
-
-    # Convert to markdown format split by symbol
-    market_data_raw = data.get("market_data", {})
-    analysis_timestamp = data.get("analysis_timestamp", datetime.now().isoformat())
-    collection_info = data.get("collection_info", {})
-
-    logger.info(f"[API] Converting {len(market_data_raw)} symbols to markdown format")
-
-    def format_symbol_markdown(symbol: str, data: dict, timestamp: str) -> str:
-    """Format a single symbol's data as markdown optimized for AI analysis"""
-    md = f"# {symbol} Technical Analysis Report\n\n"
-    md += f"**📅 Analysis Timestamp:** {timestamp}\n\n"
-    md += "="*80 + "\n\n"
-
-    # Sort timeframes by importance: D1, W1, H4, H1, M15, M5
-    timeframe_order = ["D1", "W1", "H4", "H1", "M15", "M5"]
-    sorted_tfs = sorted(data.keys(), key=lambda x: timeframe_order.index(x) if x in timeframe_order else 999)
-
-    for timeframe in sorted_tfs:
-    metrics = data[timeframe]
-
-    md += f"## 📊 {timeframe} Timeframe\n\n"
-
-    # Price Summary Box
-    current_price = metrics.get('current_price', 'N/A')
-    md += f"### 💰 Price: {current_price}\n\n"
-
-    # Technical Indicators
-    if "technical_indicators" in metrics:
-    ind = metrics["technical_indicators"]
-
-    # Trend Analysis Section
-    md += "### 📈 Trend Analysis\n\n"
-    rsi = ind.get('rsi', 'N/A')
-    adx = ind.get('adx', 'N/A')
-    dmp = ind.get('dmp', 'N/A')
-    dmn = ind.get('dmn', 'N/A')
-
-    # Trend signal interpretation
-    if rsi != 'N/A' and rsi is not None:
-    rsi_signal = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
-    md += f"- **RSI(14)**: {rsi} ({rsi_signal})\n"
-    else:
-    md += f"- **RSI(14)**: {rsi}\n"
-
-    if adx != 'N/A' and adx is not None:
-    trend_strength = "Strong" if adx > 25 else "Weak"
-    md += f"- **ADX(14)**: {adx} ({trend_strength} Trend)\n"
-    else:
-    md += f"- **ADX(14)**: {adx}\n"
-
-    md += f"- **+DI**: {dmp}\n"
-    md += f"- **-DI**: {dmn}\n\n"
-
-    # Momentum Section
-    md += "### ⚡ Momentum Indicators\n\n"
-    md += f"- **MACD Line**: {ind.get('macd_main', 'N/A')}\n"
-    md += f"- **MACD Signal**: {ind.get('macd_signal', 'N/A')}\n"
-    md += f"- **MACD Histogram**: {ind.get('macd_histogram', 'N/A')}\n"
-    md += f"- **ROC %**: {ind.get('roc_percent', 'N/A')}\n"
-    md += f"- **EMA Momentum Slope**: {ind.get('ema_momentum_slope', 'N/A')}\n"
-    md += f"- **OBV Slope**: {ind.get('obv_slope', 'N/A')}\n\n"
-
-    # Volatility Section
-    md += "### 🌊 Volatility Metrics\n\n"
-    atr = ind.get('atr', 'N/A')
-    atr_pct = ind.get('atr_percentile', 'N/A')
-    if atr_pct != 'N/A' and atr_pct is not None:
-    vol_level = "High" if atr_pct > 75 else "Low" if atr_pct < 25 else "Normal"
-    md += f"- **ATR(14)**: {atr} (Percentile: {atr_pct}% - {vol_level})\n\n"
-    else:
-    md += f"- **ATR(14)**: {atr}\n\n"
-
-    # EMAs Section
-    if "emas" in ind:
-    emas = ind["emas"]
-    md += "### 📊 Exponential Moving Averages\n\n"
-    for period in [9, 21, 50, 100, 200]:
-    ema_val = emas.get(f'EMA_{period}', 'N/A')
-    if ema_val != 'N/A' and ema_val is not None:
-    md += f"- **EMA-{period}**: {ema_val}\n"
-    md += "\n"
-
-    # Bollinger Bands Section
-    bb_upper = ind.get('bb_upper')
-    bb_middle = ind.get('bb_middle')
-    bb_lower = ind.get('bb_lower')
-    bb_squeeze = ind.get('bb_squeeze_ratio')
-    bb_width_pct = ind.get('bb_width_percentile')
-
-    if bb_upper or bb_middle or bb_lower:
-    md += "### 📉 Bollinger Bands\n\n"
-    md += f"- **Upper Band**: {bb_upper if bb_upper else 'N/A'}\n"
-    md += f"- **Middle Band (SMA-20)**: {bb_middle if bb_middle else 'N/A'}\n"
-    md += f"- **Lower Band**: {bb_lower if bb_lower else 'N/A'}\n"
-    md += f"- **Squeeze Ratio**: {bb_squeeze if bb_squeeze else 'N/A'}\n"
-
-    if bb_width_pct != 'N/A' and bb_width_pct is not None:
-    squeeze_level = "Tight Squeeze" if bb_width_pct < 25 else "Wide Expansion" if bb_width_pct > 75 else "Normal"
-    md += f"- **Width Percentile**: {bb_width_pct}% ({squeeze_level})\n\n"
-    else:
-    md += f"- **Width Percentile**: {bb_width_pct}\n\n"
-
-    # Market Structure Section
-    if "market_structure" in metrics:
-    struct = metrics["market_structure"]
-    md += "### 🏗️ Market Structure (50-bar Range)\n\n"
-    md += f"- **Recent High**: {struct.get('recent_high', 'N/A')}\n"
-    md += f"- **Recent Low**: {struct.get('recent_low', 'N/A')}\n"
-    range_pct = struct.get('range_percent', 'N/A')
-    if range_pct != 'N/A' and range_pct is not None:
-    volatility = "High Volatility" if range_pct > 10 else "Low Volatility" if range_pct < 3 else "Moderate"
-    md += f"- **Range**: {range_pct}% ({volatility})\n\n"
-    else:
-    md += f"- **Range**: {range_pct}%\n\n"
-
-    # Recent Price Action Table
-    if "recent_bars_detail" in metrics and isinstance(metrics["recent_bars_detail"], list):
-    bars = metrics["recent_bars_detail"][:5]  # Last 5 bars
-    md += f"### 🕐 Recent Price Action (Last {len(bars)} Candles)\n\n"
-    md += "| Time | Open | High | Low | Close | Volume | Type |\n"
-    md += "|:-----|-----:|-----:|----:|------:|-------:|:----:|\n"
-    for bar in bars:
-    candle_type = bar.get('candle_type', 'N/A')
-    emoji = "🟢" if candle_type == "Bullish" else "🔴" if candle_type == "Bearish" else "⚪"
-    md += f"| {bar.get('time', 'N/A')} | {bar.get('open', 'N/A')} | {bar.get('high', 'N/A')} | {bar.get('low', 'N/A')} | {bar.get('close', 'N/A')} | {bar.get('volume', 'N/A')} | {emoji} {candle_type} |\n"
-    md += "\n"
-
-    md += "---\n\n"
-
-    return md.strip()
-
-    # Generate markdown for each symbol
-    market_data_formatted = {}
-    null_indicators = []
-
-    for symbol, symbol_data in market_data_raw.items():
-    # Check for null indicators
-    for tf, metrics in symbol_data.items():
-    if "technical_indicators" in metrics:
-    ind = metrics["technical_indicators"]
-    null_fields = [k for k, v in ind.items() if v is None and k != "emas"]
-    if ind.get("emas"):
-    null_emas = [k for k, v in ind["emas"].items() if v is None]
-    if null_emas:
-    null_fields.append(f"emas.{','.join(null_emas)}")
-    if null_fields:
-    null_indicators.append(f"{symbol}/{tf}: {', '.join(null_fields)}")
-
-    market_data_formatted[symbol] = format_symbol_markdown(symbol, symbol_data, analysis_timestamp)
-
-    if null_indicators:
-    logger.warning(f"[API] Found null indicators: {null_indicators[:5]}...")  # Log first 5
-
-    # Build response
-    response_data = {
-    "analysis_timestamp": analysis_timestamp,
-    "collection_info": {
-    **collection_info,
-    "format": "markdown",
-    "symbols": list(market_data_formatted.keys()),
-    "timeframes": ["D1", "W1", "H4", "H1", "M15", "M5"]
-    },
-    "market_data": market_data_formatted
-    }
-
-    # Cache for 5 minutes
-    ttl = 5 * 60
-    from app.utils import json_dumps
-    await REDIS.setex(key, ttl, json_dumps(response_data))
-    logger.info(f"[API] Cached regime market data for {len(market_data_formatted)} symbols with TTL={ttl}s")
-
-    return response_data
 
 @app.get("/api/regime/market-data")
 async def get_regime_market_data_markdown(request: Request, db: AsyncSession = Depends(get_db)):
@@ -1659,8 +1501,195 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
     logger.info("[API] GET /api/regime/market-data - n8n workflow request (authenticated)")
     
     try:
-        data = await _fetch_and_cache_regime_market_data_markdown(db)
-        return JSONResponse(content=data)
+        key = "regime:market-data:markdown"
+        
+        # Try cache (5 min TTL for fresh data)
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for regime market data (markdown)")
+            import json
+            return JSONResponse(content=json.loads(cached))
+        
+        # Cache miss - fetch from database
+        logger.info("[API] Cache MISS for regime market data, querying database")
+        data = await get_regime_market_data_from_db(db)
+        
+        if not data or not data.get("market_data"):
+            logger.warning("[API] No market data available")
+            raise HTTPException(404, "No market data available")
+        
+        # Convert to markdown format split by symbol
+        market_data_raw = data.get("market_data", {})
+        analysis_timestamp = data.get("analysis_timestamp", datetime.now().isoformat())
+        collection_info = data.get("collection_info", {})
+        
+        logger.info(f"[API] Converting {len(market_data_raw)} symbols to markdown format")
+        
+        def format_symbol_markdown(symbol: str, data: dict, timestamp: str) -> str:
+            """Format a single symbol's data as markdown optimized for AI analysis"""
+            md = f"# {symbol} Technical Analysis Report\n\n"
+            md += f"**📅 Analysis Timestamp:** {timestamp}\n\n"
+            md += "="*80 + "\n\n"
+            
+            # Sort timeframes by importance: D1, W1, H4, H1, M15, M5
+            timeframe_order = ["D1", "W1", "H4", "H1", "M15", "M5"]
+            sorted_tfs = sorted(data.keys(), key=lambda x: timeframe_order.index(x) if x in timeframe_order else 999)
+            
+            for timeframe in sorted_tfs:
+                metrics = data[timeframe]
+                
+                md += f"## 📊 {timeframe} Timeframe\n\n"
+                
+                # Price Summary Box
+                current_price = metrics.get('current_price', 'N/A')
+                md += f"### 💰 Price: {current_price}\n\n"
+                
+                # Technical Indicators
+                if "technical_indicators" in metrics:
+                    ind = metrics["technical_indicators"]
+                    
+                    # Trend Analysis Section
+                    md += "### 📈 Trend Analysis\n\n"
+                    rsi = ind.get('rsi', 'N/A')
+                    adx = ind.get('adx', 'N/A')
+                    dmp = ind.get('dmp', 'N/A')
+                    dmn = ind.get('dmn', 'N/A')
+                    
+                    # Trend signal interpretation
+                    if rsi != 'N/A' and rsi is not None:
+                        rsi_signal = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
+                        md += f"- **RSI(14)**: {rsi} ({rsi_signal})\n"
+                    else:
+                        md += f"- **RSI(14)**: {rsi}\n"
+                    
+                    if adx != 'N/A' and adx is not None:
+                        trend_strength = "Strong" if adx > 25 else "Weak"
+                        md += f"- **ADX(14)**: {adx} ({trend_strength} Trend)\n"
+                    else:
+                        md += f"- **ADX(14)**: {adx}\n"
+                    
+                    md += f"- **+DI**: {dmp}\n"
+                    md += f"- **-DI**: {dmn}\n\n"
+                    
+                    # Momentum Section
+                    md += "### ⚡ Momentum Indicators\n\n"
+                    md += f"- **MACD Line**: {ind.get('macd_main', 'N/A')}\n"
+                    md += f"- **MACD Signal**: {ind.get('macd_signal', 'N/A')}\n"
+                    md += f"- **MACD Histogram**: {ind.get('macd_histogram', 'N/A')}\n"
+                    md += f"- **ROC %**: {ind.get('roc_percent', 'N/A')}\n"
+                    md += f"- **EMA Momentum Slope**: {ind.get('ema_momentum_slope', 'N/A')}\n"
+                    md += f"- **OBV Slope**: {ind.get('obv_slope', 'N/A')}\n\n"
+                    
+                    # Volatility Section
+                    md += "### 🌊 Volatility Metrics\n\n"
+                    atr = ind.get('atr', 'N/A')
+                    atr_pct = ind.get('atr_percentile', 'N/A')
+                    if atr_pct != 'N/A' and atr_pct is not None:
+                        vol_level = "High" if atr_pct > 75 else "Low" if atr_pct < 25 else "Normal"
+                        md += f"- **ATR(14)**: {atr} (Percentile: {atr_pct}% - {vol_level})\n\n"
+                    else:
+                        md += f"- **ATR(14)**: {atr}\n\n"
+                    
+                    # EMAs Section
+                    if "emas" in ind:
+                        emas = ind["emas"]
+                        md += "### 📊 Exponential Moving Averages\n\n"
+                        for period in [9, 21, 50, 100, 200]:
+                            ema_val = emas.get(f'EMA_{period}', 'N/A')
+                            if ema_val != 'N/A' and ema_val is not None:
+                                md += f"- **EMA-{period}**: {ema_val}\n"
+                        md += "\n"
+                    
+                    # Bollinger Bands Section
+                    bb_upper = ind.get('bb_upper')
+                    bb_middle = ind.get('bb_middle')
+                    bb_lower = ind.get('bb_lower')
+                    bb_squeeze = ind.get('bb_squeeze_ratio')
+                    bb_width_pct = ind.get('bb_width_percentile')
+                    
+                    if bb_upper or bb_middle or bb_lower:
+                        md += "### 📉 Bollinger Bands\n\n"
+                        md += f"- **Upper Band**: {bb_upper if bb_upper else 'N/A'}\n"
+                        md += f"- **Middle Band (SMA-20)**: {bb_middle if bb_middle else 'N/A'}\n"
+                        md += f"- **Lower Band**: {bb_lower if bb_lower else 'N/A'}\n"
+                        md += f"- **Squeeze Ratio**: {bb_squeeze if bb_squeeze else 'N/A'}\n"
+                        
+                        if bb_width_pct != 'N/A' and bb_width_pct is not None:
+                            squeeze_level = "Tight Squeeze" if bb_width_pct < 25 else "Wide Expansion" if bb_width_pct > 75 else "Normal"
+                            md += f"- **Width Percentile**: {bb_width_pct}% ({squeeze_level})\n\n"
+                        else:
+                            md += f"- **Width Percentile**: {bb_width_pct}\n\n"
+                
+                # Market Structure Section
+                if "market_structure" in metrics:
+                    struct = metrics["market_structure"]
+                    md += "### 🏗️ Market Structure (50-bar Range)\n\n"
+                    md += f"- **Recent High**: {struct.get('recent_high', 'N/A')}\n"
+                    md += f"- **Recent Low**: {struct.get('recent_low', 'N/A')}\n"
+                    range_pct = struct.get('range_percent', 'N/A')
+                    if range_pct != 'N/A' and range_pct is not None:
+                        volatility = "High Volatility" if range_pct > 10 else "Low Volatility" if range_pct < 3 else "Moderate"
+                        md += f"- **Range**: {range_pct}% ({volatility})\n\n"
+                    else:
+                        md += f"- **Range**: {range_pct}%\n\n"
+                
+                # Recent Price Action Table
+                if "recent_bars_detail" in metrics and isinstance(metrics["recent_bars_detail"], list):
+                    bars = metrics["recent_bars_detail"][:5]  # Last 5 bars
+                    md += f"### 🕐 Recent Price Action (Last {len(bars)} Candles)\n\n"
+                    md += "| Time | Open | High | Low | Close | Volume | Type |\n"
+                    md += "|:-----|-----:|-----:|----:|------:|-------:|:----:|\n"
+                    for bar in bars:
+                        candle_type = bar.get('candle_type', 'N/A')
+                        emoji = "🟢" if candle_type == "Bullish" else "🔴" if candle_type == "Bearish" else "⚪"
+                        md += f"| {bar.get('time', 'N/A')} | {bar.get('open', 'N/A')} | {bar.get('high', 'N/A')} | {bar.get('low', 'N/A')} | {bar.get('close', 'N/A')} | {bar.get('volume', 'N/A')} | {emoji} {candle_type} |\n"
+                    md += "\n"
+                
+                md += "---\n\n"
+            
+            return md.strip()
+        
+        # Generate markdown for each symbol
+        market_data_formatted = {}
+        null_indicators = []
+        
+        for symbol, symbol_data in market_data_raw.items():
+            # Check for null indicators
+            for tf, metrics in symbol_data.items():
+                if "technical_indicators" in metrics:
+                    ind = metrics["technical_indicators"]
+                    null_fields = [k for k, v in ind.items() if v is None and k != "emas"]
+                    if ind.get("emas"):
+                        null_emas = [k for k, v in ind["emas"].items() if v is None]
+                        if null_emas:
+                            null_fields.append(f"emas.{','.join(null_emas)}")
+                    if null_fields:
+                        null_indicators.append(f"{symbol}/{tf}: {', '.join(null_fields)}")
+            
+            market_data_formatted[symbol] = format_symbol_markdown(symbol, symbol_data, analysis_timestamp)
+        
+        if null_indicators:
+            logger.warning(f"[API] Found null indicators: {null_indicators[:5]}...")  # Log first 5
+        
+        # Build response
+        response_data = {
+            "analysis_timestamp": analysis_timestamp,
+            "collection_info": {
+                **collection_info,
+                "format": "markdown",
+                "symbols": list(market_data_formatted.keys()),
+                "timeframes": ["D1", "W1", "H4", "H1", "M15", "M5"]
+            },
+            "market_data": market_data_formatted
+        }
+        
+        # Cache for 5 minutes
+        ttl = 5 * 60
+        from app.utils import json_dumps
+        await REDIS.setex(key, ttl, json_dumps(response_data))
+        logger.info(f"[API] Cached regime market data for {len(market_data_formatted)} symbols with TTL={ttl}s")
+        
+        return JSONResponse(content=response_data)
     
     except HTTPException:
         raise
@@ -1668,14 +1697,6 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
         logger.error(f"[API ERROR] /api/regime/market-data: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
-
-
-@singleflight_cache("regime:market-data:json", ttl=300)
-async def _fetch_and_cache_regime_market_data_json(db):
-    data = await get_regime_market_data_from_db(db)
-    if not data or not data.get("market_data"):
-        raise HTTPException(404, "No market data available")
-    return data
 
 @app.get("/api/regime/market-data/json")
 async def get_regime_market_data_json(
@@ -1746,21 +1767,66 @@ async def get_regime_market_data_json(
     )
     
     try:
-        data = await _fetch_and_cache_regime_market_data_json(db)
+        key = "regime:market-data:json"
         
-        # Apply symbol filters after fetching
-        market_data_raw = data.get("market_data", {})
-        if symbol:
-            sym = symbol.upper()
-            if sym in market_data_raw:
-                data["market_data"] = {sym: market_data_raw[sym]}
-            else:
-                data["market_data"] = {}
-        elif symbols:
-            syms = [s.strip().upper() for s in symbols.split(',')]
-            data["market_data"] = {k: v for k, v in market_data_raw.items() if k in syms}
-            
-        return JSONResponse(content=data)
+        # Try cache (5 min TTL for fresh data)
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info("[API] Cache HIT for JSON market data")
+            return JSONResponse(content=_apply_symbol_filter(json.loads(cached)))
+        
+        # Cache miss - fetch from database
+        logger.info("[API] Cache MISS for JSON market data, querying database")
+        data = await get_regime_market_data_from_db(db)
+        
+        if not data or not data.get("market_data"):
+            logger.warning("[API] No market data available")
+            raise HTTPException(404, "No market data available")
+        
+        # Cache for 5 minutes
+        ttl = 5 * 60
+        serialized = json_dumps(data)
+        await REDIS.setex(key, ttl, serialized)
+        logger.info(f"[API] Cached JSON market data for {len(data.get('market_data', {}))} symbols with TTL={ttl}s")
+        
+        return JSONResponse(content=_apply_symbol_filter(json.loads(serialized)))
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/regime/market-data/json: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
+@app.get("/api/regime/{pair}")
+async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
+    """Get latest regime analysis for a specific pair"""
+    logger.info(f"[API] GET /api/regime/{pair} - User: {ctx.get('user_id', 'anonymous')}")
+    
+    try:
+        key = f"regime:{pair.upper()}"
+        
+        # Try cache
+        cached = await REDIS.get(key)
+        if cached:
+            logger.info(f"[API] Cache HIT for regime: {pair}")
+            return JSONResponse(content=json.loads(cached))
+        
+        # Cache miss
+        logger.info(f"[API] Cache MISS for regime: {pair}, querying database")
+        async with AsyncSessionLocal() as db:
+            row = await get_regime_for_pair(db, pair)
+        
+        if not row:
+            logger.warning(f"[API] No regime data found for pair: {pair}")
+            raise HTTPException(404, f"No regime data for {pair}")
+        
+        # Cache for 15 minutes
+        ttl = 15 * 60
+        serialized = json_dumps(row)
+        await REDIS.setex(key, ttl, serialized)
+        logger.info(f"[API] Cached regime for {pair} with TTL={ttl}s")
+        
+        return JSONResponse(content=json.loads(serialized))
     
     except HTTPException:
         raise
@@ -1817,8 +1883,8 @@ async def handle_n8n_news_update(request: Request):
             if cursor == 0:
                 break
                 
-        # Always clear the legacy global key and count cache
-        await REDIS.delete("news_cache:all", "news:count")
+        # Always clear the legacy global key
+        await REDIS.delete("news_cache:all")
         
         updates_sent = []
 
@@ -2039,23 +2105,6 @@ async def get_news_playbook(request: Request, response: Response, ctx=Depends(re
         raise HTTPException(500, "Internal server error")
 
 
-
-def _news_events_key(upcoming_only, limit, offset, db):
-    return f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
-
-@singleflight_cache(key_builder=_news_events_key, ttl=300)
-async def _fetch_and_cache_news_events(upcoming_only: bool, limit: int, offset: int, db: AsyncSession):
-    row_data = await get_economic_event_analysis_from_db(
-        db, limit, offset, upcoming_only
-    )
-    return {
-        "events": row_data["events"],
-        "total": row_data["total"],
-        "limit": limit,
-        "offset": offset,
-        "upcoming_only": upcoming_only,
-    }
-
 @app.get("/api/news/events")
 async def get_news_events(
     request: Request,
@@ -2093,79 +2142,93 @@ async def get_news_events(
         return json_dumps(result)
 
     try:
-        data = await _fetch_and_cache_news_events(upcoming_only, limit, offset, db)
-        return JSONResponse(content=data)
+        key = f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
+        cached = await _redis_get_best_effort(key)
+        if cached:
+            logger.info("[API] Cache HIT for /api/news/events")
+            return JSONResponse(content=json.loads(cached))
+
+        lock_key = _singleflight_lock_key(key)
+        lock_ttl_raw = (os.getenv("EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS") or "15").strip()
+        try:
+            lock_ttl = max(2, int(lock_ttl_raw))
+        except ValueError:
+            logger.warning(
+                "[API] Invalid EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS=%s, defaulting to 15",
+                lock_ttl_raw,
+            )
+            lock_ttl = 15
+
+        wait_timeout_raw = (os.getenv("EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS") or str(lock_ttl)).strip()
+        try:
+            wait_timeout_seconds = max(0.2, float(wait_timeout_raw))
+        except ValueError:
+            logger.warning(
+                "[API] Invalid EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS=%s, defaulting to %s",
+                wait_timeout_raw,
+                lock_ttl,
+            )
+            wait_timeout_seconds = float(lock_ttl)
+
+        lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
+
+        if not lock_acquired:
+            logger.info("[API] Single-flight lock busy for /api/news/events, waiting for warm cache")
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(0.2, wait_timeout_seconds)
+
+            while True:
+                warmed = await _redis_get_best_effort(key)
+                if warmed:
+                    logger.info("[API] Cache filled by peer for /api/news/events")
+                    return JSONResponse(content=json.loads(warmed))
+
+                lock_exists = await _redis_exists_best_effort(lock_key)
+                if lock_exists is not True:
+                    lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
+                    if lock_acquired:
+                        logger.info("[API] Acquired single-flight lock for /api/news/events after wait")
+                        break
+
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+
+                await asyncio.sleep(min(0.2, remaining))
+
+            if not lock_acquired:
+                logger.warning(
+                    "[API] Single-flight wait timed out for /api/news/events; using local single-flight fallback"
+                )
+                local_lock = await _get_events_local_singleflight_lock(key)
+                try:
+                    async with local_lock:
+                        warmed_local = await _redis_get_best_effort(key)
+                        if warmed_local:
+                            logger.info("[API] Cache filled before local fallback DB call for /api/news/events")
+                            return JSONResponse(content=json.loads(warmed_local))
+
+                        serialized = await _query_events_payload()
+                        ttl = 5 * 60
+                        await _redis_setex_best_effort(key, ttl, serialized)
+                        return JSONResponse(content=json.loads(serialized))
+                finally:
+                    await _cleanup_events_local_singleflight_lock(key, local_lock)
+
+        try:
+            logger.info("[API] Cache MISS for /api/news/events, querying database")
+            serialized = await _query_events_payload()
+            ttl = 5 * 60
+            await _redis_setex_best_effort(key, ttl, serialized)
+            return JSONResponse(content=json.loads(serialized))
+        finally:
+            if lock_acquired:
+                await _release_redis_lock_best_effort(lock_key, lock_token)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/events: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
-
-@singleflight_cache("latest:news:markers", ttl=3600)
-async def _fetch_and_cache_news_markers_first_page(
-    symbol: str, hours: int, min_importance: int, instruments: tuple, limit: int, db: AsyncSession
-):
-    from datetime import datetime, timedelta, timezone
-    range_end = datetime.now(timezone.utc)
-    start_time = range_end - timedelta(hours=hours)
-    res = await db.execute(
-        text("""
-            SELECT email_id, headline, email_received_at as time, importance_score,
-                   sentiment_score, market_impact_prediction, volatility_expectation,
-                   forex_instruments, breaking_news, central_bank_related, news_category
-            FROM email_news_analysis
-            WHERE forex_relevant = true
-                AND email_received_at >= :start_time
-                AND email_received_at < :range_end
-                AND importance_score >= :min_importance
-                AND (
-                    primary_instrument = ANY(:instruments)
-                    OR COALESCE(forex_instruments, '[]'::jsonb) ?| :instruments
-                )
-            ORDER BY email_received_at DESC
-            LIMIT :fetch_limit
-        """),
-        {"start_time": start_time, "range_end": range_end, "min_importance": min_importance, 
-         "instruments": list(instruments), "fetch_limit": limit + 1}
-    )
-    news_items = [dict(r) for r in res.mappings().fetchall()]
-    has_more = len(news_items) > limit
-    if has_more:
-        news_items = news_items[:limit]
-    
-    markers = []
-    for item in news_items:
-        color = '#64748b'
-        if item['market_impact_prediction'] == 'bullish': color = '#22c55e'
-        elif item['market_impact_prediction'] == 'bearish': color = '#ef4444'
-        elif item['breaking_news'] or item['importance_score'] >= 5: color = '#f59e0b'
-        
-        shape = 'circle'
-        if item['central_bank_related']: shape = 'arrowDown'
-        elif item['breaking_news']: shape = 'arrowUp'
-        
-        markers.append({
-            'time': item['time'].isoformat() if item['time'] else None,
-            'id': item['email_id'],
-            'headline': item['headline'][:100],
-            'full_headline': item['headline'],
-            'importance': item['importance_score'],
-            'sentiment': float(item['sentiment_score']) if item['sentiment_score'] else 0,
-            'impact': item['market_impact_prediction'],
-            'volatility': item['volatility_expectation'],
-            'instruments': item['forex_instruments'],
-            'breaking': item['breaking_news'],
-            'category': item['news_category'],
-            'color': color,
-            'shape': shape
-        })
-    
-    return {
-        "markers": markers,
-        "has_more": has_more,
-        "cursor_before": markers[-1]['time'] if markers else None,
-    }
-
 
 @app.get("/api/news/markers/{symbol}")
 async def get_news_markers(
@@ -2177,46 +2240,96 @@ async def get_news_markers(
     ctx=Depends(require_signals_context),
     db: AsyncSession = Depends(get_db),
 ):
+    """Get news markers for chart annotations
+    
+    Args:
+        symbol: Trading pair (e.g., XAUUSD)
+        hours: Time range in hours (default: None = all time)
+        min_importance: Minimum importance score (1-5, default 3)
+        before: Optional cursor. Returns rows strictly older than this timestamp.
+        limit: Maximum rows returned.
+    
+    Returns:
+        List of news events with timestamps for chart markers
+    """
     from datetime import datetime, timedelta, timezone
+    from .cache import NewsMarkersCache
+    
     symbol = symbol.upper()
-    if hours is None: hours = 8760
+    
+    # If hours not specified, use large default (1 year)
+    if hours is None:
+        hours = 8760  # 365 days
     
     cursor_before: Optional[datetime] = None
     if before:
         try:
             normalized_before = before.strip()
-            if normalized_before.endswith("Z"): normalized_before = f"{normalized_before[:-1]}+00:00"
+            if normalized_before.endswith("Z"):
+                normalized_before = f"{normalized_before[:-1]}+00:00"
             parsed_before = datetime.fromisoformat(normalized_before)
-            if parsed_before.tzinfo is None: parsed_before = parsed_before.replace(tzinfo=timezone.utc)
+            if parsed_before.tzinfo is None:
+                parsed_before = parsed_before.replace(tzinfo=timezone.utc)
             cursor_before = parsed_before.astimezone(timezone.utc)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid 'before' cursor. Use ISO UTC timestamp.")
 
-    symbol_map = {
-        'XAUUSD': ['XAU/USD', 'GOLD', 'XAUUSD'],
-        'EURUSD': ['EUR/USD', 'EURUSD', 'EUR'],
-        'GBPUSD': ['GBP/USD', 'GBPUSD', 'GBP'],
-        'USDJPY': ['USD/JPY', 'USDJPY', 'JPY'],
-        'USDCAD': ['USD/CAD', 'USDCAD', 'CAD'],
-        'AUDUSD': ['AUD/USD', 'AUDUSD', 'AUD'],
-    }
-    instruments = tuple(symbol_map.get(symbol, [symbol]))
+    logger.info(
+        "GET /api/news/markers/%s?hours=%s&min_importance=%s&before=%s&limit=%s - User: %s",
+        symbol,
+        hours,
+        min_importance,
+        before,
+        limit,
+        ctx.get("user_id", "anonymous"),
+    )
     
     use_cache = cursor_before is None and limit == 500
+
+    # Try cache first (cache key includes importance filter) for first page only.
+    if use_cache:
+        cached_markers = NewsMarkersCache.get(symbol, hours, min_importance)
+        if cached_markers is not None:
+            # Filter by importance on cache hit
+            filtered = [m for m in cached_markers if m.get('importance', 0) >= min_importance]
+            has_more = len(filtered) >= limit
+            cursor = filtered[-1]['time'] if filtered else None
+            logger.info(f"Cache HIT: news markers for {symbol} ({len(filtered)}/{len(cached_markers)} after importance filter)")
+            return {"markers": filtered, "has_more": has_more, "cursor_before": cursor}
+    
+    logger.info(f"Cache MISS: news markers for {symbol}, querying database")
     
     try:
-        if use_cache:
-            data = await _fetch_and_cache_news_markers_first_page(symbol, hours, min_importance, instruments, limit, db=db)
-            return JSONResponse(content=data)
-        
-        # Non-cached logic for older pages
-        range_end = cursor_before
+        # Calculate time range
+        range_end = cursor_before or datetime.now(timezone.utc)
         start_time = range_end - timedelta(hours=hours)
+
+        # Map symbol to instruments (handle different naming conventions)
+        symbol_map = {
+            'XAUUSD': ['XAU/USD', 'GOLD', 'XAUUSD'],
+            'EURUSD': ['EUR/USD', 'EURUSD', 'EUR'],
+            'GBPUSD': ['GBP/USD', 'GBPUSD', 'GBP'],
+            'USDJPY': ['USD/JPY', 'USDJPY', 'JPY'],
+            'USDCAD': ['USD/CAD', 'USDCAD', 'CAD'],
+            'AUDUSD': ['AUD/USD', 'AUDUSD', 'AUD'],
+        }
+
+        instruments = symbol_map.get(symbol, [symbol])
+
         res = await db.execute(
             text("""
-                SELECT email_id, headline, email_received_at as time, importance_score,
-                       sentiment_score, market_impact_prediction, volatility_expectation,
-                       forex_instruments, breaking_news, central_bank_related, news_category
+                SELECT
+                    email_id,
+                    headline,
+                    email_received_at as time,
+                    importance_score,
+                    sentiment_score,
+                    market_impact_prediction,
+                    volatility_expectation,
+                    forex_instruments,
+                    breaking_news,
+                    central_bank_related,
+                    news_category
                 FROM email_news_analysis
                 WHERE forex_relevant = true
                     AND email_received_at >= :start_time
@@ -2229,26 +2342,43 @@ async def get_news_markers(
                 ORDER BY email_received_at DESC
                 LIMIT :fetch_limit
             """),
-            {"start_time": start_time, "range_end": range_end, "min_importance": min_importance, 
-             "instruments": list(instruments), "fetch_limit": limit + 1}
+            {
+                "start_time": start_time,
+                "range_end": range_end,
+                "min_importance": min_importance,
+                "instruments": instruments,
+                "fetch_limit": limit + 1,
+            },
         )
         news_items = [dict(r) for r in res.mappings().fetchall()]
+
         has_more = len(news_items) > limit
-        if has_more: news_items = news_items[:limit]
+        if has_more:
+            news_items = news_items[:limit]
         
+        # Format for chart markers
         markers = []
         for item in news_items:
-            color = '#64748b'
-            if item['market_impact_prediction'] == 'bullish': color = '#22c55e'
-            elif item['market_impact_prediction'] == 'bearish': color = '#ef4444'
-            elif item['breaking_news'] or item['importance_score'] >= 5: color = '#f59e0b'
+            # Determine marker color based on sentiment and impact
+            color = '#64748b'  # neutral grey
+            if item['market_impact_prediction'] == 'bullish':
+                color = '#22c55e'  # green
+            elif item['market_impact_prediction'] == 'bearish':
+                color = '#ef4444'  # red
+            elif item['breaking_news'] or item['importance_score'] >= 5:
+                color = '#f59e0b'  # orange for breaking/high importance
+            
+            # Marker shape based on type
             shape = 'circle'
-            if item['central_bank_related']: shape = 'arrowDown'
-            elif item['breaking_news']: shape = 'arrowUp'
+            if item['central_bank_related']:
+                shape = 'arrowDown'
+            elif item['breaking_news']:
+                shape = 'arrowUp'
+            
             markers.append({
                 'time': item['time'].isoformat() if item['time'] else None,
                 'id': item['email_id'],
-                'headline': item['headline'][:100],
+                'headline': item['headline'][:100],  # Truncate for marker
                 'full_headline': item['headline'],
                 'importance': item['importance_score'],
                 'sentiment': float(item['sentiment_score']) if item['sentiment_score'] else 0,
@@ -2260,7 +2390,18 @@ async def get_news_markers(
                 'color': color,
                 'shape': shape
             })
-        return {"markers": markers, "has_more": has_more, "cursor_before": markers[-1]['time'] if markers else None}
+        
+        # Cache only first page responses.
+        if use_cache:
+            NewsMarkersCache.set(symbol, markers, hours, min_importance)
+        
+        logger.info(f"Returning {len(markers)} news markers for {symbol}")
+        return {
+            "markers": markers,
+            "has_more": has_more,
+            "cursor_before": markers[-1]['time'] if markers else None,
+        }
+        
     except Exception as e:
         logger.error(f"Error fetching news markers for {symbol}: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to fetch news markers: {str(e)}")
