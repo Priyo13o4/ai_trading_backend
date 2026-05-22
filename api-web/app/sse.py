@@ -850,7 +850,7 @@ async def multiplex_event_generator(
                 if event_type == "regime_update":
                     regime_payload = data.get("regime") if isinstance(data.get("regime"), dict) else data
                     # Frontend usually matches on symbol
-                    regime_symbol = regime_payload.get("symbol")
+                    regime_symbol = regime_payload.get("symbol") or regime_payload.get("trading_pair")
                     if not regime_symbol or regime_symbol == pair or regime_symbol == symbol:
                         # Assuming strategy topic tracker is fine, or we can use another if added.
                         yield _format_typed_event(data, include_event_name=include_event_name, event_id=item["id"])

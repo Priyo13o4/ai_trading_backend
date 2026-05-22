@@ -1936,7 +1936,7 @@ async def handle_n8n_news_update(request: Request):
                 latest_regimes = await get_latest_regime_from_db(db)
             if latest_regimes:
                 # Targeted deletion of pair-specific frontend caches (avoid wildcard regime:*)
-                pair_keys = [f"regime:{r['symbol'].upper()}" for r in latest_regimes]
+                pair_keys = [f"regime:{r['trading_pair'].upper()}" for r in latest_regimes]
                 if pair_keys:
                     await REDIS.delete(*pair_keys)
                     deleted_count += len(pair_keys)
