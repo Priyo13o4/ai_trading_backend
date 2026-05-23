@@ -114,14 +114,32 @@ async def get_strategies_all_from_db(
                 )
             )
 
-        row_stmt = (
-            select(Strategy)
+        from sqlalchemy import cast, Date
+        
+        # Paginate by unique days instead of individual rows
+        date_stmt = (
+            select(cast(Strategy.timestamp, Date).label('day'))
             .where(*filters)
-            .order_by(Strategy.timestamp.desc())
+            .distinct()
+            .order_by(cast(Strategy.timestamp, Date).desc())
             .limit(limit)
             .offset(offset)
         )
-        count_stmt = select(func.count()).select_from(Strategy).where(*filters)
+        dates = (await db.execute(date_stmt)).scalars().all()
+        
+        if not dates:
+            return [], 0
+            
+        row_filters = list(filters)
+        row_filters.append(cast(Strategy.timestamp, Date).in_(dates))
+        
+        row_stmt = (
+            select(Strategy)
+            .where(*row_filters)
+            .order_by(Strategy.timestamp.desc())
+        )
+        
+        count_stmt = select(func.count(func.distinct(cast(Strategy.timestamp, Date)))).select_from(Strategy).where(*filters)
 
         rows = [row.to_dict() for row in (await db.execute(row_stmt)).scalars().all()]
         total = int((await db.execute(count_stmt)).scalar_one())

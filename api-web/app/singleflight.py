@@ -38,6 +38,10 @@ def singleflight_cache(key_prefix: str = None, ttl: int = 300, ttl_func: Callabl
                 suffix = ":".join(key_args)
                 key = f"{key_prefix}:{suffix}" if suffix else key_prefix
 
+            if key is None:
+                # Bypass singleflight and cache completely if key is None
+                return await func(*args, **kwargs)
+
             # 1. Fast path cache check
             cached = await REDIS.get(key)
             if cached:

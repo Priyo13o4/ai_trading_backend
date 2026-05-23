@@ -6,6 +6,9 @@ from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from .singleflight import singleflight_cache
+
 from .auth import REDIS, log_redis_connection_health
 from .authn.deps import require_session
 from .authn.authz import require_permission
@@ -1158,8 +1161,12 @@ async def get_signal(
         # Try Redis cache first
         cached = await REDIS.get(key)
         if cached: 
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info(f"[API] Cache HIT (negative) for signal: {pair}")
+                raise HTTPException(404, f"No active strategy found for {pair}")
             logger.info(f"[API] Cache HIT for signal: {pair}")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=payload)
 
         # Cache miss - fetch from database
         logger.info(f"[API] Cache MISS for signal: {pair}, querying database")
@@ -1167,6 +1174,7 @@ async def get_signal(
         
         if not row: 
             logger.warning(f"[API] No active strategy found for pair: {pair}")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, f"No active strategy found for {pair}")
         
         # Cache the result
@@ -1201,8 +1209,12 @@ async def get_signal_preview(pair: str, request: Request, db: AsyncSession = Dep
         # Try Redis cache
         cached = await REDIS.get(key)
         if cached: 
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info(f"[API] Cache HIT (negative) for preview: {normalized_pair}")
+                raise HTTPException(404, "No preview available")
             logger.info(f"[API] Cache HIT for preview: {normalized_pair}")
-            return JSONResponse(content=json.loads(cached), headers=response_headers)
+            return JSONResponse(content=payload, headers=response_headers)
 
         # Cache miss - get old signal
         logger.info(f"[API] Cache MISS for preview: {normalized_pair}, querying database")
@@ -1210,6 +1222,7 @@ async def get_signal_preview(pair: str, request: Request, db: AsyncSession = Dep
         
         if not row: 
             logger.warning(f"[API] No preview strategy found for pair: {normalized_pair}")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "No preview available")
         
         # Cache preview for 1 hour (it's old data)
@@ -1237,14 +1250,19 @@ async def get_news_preview(request: Request, db: AsyncSession = Depends(get_db))
         # Try Redis cache (30 min TTL - news changes slowly enough)
         cached = await REDIS.get(key)
         if cached:
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info("[API] Cache HIT (negative) for news preview")
+                raise HTTPException(404, "No news preview available")
             logger.info("[API] Cache HIT for news preview")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=payload)
 
         logger.info("[API] Cache MISS for news preview, querying database")
         row = await get_news_preview_from_db(db)
 
         if not row:
             logger.warning("[API] No high-impact news found for preview")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "No news preview available")
 
         ttl = 30 * 60  # 30 minutes
@@ -1293,8 +1311,24 @@ async def get_all_active_strategies(
         raise HTTPException(500, "Internal server error")
 
 
+
+def _strategies_all_key(*args, **kwargs):
+    symbol = kwargs.get('symbol') or (args[2] if len(args) > 2 else None)
+    direction = kwargs.get('direction') or (args[3] if len(args) > 3 else None)
+    status = kwargs.get('status') or (args[4] if len(args) > 4 else None)
+    search = kwargs.get('search') or (args[5] if len(args) > 5 else None)
+    limit = kwargs.get('limit', 20)
+    offset = kwargs.get('offset', 0)
+    
+    def _t(v):
+        return str(v).lower().strip() if v else "none"
+        
+    return f"strategies:all:v3:{_t(symbol)}:{_t(direction)}:{_t(status)}:{_t(search)}:{limit}:{offset}"
+
 @app.get("/api/strategies/all")
+@singleflight_cache(key_builder=_strategies_all_key, ttl=3600)
 async def get_strategies_all(
+
     request: Request,
     response: Response,
     symbol: Optional[str] = Query(None),
@@ -1330,19 +1364,7 @@ async def get_strategies_all(
         normalized_search = _normalize_optional_query_value(search)
         cache_search = normalized_search.lower() if normalized_search else None
 
-        key = (
-            f"latest:strategies:all:{_cache_key_token(cache_symbol)}:"
-            f"{_cache_key_token(normalized_direction)}:"
-            f"{_cache_key_token(normalized_status)}:"
-            f"{_cache_key_token(cache_search)}:"
-            f"{_cache_key_token(limit)}:{_cache_key_token(offset)}"
-        )
-        cached = await REDIS.get(key)
-        if cached:
-            logger.info("[API] Cache HIT for /api/strategies/all")
-            return JSONResponse(content=json.loads(cached))
-
-        logger.info("[API] Cache MISS for /api/strategies/all, querying database")
+        logger.info("[API] Fetching /api/strategies/all from database")
         rows, total = await get_strategies_all_from_db(
             db,
             normalized_symbol,
@@ -1353,16 +1375,15 @@ async def get_strategies_all(
             offset,
         )
 
-        result = {
+        if not rows:
+            return {"strategies": [], "total": total, "limit": limit, "offset": offset, "_cache_status": "NOT_FOUND"}
+
+        return {
             "strategies": rows,
             "total": total,
             "limit": limit,
             "offset": offset,
         }
-        ttl = _strategy_cache_ttl(rows)
-        serialized = json_dumps(result)
-        await REDIS.setex(key, ttl, serialized)
-        return JSONResponse(content=json.loads(serialized))
     except HTTPException:
         raise
     except Exception as e:
@@ -1426,6 +1447,7 @@ async def get_strategy_by_id(
         logger.info(f"[API] Cache MISS for strategy id={strategy_id}, querying database")
         row = await get_strategy_by_id_from_db(db, strategy_id)
         if not row:
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, f"Strategy {strategy_id} not found")
 
         ttl = _strategy_cache_ttl([row])
@@ -1453,8 +1475,12 @@ async def get_regime(request: Request, response: Response, ctx=Depends(require_s
         # Try cache
         cached = await REDIS.get(key)
         if cached:
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info("[API] Cache HIT (negative) for regime data")
+                raise HTTPException(404, "No regime data found")
             logger.info("[API] Cache HIT for regime data")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=payload)
         
         # Cache miss
         logger.info("[API] Cache MISS for regime, querying database")
@@ -1463,6 +1489,7 @@ async def get_regime(request: Request, response: Response, ctx=Depends(require_s
         
         if not rows:
             logger.warning("[API] No regime data found in database")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "No regime data found")
         
         # Cache for 15 minutes
@@ -1506,9 +1533,13 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
         # Try cache (5 min TTL for fresh data)
         cached = await REDIS.get(key)
         if cached:
-            logger.info("[API] Cache HIT for regime market data (markdown)")
             import json
-            return JSONResponse(content=json.loads(cached))
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info("[API] Cache HIT (negative) for regime market data (markdown)")
+                raise HTTPException(404, "No market data available")
+            logger.info("[API] Cache HIT for regime market data (markdown)")
+            return JSONResponse(content=payload)
         
         # Cache miss - fetch from database
         logger.info("[API] Cache MISS for regime market data, querying database")
@@ -1516,6 +1547,7 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "No market data available")
         
         # Convert to markdown format split by symbol
@@ -1772,8 +1804,12 @@ async def get_regime_market_data_json(
         # Try cache (5 min TTL for fresh data)
         cached = await REDIS.get(key)
         if cached:
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info("[API] Cache HIT (negative) for JSON market data")
+                raise HTTPException(404, "No market data available")
             logger.info("[API] Cache HIT for JSON market data")
-            return JSONResponse(content=_apply_symbol_filter(json.loads(cached)))
+            return JSONResponse(content=_apply_symbol_filter(payload))
         
         # Cache miss - fetch from database
         logger.info("[API] Cache MISS for JSON market data, querying database")
@@ -1781,6 +1817,7 @@ async def get_regime_market_data_json(
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "No market data available")
         
         # Cache for 5 minutes
@@ -1808,8 +1845,12 @@ async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
         # Try cache
         cached = await REDIS.get(key)
         if cached:
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info(f"[API] Cache HIT (negative) for regime: {pair}")
+                raise HTTPException(404, f"No regime data for {pair}")
             logger.info(f"[API] Cache HIT for regime: {pair}")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=payload)
         
         # Cache miss
         logger.info(f"[API] Cache MISS for regime: {pair}, querying database")
@@ -1818,6 +1859,7 @@ async def get_regime_by_pair(pair: str, ctx=Depends(require_session)):
         
         if not row:
             logger.warning(f"[API] No regime data found for pair: {pair}")
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, f"No regime data for {pair}")
         
         # Cache for 15 minutes
@@ -1957,8 +1999,16 @@ async def handle_n8n_news_update(request: Request):
         raise HTTPException(500, "Internal server error")
 
 
+
+def _current_news_key(*args, **kwargs):
+    limit = kwargs.get('limit', 20)
+    offset = kwargs.get('offset', 0)
+    return f"current_news:v2:limit{limit}:offset{offset}"
+
 @app.get("/api/news/current")
+@singleflight_cache(key_builder=_current_news_key, ttl=300)
 async def get_current_news(
+
     request: Request, 
     response: Response, 
     limit: int = Query(20, ge=1, le=100),
@@ -1970,41 +2020,21 @@ async def get_current_news(
     logger.info(f"[API] GET /api/news/current - User: {ctx.get('user_id', 'anonymous')}, limit={limit}, offset={offset}")
     
     try:
-        # Different cache key for each page
-        key = f"latest:news:current:{limit}:{offset}"
-        
-        # Try cache
-        cached = await REDIS.get(key)
-        if cached:
-            logger.info(f"[API] Cache HIT for current news (offset={offset})")
-            cached_payload = json.loads(cached)
-            if offset == 0 and isinstance(cached_payload, dict):
-                rows = cached_payload.get("news")
-                if isinstance(rows, list):
-                    NewsCache.set(rows, "all")
-                    publish_news_snapshot(rows)
-            return JSONResponse(content=cached_payload)
-        
-        # Cache miss
-        logger.info(f"[API] Cache MISS for current news, querying database (offset={offset})")
+        logger.info(f"[API] Fetching current news from database (offset={offset})")
         rows = await get_latest_news_from_db(db, limit, offset)
         total = await get_news_count(db)
         
         if not rows:
             logger.info("[API] No current news found in database")
-            return JSONResponse(content={"news": [], "total": total, "limit": limit, "offset": offset})
+            return {"news": [], "total": total, "limit": limit, "offset": offset, "_cache_status": "NOT_FOUND"}
         
-        # Cache for 5 minutes
-        ttl = 5 * 60
         result = {"news": rows, "total": total, "limit": limit, "offset": offset}
-        serialized = json_dumps(result)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached {len(rows)} current news items with TTL={ttl}s")
+        
         if offset == 0:
-            NewsCache.set(rows, "all", ttl=ttl)
+            NewsCache.set(rows, "all")
             publish_news_snapshot(rows)
         
-        return JSONResponse(content=json.loads(serialized))
+        return result
     
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/current: {str(e)}", exc_info=True)
@@ -2021,13 +2051,18 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
         key = f"news:item:{item_id}"
         cached = await REDIS.get(key)
         if cached:
+            payload = json.loads(cached)
+            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
+                logger.info(f"[API] Cache HIT (negative) for news ID {item_id}")
+                raise HTTPException(404, "News item not found")
             logger.info(f"[API] Cache HIT for news ID {item_id}")
-            return JSONResponse(content=json.loads(cached))
+            return JSONResponse(content=payload)
             
         logger.info(f"[API] Cache MISS for news ID {item_id}")
         row = await get_news_by_id_from_db(db, item_id)
         
         if not row:
+            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
             raise HTTPException(404, "News item not found")
             
         ttl = 60 * 60 # 60 minutes
@@ -2041,71 +2076,60 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
         logger.error(f"[API ERROR] /api/news/{item_id}: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
+def _news_upcoming_key(*args, **kwargs):
+    return "latest:news:upcoming"
+
 @app.get("/api/news/upcoming")
+@singleflight_cache(key_builder=_news_upcoming_key, ttl=300)
 async def get_upcoming_news(request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Get upcoming high-impact forex events"""
     logger.info(f"[API] GET /api/news/upcoming - User: {ctx.get('user_id', 'anonymous')}")
     
     try:
-        key = "latest:news:upcoming"
-        
-        # Try cache
-        cached = await REDIS.get(key)
-        if cached:
-            logger.info("[API] Cache HIT for upcoming news")
-            cached_payload = json.loads(cached)
-            normalized_cached = cached_payload.get("news", []) if isinstance(cached_payload, dict) else cached_payload
-            if not isinstance(normalized_cached, list):
-                normalized_cached = []
-            return JSONResponse(content=normalized_cached)
-        
-        # Cache miss
-        logger.info("[API] Cache MISS for upcoming news, querying database")
+        logger.info("[API] Fetching upcoming news from database")
         rows = await get_upcoming_news_from_db(db)
         normalized_rows = rows if isinstance(rows, list) else []
         
         if not normalized_rows:
             logger.info("[API] No upcoming news found in database")
-            return JSONResponse(content=[])
-        
-        # Cache for 5 minutes
-        ttl = 5 * 60
-        serialized = json_dumps(normalized_rows)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached {len(normalized_rows)} upcoming news items with TTL={ttl}s")
-        
-        return JSONResponse(content=json.loads(serialized))
+            return {"_cache_status": "NOT_FOUND"}
+            
+        return normalized_rows
     
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/upcoming: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
 
+def _news_playbook_key(*args, **kwargs):
+    return "latest:news:playbook"
+
 @app.get("/api/news/playbook")
+@singleflight_cache(key_builder=_news_playbook_key, ttl=300)
 async def get_news_playbook(request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Get the latest weekly macro playbook (authenticated session required)."""
     logger.info(f"[API] GET /api/news/playbook - User: {ctx.get('user_id', 'anonymous')}")
 
     try:
-        key = "latest:news:playbook"
-        cached = await REDIS.get(key)
-        if cached:
-            logger.info("[API] Cache HIT for /api/news/playbook")
-            return JSONResponse(content=json.loads(cached))
-
-        logger.info("[API] Cache MISS for /api/news/playbook, querying database")
+        logger.info("[API] Fetching /api/news/playbook from database")
         row = await get_latest_weekly_macro_playbook_from_db(db)
-        result = {"playbook": [row] if row else []}
-        ttl = 5 * 60
-        serialized = json_dumps(result)
-        await REDIS.setex(key, ttl, serialized)
-        return JSONResponse(content=json.loads(serialized))
+        if not row:
+            return {"_cache_status": "NOT_FOUND"}
+            
+        return {"playbook": [row]}
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/playbook: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
 
+def _news_events_key(*args, **kwargs):
+    upcoming_only = kwargs.get('upcoming_only', False)
+    limit = kwargs.get('limit', 20)
+    offset = kwargs.get('offset', 0)
+    return f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
+
 @app.get("/api/news/events")
+@singleflight_cache(key_builder=_news_events_key, ttl=300)
 async def get_news_events(
     request: Request,
     response: Response,
@@ -2124,7 +2148,8 @@ async def get_news_events(
         offset,
     )
 
-    async def _query_events_payload() -> str:
+    try:
+        logger.info("[API] Fetching /api/news/events from database")
         row_data = await get_economic_event_analysis_from_db(
             db,
             limit,
@@ -2132,106 +2157,37 @@ async def get_news_events(
             upcoming_only,
         )
         rows, total = row_data["events"], row_data["total"]
-        result = {
+        
+        if not rows:
+            return {"events": [], "total": total, "limit": limit, "offset": offset, "upcoming_only": upcoming_only, "_cache_status": "NOT_FOUND"}
+
+        return {
             "events": rows,
             "total": total,
             "limit": limit,
             "offset": offset,
             "upcoming_only": upcoming_only,
         }
-        return json_dumps(result)
-
-    try:
-        key = f"latest:news:events:{int(upcoming_only)}:{limit}:{offset}"
-        cached = await _redis_get_best_effort(key)
-        if cached:
-            logger.info("[API] Cache HIT for /api/news/events")
-            return JSONResponse(content=json.loads(cached))
-
-        lock_key = _singleflight_lock_key(key)
-        lock_ttl_raw = (os.getenv("EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS") or "15").strip()
-        try:
-            lock_ttl = max(2, int(lock_ttl_raw))
-        except ValueError:
-            logger.warning(
-                "[API] Invalid EVENTS_SINGLEFLIGHT_LOCK_TTL_SECONDS=%s, defaulting to 15",
-                lock_ttl_raw,
-            )
-            lock_ttl = 15
-
-        wait_timeout_raw = (os.getenv("EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS") or str(lock_ttl)).strip()
-        try:
-            wait_timeout_seconds = max(0.2, float(wait_timeout_raw))
-        except ValueError:
-            logger.warning(
-                "[API] Invalid EVENTS_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS=%s, defaulting to %s",
-                wait_timeout_raw,
-                lock_ttl,
-            )
-            wait_timeout_seconds = float(lock_ttl)
-
-        lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
-
-        if not lock_acquired:
-            logger.info("[API] Single-flight lock busy for /api/news/events, waiting for warm cache")
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + max(0.2, wait_timeout_seconds)
-
-            while True:
-                warmed = await _redis_get_best_effort(key)
-                if warmed:
-                    logger.info("[API] Cache filled by peer for /api/news/events")
-                    return JSONResponse(content=json.loads(warmed))
-
-                lock_exists = await _redis_exists_best_effort(lock_key)
-                if lock_exists is not True:
-                    lock_acquired, lock_token = await _acquire_redis_lock(lock_key, lock_ttl)
-                    if lock_acquired:
-                        logger.info("[API] Acquired single-flight lock for /api/news/events after wait")
-                        break
-
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-
-                await asyncio.sleep(min(0.2, remaining))
-
-            if not lock_acquired:
-                logger.warning(
-                    "[API] Single-flight wait timed out for /api/news/events; using local single-flight fallback"
-                )
-                local_lock = await _get_events_local_singleflight_lock(key)
-                try:
-                    async with local_lock:
-                        warmed_local = await _redis_get_best_effort(key)
-                        if warmed_local:
-                            logger.info("[API] Cache filled before local fallback DB call for /api/news/events")
-                            return JSONResponse(content=json.loads(warmed_local))
-
-                        serialized = await _query_events_payload()
-                        ttl = 5 * 60
-                        await _redis_setex_best_effort(key, ttl, serialized)
-                        return JSONResponse(content=json.loads(serialized))
-                finally:
-                    await _cleanup_events_local_singleflight_lock(key, local_lock)
-
-        try:
-            logger.info("[API] Cache MISS for /api/news/events, querying database")
-            serialized = await _query_events_payload()
-            ttl = 5 * 60
-            await _redis_setex_best_effort(key, ttl, serialized)
-            return JSONResponse(content=json.loads(serialized))
-        finally:
-            if lock_acquired:
-                await _release_redis_lock_best_effort(lock_key, lock_token)
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/events: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
+
+def _news_markers_key(*args, **kwargs):
+    symbol = kwargs.get('symbol') or (args[0] if args else None)
+    hours = kwargs.get('hours') or 8760
+    min_imp = kwargs.get('min_importance', 3)
+    limit = kwargs.get('limit', 500)
+    before = kwargs.get('before')
+    
+    if before is None and limit == 500:
+        return f"news_markers:v2:{symbol}:{hours}h:imp{min_imp}"
+    return None
+
 @app.get("/api/news/markers/{symbol}")
+@singleflight_cache(key_builder=_news_markers_key, ttl=300)
 async def get_news_markers(
+
     symbol: str,
     hours: int = None,
     min_importance: int = 3,
@@ -2284,20 +2240,7 @@ async def get_news_markers(
         ctx.get("user_id", "anonymous"),
     )
     
-    use_cache = cursor_before is None and limit == 500
-
-    # Try cache first (cache key includes importance filter) for first page only.
-    if use_cache:
-        cached_markers = NewsMarkersCache.get(symbol, hours, min_importance)
-        if cached_markers is not None:
-            # Filter by importance on cache hit
-            filtered = [m for m in cached_markers if m.get('importance', 0) >= min_importance]
-            has_more = len(filtered) >= limit
-            cursor = filtered[-1]['time'] if filtered else None
-            logger.info(f"Cache HIT: news markers for {symbol} ({len(filtered)}/{len(cached_markers)} after importance filter)")
-            return {"markers": filtered, "has_more": has_more, "cursor_before": cursor}
-    
-    logger.info(f"Cache MISS: news markers for {symbol}, querying database")
+    logger.info(f"Cache MISS/Bypass: news markers for {symbol}, querying database")
     
     try:
         # Calculate time range
@@ -2391,9 +2334,7 @@ async def get_news_markers(
                 'shape': shape
             })
         
-        # Cache only first page responses.
-        if use_cache:
-            NewsMarkersCache.set(symbol, markers, hours, min_importance)
+
         
         logger.info(f"Returning {len(markers)} news markers for {symbol}")
         return {
