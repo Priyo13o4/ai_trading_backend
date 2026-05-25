@@ -129,6 +129,44 @@ def _strategies_all_key(*args, **kwargs):
         
     return f"strategies:all:v3:{_t(symbol)}:{_t(direction)}:{_t(status)}:{_t(search)}:{limit}:{offset}"
 
+
+@router.get("/api/strategies")
+async def get_strategies(
+    request: Request,
+    response: Response,
+    pair: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    include_historical: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx=Depends(require_signals_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get strategies (legacy frontend endpoint, returns active by default)."""
+    logger.info(
+        f"[API] GET /api/strategies - User: {ctx.get('user_id', 'anonymous')}, pair={pair}, status={status}"
+    )
+
+    try:
+        if status == "all" or include_historical:
+            rows, total = await get_strategies_all_from_db(
+                db,
+                symbol=pair,
+                status=None if status == "all" else status,
+                limit=limit,
+                offset=offset,
+            )
+            return {"strategies": rows, "total": total}
+
+        rows = await get_active_strategies(db, pair)
+        return {"strategies": rows, "total": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API ERROR] /api/strategies: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+
+
 @router.get("/api/strategies/all")
 @singleflight_cache(key_builder=_strategies_all_key, ttl=3600)
 async def get_strategies_all(
