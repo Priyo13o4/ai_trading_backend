@@ -13,7 +13,7 @@ from app.db import AsyncSessionLocal, get_db, get_latest_signal_from_db, get_old
 from app.singleflight import singleflight_cache
 from app.auth import REDIS
 from app.utils import json_dumps
-from app.main import _normalize_optional_query_value, _strategy_cache_ttl, PREVIEW_SUPPORTED_PAIRS
+from app.utils import _normalize_optional_query_value, _strategy_cache_ttl, PREVIEW_SUPPORTED_PAIRS
 from app.core.dependencies import _require_internal_api_key
 from app.cache import publish_strategy_update, StrategyCache
 

@@ -1,16 +1,23 @@
 import os
 import time
+import uuid
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.main import (
-    AUTH_CSRF_EXEMPT_PATHS,
-    TRUST_PROXY_HEADERS,
-    _request_id_from_request,
-    _request_latency_ms_from_request,
-)
+from app.core.config import TRUST_PROXY_HEADERS
+from app.core.request import _request_id_from_request, _request_latency_ms_from_request
+from app.core.cors import _authdbg
 from app.authn.csrf import enforce_csrf
 from app.authn.session_store import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+
+AUTH_CSRF_EXEMPT_PATHS = {
+    "/auth/exchange",
+    "/auth/logout",
+    "/auth/logout-all",
+    "/auth/invalidate",
+    "/api/webhooks/razorpay",
+    "/api/webhooks/plisio",
+}
 
 async def request_context_middleware(request: Request, call_next):
     request_id = _request_id_from_request(request)
@@ -64,4 +71,27 @@ async def security_headers_middleware(request: Request, call_next):
     if is_https:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
+    return response
+
+async def cors_debug_middleware(request: Request, call_next):
+    rid = (request.headers.get("x-request-id") or "").strip() or uuid.uuid4().hex[:12]
+    origin = request.headers.get("origin") or ""
+    is_preflight = int(request.method == "OPTIONS" and bool(request.headers.get("access-control-request-method")))
+    _authdbg(
+        "event=cors.request rid=%s method=%s path=%s origin=%s preflight=%s",
+        rid,
+        request.method,
+        request.url.path,
+        origin,
+        is_preflight,
+    )
+
+    response = await call_next(request)
+    _authdbg(
+        "event=cors.response rid=%s status=%s acao=%s acc=%s",
+        rid,
+        response.status_code,
+        response.headers.get("access-control-allow-origin") or "",
+        response.headers.get("access-control-allow-credentials") or "",
+    )
     return response

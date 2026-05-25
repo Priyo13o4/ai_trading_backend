@@ -1,4 +1,6 @@
-import logging
+import re
+
+new_content = """import logging
 import os
 from fastapi import FastAPI, Depends, HTTPException
 
@@ -59,3 +61,7 @@ app.include_router(auth_router)
 app.include_router(payments_router)
 app.include_router(webhook_router)
 app.include_router(referrals_router)
+"""
+
+with open("app/main.py", "w") as f:
+    f.write(new_content)
