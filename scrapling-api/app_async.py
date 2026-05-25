@@ -14,6 +14,7 @@ from aiohttp import web
 from scrapling.fetchers import Fetcher, StealthyFetcher
 from escalation import is_acceptable_result
 from app import _extract_article_payload, _extract_links, _extract_title
+from security import verify_api_key
 
 logger = logging.getLogger("scrapling_api_async")
 
@@ -166,6 +167,7 @@ async def scrape_handler(request):
     Async HTTP handler for scrape requests with escalation system.
     Endpoint: POST /api/v1/scrape
     """
+    verify_api_key(request, "SCRAPLING_API_KEY")
     try:
         payload = await request.json()
         url = payload.get("url", "").strip()
@@ -269,6 +271,7 @@ async def scrape_no_filter_handler(request):
     Minimal processing endpoint returning raw HTML without extraction.
     Endpoint: POST /api/v1/scrape-no-filter
     """
+    verify_api_key(request, "SCRAPLING_API_KEY")
     try:
         payload = await request.json()
         url = payload.get("url", "").strip()

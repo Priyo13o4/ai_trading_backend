@@ -1394,11 +1394,7 @@ async def get_strategies_all(
 @app.post("/api/strategies/publish")
 async def publish_strategy_update_endpoint(request: Request):
     """Publish a strategy update from external automation (n8n)."""
-    api_key = request.headers.get("X-API-Key")
-    expected_key = os.getenv("N8N_STRATEGY_PUBLISH_KEY") or os.getenv("N8N_MARKET_DATA_KEY")
-
-    if not expected_key or api_key != expected_key:
-        raise HTTPException(401, "Unauthorized")
+    _require_internal_api_key(request, "N8N_STRATEGY_PUBLISH_KEY", "N8N_MARKET_DATA_KEY")
 
     try:
         payload = await request.json()
@@ -1514,16 +1510,11 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
     Requires X-API-Key header for authentication
     """
     # API Key authentication for n8n workflow
-    api_key = request.headers.get("X-API-Key")
-    expected_key = os.getenv("N8N_MARKET_DATA_KEY")
-    
-    if not expected_key:
-        logger.error("[API] N8N_MARKET_DATA_KEY not configured in environment")
-        raise HTTPException(500, "API key authentication not configured")
-    
-    if not api_key or api_key != expected_key:
+    try:
+        _require_internal_api_key(request, "N8N_MARKET_DATA_KEY")
+    except HTTPException:
         logger.warning(f"[API] Invalid API key attempt for /api/regime/market-data from {request.client.host}")
-        raise HTTPException(401, "Invalid or missing API key")
+        raise
     
     logger.info("[API] GET /api/regime/market-data - n8n workflow request (authenticated)")
     
@@ -1746,16 +1737,11 @@ async def get_regime_market_data_json(
     Requires X-API-Key header for authentication
     """
     # API Key authentication for n8n workflow
-    api_key = request.headers.get("X-API-Key")
-    expected_key = os.getenv("N8N_MARKET_DATA_KEY")
-    
-    if not expected_key:
-        logger.error("[API] N8N_MARKET_DATA_KEY not configured in environment")
-        raise HTTPException(500, "API key authentication not configured")
-    
-    if not api_key or api_key != expected_key:
+    try:
+        _require_internal_api_key(request, "N8N_MARKET_DATA_KEY")
+    except HTTPException:
         logger.warning(f"[API] Invalid API key attempt for /api/regime/market-data/json from {request.client.host}")
-        raise HTTPException(401, "Invalid or missing API key")
+        raise
     
     requested_symbols = []
     if symbol:
@@ -1888,14 +1874,11 @@ async def handle_n8n_news_update(request: Request):
     Clears related caches and triggers an SSE update.
     Requires X-API-Key header.
     """
-    api_key = request.headers.get("X-API-Key")
-    expected_key = os.getenv("N8N_MARKET_DATA_KEY")
-    
-    if not expected_key:
-        raise HTTPException(500, "API key authentication not configured")
-    if not api_key or api_key != expected_key:
+    try:
+        _require_internal_api_key(request, "N8N_MARKET_DATA_KEY")
+    except HTTPException:
         logger.warning(f"[API] Invalid API key attempt for webhook from {request.client.host}")
-        raise HTTPException(401, "Invalid or missing API key")
+        raise
         
     try:
         # Check for optional JSON body to determine which news type was updated
@@ -2041,7 +2024,12 @@ async def get_current_news(
         raise HTTPException(500, "Internal server error")
 
 
+def _news_by_id_key(*args, **kwargs):
+    item_id = kwargs.get('item_id')
+    return f"singleflight:news_by_id:{item_id}"
+
 @app.get("/api/news/{item_id:int}")
+@singleflight_cache(key_builder=_news_by_id_key, ttl=3600)
 async def get_news_by_id(item_id: int, request: Request, response: Response, ctx=Depends(require_session), db: AsyncSession = Depends(get_db)):
     """Fetch a specific news record securely with TTL caching"""
     logger.info(f"[API] GET /api/news/{item_id} - User: {ctx.get('user_id', 'anonymous')}")

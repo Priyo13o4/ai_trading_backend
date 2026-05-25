@@ -193,7 +193,7 @@ services:
       AUTH_TYPE: scram-sha-256
       IGNORE_STARTUP_PARAMETERS: extra_float_digits
     ports:
-      - "6432:5432"
+      - "127.0.0.1:6432:5432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -383,6 +383,9 @@ services:
     environment:
       - SCRAPLING_HOST=0.0.0.0
       - SCRAPLING_PORT=8010
+      - SCRAPLING_API_KEY=${SCRAPLING_API_KEY}
+    env_file:
+      - ./.env
     deploy:
       resources:
         limits:
