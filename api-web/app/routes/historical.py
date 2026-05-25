@@ -18,6 +18,7 @@ from app.utils import json_dumps
 import uuid
 
 from ..cache import redis_client
+from ..singleflight import singleflight_cache
 from trading_common.timeframes import (
     normalize_timeframe,
     is_broker_timeframe,
@@ -92,7 +93,21 @@ def _release_redis_lock_best_effort(key: str, token: str) -> None:
         return
 
 
+def _historical_key(*args, **kwargs):
+    symbol = kwargs.get('symbol') or (args[0] if args else "")
+    timeframe = kwargs.get('timeframe') or (args[1] if len(args) > 1 else "")
+    sym = str(symbol).upper()
+    tf = normalize_timeframe(timeframe) if timeframe else ""
+    start_date = kwargs.get('start_date')
+    end_date = kwargs.get('end_date')
+    before = kwargs.get('before')
+    limit = kwargs.get('limit', 1000)
+    ind = kwargs.get('include_indicators', True)
+    form = kwargs.get('include_forming', True)
+    return f"historical:{sym}:{tf}:{start_date}:{end_date}:{before}:{limit}:{ind}:{form}"
+
 @router.get("/{symbol}/{timeframe}")
+@singleflight_cache(key_builder=_historical_key, ttl=60)
 async def get_historical_data(
     symbol: str,
     timeframe: str,
@@ -116,18 +131,6 @@ async def get_historical_data(
 
     sym = str(symbol or "").upper()
     tf = normalize_timeframe(timeframe)
-    cache_key = f"historical:{sym}:{tf}:{start_date}:{end_date}:{before}:{limit}:{include_indicators}:{include_forming}"
-
-    # Try Redis cache first
-    try:
-        cached = redis_client.get(cache_key)
-        if cached:
-            logger.info(f"[API] Cache HIT for historical {sym} {tf} (limit={limit})")
-            return json.loads(cached)
-        else:
-            logger.info(f"[API] Cache MISS for historical {sym} {tf} (limit={limit}), querying database")
-    except Exception as e:
-        logger.warning(f"[API] Cache lookup failed for historical {sym} {tf}: {e}")
 
     try:
         # LOCKED ARCHITECTURE:
@@ -442,12 +445,6 @@ async def get_historical_data(
                 "end": data[-1]["datetime"],
             },
         }
-
-        try:
-            redis_client.setex(cache_key, CACHE_TTL, json_dumps(response))
-            logger.info(f"[API] Cached {len(data)} candles for {sym} {tf} with TTL={CACHE_TTL}s")
-        except Exception as e:
-            logger.warning(f"[API] Cache set failed for {sym} {tf}: {e}")
 
         return response
 

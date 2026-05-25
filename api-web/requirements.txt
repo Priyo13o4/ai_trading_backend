@@ -17,3 +17,4 @@ python-dateutil==2.9.0
 pandas>=2.2.0
 pandas-ta>=0.4.67b0
 numpy>=1.26.0
+fastapi-limiter==0.1.6
