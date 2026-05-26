@@ -46,7 +46,11 @@ def singleflight_cache(key_prefix: str = None, ttl: int = 300, ttl_func: Callabl
             cached = await REDIS.get(key)
             if cached:
                 try:
-                    return json.loads(cached)
+                    payload = json.loads(cached)
+                    if isinstance(payload, dict) and payload.get("__is_json_response__"):
+                        from fastapi.responses import JSONResponse
+                        return JSONResponse(content=payload["content"], status_code=payload.get("status_code", 200))
+                    return payload
                 except Exception as e:
                     logger.warning(f"Singleflight cache parse error for {key}: {e}")
             
@@ -65,7 +69,11 @@ def singleflight_cache(key_prefix: str = None, ttl: int = 300, ttl_func: Callabl
                 cached = await REDIS.get(key)
                 if cached:
                     try:
-                        return json.loads(cached)
+                        payload = json.loads(cached)
+                        if isinstance(payload, dict) and payload.get("__is_json_response__"):
+                            from fastapi.responses import JSONResponse
+                            return JSONResponse(content=payload["content"], status_code=payload.get("status_code", 200))
+                        return payload
                     except Exception:
                         pass
                 # If cache still misses (e.g. error in leader), proceed to query
@@ -75,8 +83,18 @@ def singleflight_cache(key_prefix: str = None, ttl: int = 300, ttl_func: Callabl
                 data = await func(*args, **kwargs)
                 if data is not None:
                     from app.utils import json_dumps
+                    from fastapi.responses import JSONResponse
                     try:
-                        serialized = json_dumps(data)
+                        if isinstance(data, JSONResponse):
+                            content = json.loads(data.body.decode('utf-8'))
+                            cache_payload = {
+                                "__is_json_response__": True,
+                                "content": content,
+                                "status_code": data.status_code
+                            }
+                        else:
+                            cache_payload = data
+                        serialized = json_dumps(cache_payload)
                         final_ttl = ttl_func(data) if ttl_func else ttl
                         await REDIS.setex(key, final_ttl, serialized)
                     except Exception as e:

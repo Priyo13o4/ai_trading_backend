@@ -5,6 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from pydantic import BaseModel
+from app.models import Strategy
 
 from app.core.dependencies import require_signals_context
 from app.authn.deps import require_session
@@ -294,3 +297,55 @@ async def get_strategy_by_id(
     except Exception as e:
         logger.error(f"[API ERROR] /api/strategies/{strategy_id}: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
+
+
+class StrategyPushRequest(BaseModel):
+    strategy_id: int
+
+
+@router.post("/api/n8n/strategies/push")
+async def n8n_push_strategy(request: Request, payload: StrategyPushRequest, db: AsyncSession = Depends(get_db)):
+    """Webhook to trigger the push of an existing strategy to MT5."""
+    # Authenticate the webhook request
+    _require_internal_api_key(
+        request,
+        "N8N_MARKET_DATA_KEY"  # We can use the same key or a custom one
+    )
+    
+    try:
+        # Fetch the strategy from the database
+        result = await db.execute(select(Strategy).where(Strategy.strategy_id == payload.strategy_id))
+        strategy = result.scalar_one_or_none()
+        
+        if not strategy:
+            raise HTTPException(status_code=404, detail=f"Strategy {payload.strategy_id} not found in database")
+            
+        logger.info(f"[API] Received strategy push request for ID: {strategy.strategy_id} ({strategy.strategy_name})")
+        
+        # Build a payload with ONLY the fields MT5 needs, omitting heavy text like detailed_analysis
+        mt5_payload = {
+            "strategy_id": strategy.strategy_id,
+            "strategy_name": strategy.strategy_name,
+            "symbol": strategy.symbol,
+            "direction": strategy.direction,
+            "take_profit": float(strategy.take_profit) if strategy.take_profit else 0,
+            "stop_loss": float(strategy.stop_loss) if strategy.stop_loss else 0,
+            "entry_signal": strategy.entry_signal,
+            "confidence": strategy.confidence,
+            "expiry_minutes": strategy.expiry_minutes if strategy.expiry_minutes else 240,
+            "risk_reward_ratio": float(strategy.risk_reward_ratio) if strategy.risk_reward_ratio else 0,
+            "timestamp": strategy.timestamp.isoformat() if strategy.timestamp else None,
+            "expiry_time": strategy.expiry_time.isoformat() if strategy.expiry_time else None,
+        }
+        
+        # Publish to Redis Pub/Sub for api-worker to pick up
+        await REDIS.publish("mt5:strategy_push", json.dumps(mt5_payload))
+        logger.info(f"[API] Broadcast strategy {strategy.strategy_id} to Redis pubsub")
+        
+        return {"status": "success", "strategy_id": strategy.strategy_id, "message": "Pushed to MT5 bridge"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing strategy push: {e}", exc_info=True)
+        raise HTTPException(500, "Internal server error")
+

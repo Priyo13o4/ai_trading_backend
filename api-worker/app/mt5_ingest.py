@@ -44,6 +44,8 @@ from .mt5_wire import (
     MSG_HIST_BEGIN,
     MSG_HIST_CHUNK,
     MSG_HIST_END,
+    MSG_STRATEGY_PUSH,
+    MSG_TRADE_EVENT,
     MSG_HELLO,
     MSG_HEARTBEAT,
     MSG_ERROR,
@@ -56,6 +58,8 @@ from .mt5_wire import (
     unpack_forming_bar,
     iter_hist_chunk,
     unpack_header,
+    pack_strategy_push,
+    unpack_trade_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +101,8 @@ _MSG_NAME: dict[int, str] = {
     MSG_HIST_BEGIN: "HIST_BEGIN",
     MSG_HIST_CHUNK: "HIST_CHUNK",
     MSG_HIST_END: "HIST_END",
+    MSG_STRATEGY_PUSH: "STRATEGY_PUSH",
+    MSG_TRADE_EVENT: "TRADE_EVENT",
 }
 
 
@@ -404,6 +410,48 @@ class MT5IngestServer:
         _touch(self._heartbeat_file)
         if self._heartbeat_task is None:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._strategy_pubsub_task = asyncio.create_task(self._strategy_pubsub_loop())
+
+    async def _strategy_pubsub_loop(self) -> None:
+        import json
+        import redis.asyncio as aioredis
+        
+        # We need an async redis connection for pubsub
+        redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis-app:6379/0"))
+        pubsub = redis.pubsub()
+        await pubsub.subscribe("mt5:strategy_push")
+        
+        try:
+            while True:
+                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if msg and msg["type"] == "message":
+                    try:
+                        data = json.loads(msg["data"].decode("utf-8"))
+                        frame = pack_frame(
+                            MSG_STRATEGY_PUSH,
+                            pack_strategy_push(
+                                strategy_id=data["strategy_id"],
+                                symbol=data["symbol"],
+                                direction=data["direction"],
+                                take_profit=float(data.get("take_profit", 0) or 0),
+                                stop_loss=float(data.get("stop_loss", 0) or 0),
+                                entry_signal=data.get("entry_signal"),
+                                confidence=data.get("confidence", "High"),
+                                expiry_minutes=data.get("expiry_minutes", 240),
+                                risk_reward_ratio=float(data.get("risk_reward_ratio", 0) or 0),
+                                timestamp=data.get("timestamp"),
+                                expiry_time=data.get("expiry_time")
+                            )
+                        )
+                        sent = await self._broadcast(frame)
+                        logger.info(f"[MT5] Broadcast strategy_push id={data['strategy_id']} to {sent} clients")
+                    except Exception as e:
+                        logger.error(f"Error packing/sending strategy_push: {e}", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe("mt5:strategy_push")
+            await redis.aclose()
 
     async def stop(self) -> None:
         if self._server is None:
@@ -801,8 +849,17 @@ class MT5IngestServer:
                                     await self._bootstrap_send_subscribe_if_needed(sid=sid, writer=writer)
                                 else:
                                     self._bootstrap_kick_sender(sid=sid)
+                        else:
+                            logger.warning("[MT5] Unhandled MT5 EA error sid=%s data=%s", sid, error_data)
                     except Exception as e:
-                        logger.error("[MT5] Failed to parse ERROR payload sid=%s err=%s", sid, e)
+                        logger.error("[MT5] Failed to parse EA ERROR payload sid=%s payload=%s err=%s", sid, frame.payload, e)
+                    continue
+
+                elif frame.msg_type == MSG_TRADE_EVENT:
+                    event = unpack_trade_event(frame.payload)
+                    logger.info(f"[MT5] TRADE_EVENT ticket={event['ticket']} strategy_id={event['strategy_id']} status={event['status']} pnl={event['pnl']}")
+                    # Save to database
+                    asyncio.create_task(self._handle_trade_event(event))
                     continue
 
                 elif frame.msg_type in {MSG_HELLO, MSG_HEARTBEAT}:
@@ -1304,4 +1361,38 @@ def _pack_history_fetch_payload(
     )
 
 
+
+    async def _handle_trade_event(self, event: dict) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import select
+                from app.models import Signal
+                import datetime
+                
+                now = datetime.datetime.now(datetime.timezone.utc)
+                stmt = select(Signal).where(Signal.mt5_ticket == event['ticket'])
+                signal = (await db.execute(stmt)).scalars().first()
+                if signal:
+                    signal.status = event['status']
+                    signal.pnl = event['pnl']
+                    signal.updated_at = now
+                else:
+                    new_signal = Signal(
+                        strategy_id=event['strategy_id'],
+                        mt5_ticket=event['ticket'],
+                        trading_pair=event['symbol'],
+                        direction=event.get('direction', 'UNKNOWN'),
+                        entry_price=event['price'],
+                        lot_size=event.get('volume', 0.01),
+                        entry_time=now,
+                        status=event['status'],
+                        pnl=event.get('pnl', 0.0),
+                        source='MT5_TRADE_EVENT'
+                    )
+                    db.add(new_signal)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"[MT5] DB Error saving trade event: {e}")
+
 mt5_ingest_server = MT5IngestServer()
+

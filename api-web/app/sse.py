@@ -565,6 +565,38 @@ async def shutdown_sse_resources() -> None:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+from app.singleflight import singleflight_cache
+
+def _sse_strategies_fallback_key(pair: str | None = None) -> str:
+    from app.cache import strategies_key
+    return strategies_key(pair or "all")
+
+@singleflight_cache(key_builder=_sse_strategies_fallback_key, ttl=300)
+async def _get_active_strategies_with_fallback(pair: str | None = None) -> list[dict]:
+    logger.info(f"[SSE] Strategies cache miss/expired (singleflight triggered), querying database")
+    try:
+        from app.db.strategies import get_active_strategies
+        async with AsyncSessionLocal() as db:
+            return await get_active_strategies(db, pair)
+    except Exception as e:
+        logger.error(f"[SSE] Error getting active strategies from DB: {e}", exc_info=True)
+        return []
+
+def _sse_news_fallback_key() -> str:
+    from app.cache import news_key
+    return news_key("all")
+
+@singleflight_cache(key_builder=_sse_news_fallback_key, ttl=300)
+async def _get_latest_news_with_fallback() -> list[dict]:
+    logger.info("[SSE] News cache miss/expired (singleflight triggered), querying database")
+    try:
+        from app.db.news import get_latest_news_from_db
+        async with AsyncSessionLocal() as db:
+            return await get_latest_news_from_db(db, limit=20, offset=0)
+    except Exception as e:
+        logger.error(f"[SSE] Error getting news from DB: {e}", exc_info=True)
+        return []
+
 def _server_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -773,14 +805,14 @@ async def multiplex_event_generator(
                     event_id=_next_sse_event_id(),
                 )
 
-            news_snapshot = await asyncio.to_thread(NewsCache.get, "all") or []
+            news_snapshot = await _get_latest_news_with_fallback()
             yield _format_typed_event(
                 {"type": "news_snapshot", "news": news_snapshot, "server_ts": _server_timestamp()},
                 include_event_name=include_event_name,
                 event_id=_next_sse_event_id(),
             )
 
-            strategy_snapshot = await asyncio.to_thread(StrategyCache.get, pair) or []
+            strategy_snapshot = await _get_active_strategies_with_fallback(pair)
             strategy_snapshot = [item for item in strategy_snapshot if _strategy_matches_pair(item, pair)]
             yield _format_typed_event(
                 {
@@ -1067,7 +1099,7 @@ async def stream_all_candles(request: Request, _ctx=Depends(_sse_auth)):
 async def stream_news(request: Request, _ctx=Depends(_sse_auth)):
     """Stream real-time news updates."""
     logger.debug("[SSE] news stream requested")
-    snapshot = await asyncio.to_thread(NewsCache.get, "all") or []
+    snapshot = await _get_latest_news_with_fallback()
     pubsub_redis = _get_pubsub_redis()
     total_str = await pubsub_redis.get("news:count")
     if total_str is not None:
@@ -1098,7 +1130,7 @@ async def stream_strategies(request: Request, pair: str | None = None, _ctx=Depe
     _require_signals_stream_access(_ctx)
     logger.debug("[SSE] strategy stream requested pair=%s", pair or "all")
     normalized_pair = pair.upper() if pair else None
-    snapshot = await asyncio.to_thread(StrategyCache.get, normalized_pair or "all") or []
+    snapshot = await _get_active_strategies_with_fallback(normalized_pair)
     if normalized_pair:
         snapshot = [item for item in snapshot if _strategy_matches_pair(item, normalized_pair)]
 

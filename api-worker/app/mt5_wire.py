@@ -44,6 +44,9 @@ MSG_HIST_BEGIN = 21         # EA -> backend
 MSG_HIST_CHUNK = 22         # EA -> backend
 MSG_HIST_END = 23           # EA -> backend
 
+MSG_STRATEGY_PUSH = 30      # Backend/bridge -> EA
+MSG_TRADE_EVENT = 31        # EA -> backend
+
 # Timeframe codes (must match MT5 EA)
 TF_M1 = 1
 TF_M5 = 2
@@ -314,3 +317,61 @@ def iter_hist_chunk(payload: bytes) -> tuple[dict, list[dict]]:
         off += _HIST_ROW.size
 
     return meta, rows
+
+# Strategy push payload
+import json
+
+def pack_strategy_push(
+    *,
+    strategy_id: int,
+    symbol: str,
+    direction: str,
+    take_profit: float,
+    stop_loss: float,
+    entry_signal: dict = None,
+    confidence: str = "High",
+    expiry_minutes: int = 240,
+    risk_reward_ratio: float = 0.0,
+    timestamp: str = None,
+    expiry_time: str = None
+) -> bytes:
+    # Instead of a fixed C struct, we pack the full JSON string to send to MT5.
+    # The MT5 EA parses this string in ProcessTCPFrame.
+    payload_dict = {
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "direction": direction,
+        "take_profit": take_profit,
+        "stop_loss": stop_loss,
+        "entry_signal": entry_signal or {},
+        "confidence": confidence,
+        "expiry_minutes": expiry_minutes,
+        "risk_reward_ratio": risk_reward_ratio,
+        "timestamp": timestamp,
+        "expiry_time": expiry_time
+    }
+    # Ensure it's a valid JSON string encoded as bytes
+    return json.dumps(payload_dict).encode("utf-8")
+
+# Trade event payload
+def unpack_trade_event(payload: bytes) -> dict:
+    # MT5 EA sends: {"ticket":..., "strategy_id":..., "symbol":..., "type":..., "price":..., "volume":...}
+    try:
+        data = json.loads(payload.decode("utf-8", errors="ignore"))
+        
+        # MT5 uses `deal_type` (0 = BUY, 1 = SELL)
+        deal_type = data.get("type", 0)
+        direction = "BUY" if deal_type == 0 else "SELL"
+        
+        # We need to map to what the ingest script expects
+        return {
+            "ticket": data.get("ticket", 0),
+            "strategy_id": data.get("strategy_id", 0),
+            "symbol": data.get("symbol", "UNKNOWN"),
+            "price": data.get("price", 0.0),
+            "volume": data.get("volume", 0.0),
+            "status": "executed", # we assume deal_add means executed
+            "direction": direction
+        }
+    except Exception as e:
+        raise ProtocolError(f"Failed to parse TRADE_EVENT JSON payload: {e}")
