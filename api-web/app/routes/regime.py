@@ -16,7 +16,7 @@ from app.core.dependencies import _require_internal_api_key
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_signals_context)])
+router = APIRouter()
 
 def _regime_all_key(request: Request, response: Response, ctx: dict = None) -> str:
     return "regime:all"
