@@ -48,6 +48,8 @@ uvicorn.pid
 volumes/
 redisdata/
 pgdata/
+tmp/
+db_dumps/
 
 # ---- Scraper outputs / generated data ----
 **/scraped_data/

@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 _CONTROL_HOST = os.getenv("MT5_CONTROL_HOST", "127.0.0.1")
-_CONTROL_PORT = int(os.getenv("MT5_CONTROL_PORT", "9002"))
+_CONTROL_PORT = int(os.getenv("MT5_CONTROL_PORT", "9003"))
 
 _TF_NAME_TO_CODE = {
     "M1": TF_M1,

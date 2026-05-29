@@ -50,8 +50,8 @@ def main() -> int:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("MT5_CONTROL_PORT", "9002")),
-        help="Control port (default: 9002)",
+        default=int(os.getenv("MT5_CONTROL_PORT", "9003")),
+        help="Control port of mt5_ingest_server.py (default: 9003 or MT5_CONTROL_PORT)",
     )
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()

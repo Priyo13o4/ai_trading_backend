@@ -24,6 +24,7 @@ SCHEDULER_MAX_BACKOFF_SECONDS="${WORKER_SCHEDULER_RESTART_MAX_SECONDS:-60}"
 SCHEDULER_MAX_RESTARTS="${WORKER_SCHEDULER_MAX_RESTARTS:-10}"
 STOP_REQUESTED=0
 INGEST_PID=""
+EXECUTOR_PID=""
 FORCED_EXIT_CODE=""
 
 start_scheduler() {
@@ -42,6 +43,10 @@ shutdown_children() {
 	if [[ -n "${INGEST_PID}" ]] && kill -0 "${INGEST_PID}" >/dev/null 2>&1; then
 		echo "Stopping MT5 ingest server (pid=${INGEST_PID})..."
 		kill "${INGEST_PID}" >/dev/null 2>&1
+	fi
+	if [[ -n "${EXECUTOR_PID}" ]] && kill -0 "${EXECUTOR_PID}" >/dev/null 2>&1; then
+		echo "Stopping MT5 executor server (pid=${EXECUTOR_PID})..."
+		kill "${EXECUTOR_PID}" >/dev/null 2>&1
 	fi
 	if [[ -n "${WATCHDOG_PID}" ]] && kill -0 "${WATCHDOG_PID}" >/dev/null 2>&1; then
 		echo "Stopping staleness watchdog (pid=${WATCHDOG_PID})..."
@@ -77,6 +82,10 @@ echo "Starting MT5 ingest server (TCP port 9001)..."
 python -u /app/scripts/mt5_ingest_server.py &
 INGEST_PID=$!
 
+echo "Starting MT5 executor server (TCP port 9002)..."
+python -u /app/scripts/mt5_executor_server.py &
+EXECUTOR_PID=$!
+
 while kill -0 "${INGEST_PID}" >/dev/null 2>&1; do
 	if [[ -n "${SCHEDULER_PID}" ]]; then
 		if ! kill -0 "${SCHEDULER_PID}" >/dev/null 2>&1; then
@@ -99,6 +108,9 @@ while kill -0 "${INGEST_PID}" >/dev/null 2>&1; do
 					FORCED_EXIT_CODE=1
 					if [[ -n "${INGEST_PID}" ]] && kill -0 "${INGEST_PID}" >/dev/null 2>&1; then
 						kill "${INGEST_PID}" >/dev/null 2>&1 || true
+					fi
+					if [[ -n "${EXECUTOR_PID}" ]] && kill -0 "${EXECUTOR_PID}" >/dev/null 2>&1; then
+						kill "${EXECUTOR_PID}" >/dev/null 2>&1 || true
 					fi
 				else
 					echo "Scheduler exceeded max restart attempts (${SCHEDULER_MAX_RESTARTS}); leaving scheduler stopped while ingest continues"
@@ -126,6 +138,9 @@ set +e
 wait "${INGEST_PID}"
 EXIT_CODE=$?
 set -e
+
+# Wait for executor as well, optionally
+# wait "${EXECUTOR_PID}"
 
 if [[ -n "${FORCED_EXIT_CODE}" ]]; then
 	EXIT_CODE="${FORCED_EXIT_CODE}"

@@ -324,6 +324,7 @@ import json
 def pack_strategy_push(
     *,
     strategy_id: int,
+    strategy_name: str,
     symbol: str,
     direction: str,
     take_profit: float,
@@ -339,6 +340,7 @@ def pack_strategy_push(
     # The MT5 EA parses this string in ProcessTCPFrame.
     payload_dict = {
         "strategy_id": strategy_id,
+        "strategy_name": strategy_name,
         "symbol": symbol,
         "direction": direction,
         "take_profit": take_profit,
@@ -361,7 +363,7 @@ def unpack_trade_event(payload: bytes) -> dict:
         
         # MT5 uses `deal_type` (0 = BUY, 1 = SELL)
         deal_type = data.get("type", 0)
-        direction = "BUY" if deal_type == 0 else "SELL"
+        direction = "long" if deal_type == 0 else "short"
         
         # We need to map to what the ingest script expects
         return {

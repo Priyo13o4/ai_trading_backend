@@ -6,7 +6,7 @@ services:
     image: custom-postgres-timescale:pg18
     restart: always
     container_name: n8n-postgres
-    command: postgres -c shared_preload_libraries=timescaledb -c max_worker_processes=24 -c timescaledb.max_background_workers=16
+    command: postgres -c shared_preload_libraries=timescaledb -c max_worker_processes=24 -c timescaledb.max_background_workers=16 -c wal_level=replica -c archive_mode=on -c archive_command="mkdir -p /var/lib/postgresql/data/archive && cp %p /var/lib/postgresql/data/archive/%f" -c max_wal_senders=3
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -317,6 +317,8 @@ services:
       MT5_INGEST_ENABLE: "true"
       MT5_INGEST_HOST: 0.0.0.0
       MT5_INGEST_PORT: 9001
+      MT5_EXECUTOR_ENABLE: "true"
+      MT5_EXECUTOR_PORT: 9002
       MT5_PROTOCOL_DEBUG: "true"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Redis configuration (app/cache/pubsub): redis-app
