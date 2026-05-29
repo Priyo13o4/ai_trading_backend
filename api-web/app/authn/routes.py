@@ -156,11 +156,6 @@ EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\
 COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 SESSION_PUBLIC_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
 
-if AUTH_EXCHANGE_TURNSTILE_ENFORCE and not _is_development_environment():
-    raise RuntimeError(
-        "AUTH_EXCHANGE_TURNSTILE_ENFORCE=1 is not supported in non-development environments. "
-        "Use AUTH_EXCHANGE_TURNSTILE_ENFORCE=0 for /auth/exchange flows."
-    )
 
 
 if not AUTH_INVALIDATION_USE_SIGNED and not _is_development_environment():
