@@ -231,7 +231,7 @@ services:
       AUTH_ENV: ${AUTH_ENV:-${APP_ENV:-production}}
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-0}
       SESSION_BINDING_MODE: ${SESSION_BINDING_MODE:-off}
-      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "0"
+      AUTH_EXCHANGE_TURNSTILE_ENFORCE: "${AUTH_EXCHANGE_TURNSTILE_ENFORCE:-0}"
       AUTHDBG_ENABLED: ${AUTHDBG_ENABLED:-0}
       # Non-local deployments must set explicit CORS values.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://pipfactor.com,https://www.pipfactor.com}
