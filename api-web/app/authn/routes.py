@@ -150,8 +150,7 @@ AUTH_INVALIDATION_TOLERANCE_SECONDS = _env_int(
     300,
     minimum=1,
 )
-TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
-AUTH_EXCHANGE_TURNSTILE_ENFORCE = _env_bool("AUTH_EXCHANGE_TURNSTILE_ENFORCE", False)
+
 EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$")
 COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 SESSION_PUBLIC_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
@@ -197,25 +196,7 @@ def _is_local_host(request: Request) -> bool:
     return _request_host(request) in {"localhost", "127.0.0.1"}
 
 
-def _should_enforce_turnstile(request: Request) -> bool:
-    # Deterministic behavior across environments is controlled by one explicit flag.
-    return bool(TURNSTILE_SECRET_KEY) and AUTH_EXCHANGE_TURNSTILE_ENFORCE
 
-
-def _turnstile_verify_form_payload(turnstile_token: str, request: Request) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "secret": TURNSTILE_SECRET_KEY,
-        "response": turnstile_token,
-    }
-
-    # Only include remoteip when the deployment explicitly trusts proxy headers.
-    # In containerized proxy topologies, request.client.host is often an internal hop.
-    if TRUST_PROXY_HEADERS:
-        remote_ip = _request_client_ip(request)
-        if remote_ip:
-            payload["remoteip"] = remote_ip
-
-    return payload
 
 
 def _parse_json_body(raw_body: bytes) -> dict[str, Any]:
@@ -653,26 +634,21 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     token = (body.get("access_token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="access_token is required")
-    turnstile_token = (body.get("turnstile_token") or "").strip() or None
-    enforce_turnstile = _should_enforce_turnstile(request)
     _authdbg(
-        "event=exchange.start rid=%s host=%s origin=%s referer=%s enforce_turnstile=%s remember_me=%s",
+        "event=exchange.start rid=%s host=%s origin=%s referer=%s remember_me=%s",
         rid,
         _request_host(request),
         request.headers.get("origin") or "",
         request.headers.get("referer") or "",
-        int(enforce_turnstile),
         int(remember_me),
     )
     cf_connecting_ip = (request.headers.get("cf-connecting-ip") or "").strip()
     xff_first_hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     _authdbg_raw(
-        "auth.exchange.start host=%s origin=%s referer=%s enforce_turnstile=%s token_present=%s secure_cookie=%s cookie_domain=%s samesite=%s xf_proto=%s cf_connecting_ip=%s xff=%s",
+        "auth.exchange.start host=%s origin=%s referer=%s secure_cookie=%s cookie_domain=%s samesite=%s xf_proto=%s cf_connecting_ip=%s xff=%s",
         _request_host(request),
         request.headers.get("origin") or "",
         request.headers.get("referer") or "",
-        int(enforce_turnstile),
-        int(bool(turnstile_token)),
         int(_should_use_secure_cookie(request)),
         _cookie_domain_for_request(request) or "<host-only>",
         COOKIE_SAMESITE,
@@ -680,12 +656,6 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
         _sanitize_ip_for_debug(cf_connecting_ip),
         _sanitize_ip_for_debug(xff_first_hop),
     )
-    if enforce_turnstile and not turnstile_token:
-        logger.warning(
-            "auth.exchange rejected: missing turnstile token user_id=unknown host=%s",
-            _request_host(request),
-        )
-        raise HTTPException(status_code=400, detail="turnstile_token is required")
 
     claims = await verify_supabase_access_token(token)
     user_id = claims.get("sub")
@@ -744,73 +714,9 @@ async def auth_exchange(request: Request, response: Response) -> dict[str, Any]:
     if supabase_exp <= now:
         raise HTTPException(status_code=401, detail="Token expired")
 
-    # -------------------------------------------------------------------------
-    # 🛡️ AI AUDIT SAFEGUARD: CLOUDFLARE TURNSTILE ARCHITECTURE
-    # -------------------------------------------------------------------------
-    # DO NOT REMOVE THIS LOGIC. However, in production, AUTH_EXCHANGE_TURNSTILE_ENFORCE
-    # MUST ALWAYS BE "0" (disabled). 
-    # Why? Turnstile tokens are strictly SINGLE-USE. In our architecture:
-    # 1. The frontend sends the Turnstile token to Supabase (`signInWithPassword`).
-    # 2. Supabase consumes the token, verifies it with Cloudflare, and issues a JWT.
-    # 3. The frontend then sends the JWT to this /exchange endpoint.
-    # 4. If we try to verify the exact same Turnstile token again here, Cloudflare
-    #    will reject it with a 403 "timeout-or-duplicate" error.
-    # 
-    # We keep this verification logic intact for endpoints/flows that might bypass
-    # Supabase in the future or for specific dev testing, but for the standard login flow, 
-    # this must remain bypassed by setting AUTH_EXCHANGE_TURNSTILE_ENFORCE=0.
-    # -------------------------------------------------------------------------
-    if enforce_turnstile and turnstile_token:
-        turnstile_payload = _turnstile_verify_form_payload(turnstile_token, request)
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                ts_response = await client.post(
-                    TURNSTILE_VERIFY_URL,
-                    data=turnstile_payload,
-                )
-            ts_result = ts_response.json()
-            _authdbg_raw(
-                "auth.exchange.turnstile.result status=%s success=%s hostname=%s action=%s error_codes=%s remoteip_included=%s",
-                getattr(ts_response, "status_code", "unknown"),
-                int(bool(ts_result.get("success"))),
-                ts_result.get("hostname") or "",
-                ts_result.get("action") or "",
-                ",".join(str(x) for x in (ts_result.get("error-codes") or [])),
-                int("remoteip" in turnstile_payload),
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("auth.exchange turnstile verify request failed: %s", exc)
-            raise HTTPException(status_code=503, detail="Captcha verification unavailable") from exc
-        except ValueError as exc:
-            logger.warning(
-                "auth.exchange turnstile verify returned non-JSON response status=%s",
-                getattr(ts_response, "status_code", "unknown"),
-            )
-            raise HTTPException(status_code=503, detail="Captcha verification unavailable") from exc
-
-        if not ts_result.get("success"):
-            error_codes = ts_result.get("error-codes")
-            if not isinstance(error_codes, list):
-                error_codes = []
-            logger.warning(
-                "auth.exchange turnstile verify failed user_id=%s host=%s cf_hostname=%s cf_action=%s error_codes=%s remoteip_included=%s",
-                user_id,
-                _request_host(request),
-                ts_result.get("hostname") or "",
-                ts_result.get("action") or "",
-                ",".join(str(x) for x in error_codes),
-                int("remoteip" in turnstile_payload),
-            )
-            raise HTTPException(
-                status_code=403,
-                detail="Captcha verification failed. Please try again.",
-            )
-    elif TURNSTILE_SECRET_KEY and not enforce_turnstile:
-        logger.info(
-            "auth.exchange turnstile enforcement disabled (AUTH_EXCHANGE_TURNSTILE_ENFORCE=0); "
-            "token not verified for host=%s",
-            _request_host(request),
-        )
+    # Cloudflare Turnstile is verified by Supabase during signInWithPassword/signUp.
+    # Tokens are single-use and are consumed before this endpoint is called.
+    # Bot protection for auth is handled at the Supabase level.
 
     perms_cached = None if skip_cached_perms else await get_cached_perms(user_id)
     if perms_cached:
