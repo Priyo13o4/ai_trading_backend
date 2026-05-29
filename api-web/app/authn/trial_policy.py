@@ -99,7 +99,7 @@ def _rest_url(path: str) -> str:
 
 
 async def _get_active_trial_subscription(user_id: str) -> dict[str, object] | None:
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = _rest_url(
         "/rest/v1/user_subscriptions"
         f"?select=id,metadata,expires_at&user_id=eq.{user_id}&status=eq.trial&expires_at=gt.{now_iso}&order=expires_at.asc&limit=1"
@@ -183,7 +183,7 @@ async def _mark_device_trial_first_use(
 
 
 async def _disable_trial_entitlement(user_id: str) -> None:
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = _rest_url(f"/rest/v1/user_subscriptions?user_id=eq.{user_id}&status=eq.trial")
     payload = {
         "status": "expired",
