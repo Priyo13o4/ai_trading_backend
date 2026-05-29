@@ -56,8 +56,9 @@ async def get_referral_profile(
 
     supabase = get_supabase_client()
 
-    # H5: Run all 3 DB queries concurrently instead of sequentially
-    code_coro = supabase_db(
+    # H5 fix reversed: Run queries sequentially to prevent thread-safety issues 
+    # with the global Supabase httpx client, which causes RemoteProtocolError
+    code_result = await supabase_db(
         lambda: supabase.table("referral_codes")
         .select("code")
         .eq("user_id", user_id)
@@ -65,23 +66,19 @@ async def get_referral_profile(
         .limit(1)
         .execute()
     )
-    tracking_coro = supabase_db(
+    tracking_result = await supabase_db(
         lambda: supabase.table("referral_tracking")
         .select("id,status")
         .eq("referrer_id", user_id)
         .limit(500)  # H5: bound the row count
         .execute()
     )
-    rewards_coro = supabase_db(
+    rewards_result = await supabase_db(
         lambda: supabase.table("referral_rewards")
         .select("referral_id,status")
         .eq("user_id", user_id)
         .in_("status", ["available", "applied", "claimed"])
         .execute()
-    )
-
-    code_result, tracking_result, rewards_result = await asyncio.gather(
-        code_coro, tracking_coro, rewards_coro
     )
 
     # --- Referral code ---
