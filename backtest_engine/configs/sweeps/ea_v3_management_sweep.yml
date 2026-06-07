@@ -1,0 +1,61 @@
+# Curated management sweep. This avoids a noisy raw boolean factorial.
+#
+# Dimensions:
+# - ATR filter: on/off
+# - partial close: on/off
+# - management profile: none, break-even only, fixed trailing hybrid, MA trailing
+#
+# Total: 16 variants.
+
+variants:
+  - id: atr_on_partial_on_none
+    description: ATR filter on, partial close on, no SL management
+    overrides: {use_atr_filter: true, use_partial_closing: true, use_break_even: false, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_on_partial_off_none
+    description: ATR filter on, partial close off, no SL management
+    overrides: {use_atr_filter: true, use_partial_closing: false, use_break_even: false, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_off_partial_on_none
+    description: ATR filter off, partial close on, no SL management
+    overrides: {use_atr_filter: false, use_partial_closing: true, use_break_even: false, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_off_partial_off_none
+    description: ATR filter off, partial close off, no SL management
+    overrides: {use_atr_filter: false, use_partial_closing: false, use_break_even: false, use_trailing_stop: false, use_ma_trailing_stop: false}
+
+  - id: atr_on_partial_on_be
+    description: ATR filter on, partial close on, standalone break-even
+    overrides: {use_atr_filter: true, use_partial_closing: true, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_on_partial_off_be
+    description: ATR filter on, partial close off, standalone break-even
+    overrides: {use_atr_filter: true, use_partial_closing: false, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_off_partial_on_be
+    description: ATR filter off, partial close on, standalone break-even
+    overrides: {use_atr_filter: false, use_partial_closing: true, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: false}
+  - id: atr_off_partial_off_be
+    description: ATR filter off, partial close off, standalone break-even
+    overrides: {use_atr_filter: false, use_partial_closing: false, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: false}
+
+  - id: atr_on_partial_on_fixed_trailing
+    description: ATR filter on, partial close on, EA hybrid BE + fixed trailing
+    overrides: {use_atr_filter: true, use_partial_closing: true, use_break_even: true, use_trailing_stop: true, use_ma_trailing_stop: false}
+  - id: atr_on_partial_off_fixed_trailing
+    description: ATR filter on, partial close off, EA hybrid BE + fixed trailing
+    overrides: {use_atr_filter: true, use_partial_closing: false, use_break_even: true, use_trailing_stop: true, use_ma_trailing_stop: false}
+  - id: atr_off_partial_on_fixed_trailing
+    description: ATR filter off, partial close on, EA hybrid BE + fixed trailing
+    overrides: {use_atr_filter: false, use_partial_closing: true, use_break_even: true, use_trailing_stop: true, use_ma_trailing_stop: false}
+  - id: atr_off_partial_off_fixed_trailing
+    description: ATR filter off, partial close off, EA hybrid BE + fixed trailing
+    overrides: {use_atr_filter: false, use_partial_closing: false, use_break_even: true, use_trailing_stop: true, use_ma_trailing_stop: false}
+
+  - id: atr_on_partial_on_ma_trailing
+    description: ATR filter on, partial close on, MA trailing
+    overrides: {use_atr_filter: true, use_partial_closing: true, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: true}
+  - id: atr_on_partial_off_ma_trailing
+    description: ATR filter on, partial close off, MA trailing
+    overrides: {use_atr_filter: true, use_partial_closing: false, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: true}
+  - id: atr_off_partial_on_ma_trailing
+    description: ATR filter off, partial close on, MA trailing
+    overrides: {use_atr_filter: false, use_partial_closing: true, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: true}
+  - id: atr_off_partial_off_ma_trailing
+    description: ATR filter off, partial close off, MA trailing
+    overrides: {use_atr_filter: false, use_partial_closing: false, use_break_even: true, use_trailing_stop: false, use_ma_trailing_stop: true}

@@ -1,133 +1,89 @@
 # Razorpay Integration Guide
 
-This document outlines the technical integration of Razorpay into our AI Trading Bot ecosystem.
-**CRITICAL:** This guide strictly adheres to the provider-agnostic sleeper architecture defined in `payment_integration.md`.
+This guide reflects the live Razorpay implementation in `ai_trading_bot`.
+The active provider class is `api-web/app/payments/payment_providers/razorpay_provider.py`.
 
-## 1. Provider Abstraction Implementation
+## Where Razorpay lives
 
-Razorpay is our primary fiat provider. It must be implemented behind the `payment_providers/base.py` contract.
-*Do not hardcode Razorpay logic directly in the FastAPI router scripts.*
+- Provider factory: `api-web/app/payments/payment_providers/router.py`
+- Provider class: `api-web/app/payments/payment_providers/razorpay_provider.py`
+- Payment routes: `api-web/app/payments/routes.py`
+- Webhook route: `api-web/app/payments/webhook_handler.py` at `/api/webhooks/razorpay`
+- Referral pause/resume worker: `api-web/app/referrals/pause_resume.py`
 
-### Implementation Location: `api-web/app/payments/payment_providers/razorpay_provider.py`
+## Environment variables
 
-```python
-import razorpay
-import hmac
-from .base import PaymentProvider
+- `RAZORPAY_KEY_ID`
+- `RAZORPAY_KEY_SECRET`
+- `RAZORPAY_WEBHOOK_SECRET`
+- `RAZORPAY_PLAN_ID_CORE`
 
-class RazorpayProvider(PaymentProvider):
-    def __init__(self, key_id: str, key_secret: str, webhook_secret: str):
-        self.client = razorpay.Client(auth=(key_id, key_secret))
-        self.webhook_secret = webhook_secret
+## Current provider behavior
 
-    async def create_checkout(self, plan_id: str, amount: float, currency: str, idempotency_key: str, **kwargs):
-        # amount is received in USD/fiat, must convert to paise for Razorpay
-        order_data = {
-            "amount": int(amount * 100), 
-            "currency": currency,
-            "receipt": idempotency_key,
-            "payment_capture": 1
-        }
-        # Call Razorpay SDK
-        order = self.client.order.create(data=order_data)
-        
-        return {
-            "provider_payment_id": order["id"],
-            "checkout_url": None, # Razorpay checkout happens via frontend JS, not a hosted URL
-            "provider_checkout_data": {"order_id": order["id"], "amount": order["amount"], "currency": order["currency"]}
-        }
+### `create_checkout(user_id, plan_id, billing_period)`
 
-    def verify_webhook(self, raw_body: bytes, headers: dict):
-        # 1. HMAC SHA256 Signature Validation
-        signature = headers.get("x-razorpay-signature")
-        if not signature:
-            raise ValueError("Missing signature")
-            
-        try:
-            self.client.utility.verify_webhook_signature(
-                raw_body.decode('utf-8'), 
-                signature, 
-                self.webhook_secret
-            )
-        except razorpay.errors.SignatureVerificationError:
-            raise ValueError("Invalid signature")
-            
-        return True # Handled in unified webhook route wrapper
-```
+- Creates a Razorpay subscription checkout session.
+- Uses `RAZORPAY_PLAN_ID_CORE` as the active plan source.
+- Returns a `short_url` checkout link plus provider metadata.
+- Defers the first charge when the user already has active or trial access.
+- Uses the user and plan identifiers as notes for correlation.
 
-## 2. API Endpoints (FastAPI)
+### `verify_webhook_signature(payload, signature)`
 
-All endpoints must respect the `PAYMENTS_ENABLED` feature flag and route through the generic tables (`payment_transactions`, `webhook_events`).
+- Verifies the Razorpay webhook HMAC signature.
+- Returns `True` or `False`; the webhook handler owns the DB side effects.
 
-### `POST /api/payments/create-checkout`
-- **Auth:** Require cookie session via `Depends(auth_context)`.
-- **Feature Gate:** `Depends(require_payments_enabled)`.
-- **Flow:** Maps `plan_id` -> generates `payment_transactions` generic row (status: pending) -> delegates to `get_provider('razorpay').create_checkout()`.
+### `map_event_to_state(event_type)`
 
-### `POST /api/webhooks/{provider}`
-- **Auth:** NONE (But CSRF Exempted).
-- **Flow:**
-    1. Verify signature via `get_provider('razorpay').verify_webhook(raw_body, headers)`.
-    2. Idempotency Check: `redis_cache` and `webhook_events` insert.
-    3. Update `payment_transactions` DB State Machine using Supabase `service_role`.
-    4. Call Supabase RPCs (`record_payment`, `create_subscription`).
-    5. Invalidate User Session Cache! `await invalidate_perms(user_id)`.
+Current mapping includes subscription and payment lifecycle events such as:
 
-## 3. Frontend Checkout Initiation (React / Vite)
+- `subscription.created`
+- `subscription.authenticated`
+- `subscription.activated`
+- `subscription.charged`
+- `subscription.cancelled`
+- `subscription.halted`
+- `payment.captured`
+- `payment.failed`
+- `refund.processed`
 
-The frontend triggers the checkout modal using the Razorpay JavaScript SDK, verifying the `VITE_PAYMENTS_ENABLED` flag first.
+### `cancel_subscription(provider_subscription_id)`
 
-```tsx
-// src/components/Pricing.tsx
-import useRazorpay from 'react-razorpay';
-import { api } from '@/services/api';
+- Schedules cancellation at period end.
+- Keeps access active through the current billing cycle.
+- This is the behavior used by `/api/payments/cancel-subscription`.
 
-export const handleSubscribe = async (planId: string, provider: 'razorpay' | 'crypto' = 'razorpay') => {
-    if (import.meta.env.VITE_PAYMENTS_ENABLED !== 'true') {
-        toast.info('Checkout is coming soon.');
-        return;
-    }
+### `cancel_checkout_attempt(provider_payment_id)`
 
-    // 1. Fetch order ID from unified endpoint
-    const { provider_checkout_data } = await api.createCheckout(planId, provider);
+- Best-effort cancellation for unresolved checkout attempts.
+- If the attempt is already terminal, it is treated as successfully handled.
+- Used by the checkout supersede path in `api-web/app/payments/routes.py`.
 
-    // 2. Initialize Razorpay Checkout
-    const options = {
-        key: import.meta.env.VITE_RAZORPAY_KEY_ID,
-        amount: provider_checkout_data.amount,
-        currency: provider_checkout_data.currency,
-        name: "PipFactor AI",
-        order_id: provider_checkout_data.order_id,
-        handler: function (res) {
-            // NEVER trust this success visually. Show "Confirming..." 
-            // True confirmation happens via Webhook -> PostgREST -> invalidate_perms cache drop
-            window.location.href = `/?payment=success`;
-        }
-    };
-    
-    const rzp = new window.Razorpay(options);
-    rzp.open();
-};
-```
+### `pause_subscription(subscription_id, pause_at_timestamp)` and `resume_subscription(subscription_id, pause_id)`
 
-## 4. Crucial Infrastructure Details
+- These direct subscription actions are used by the referral reward pause/resume worker.
+- They run the blocking Razorpay HTTP calls in a thread pool so the FastAPI event loop stays responsive.
+- These actions are not part of the public payment router, but they are part of the live backend behavior.
 
-### 4.1. CSRF Middleware Exemption (`main.py`)
-Because of our strict Double-Submit Cookie protection enforcing `X-CSRF-Token` on mutations, Razorpay's webhook MUST be conditionally exempted.
-**File:** `api-web/app/main.py`
-```python
-AUTH_CSRF_EXEMPT_PATHS = {
-    "/auth/exchange",
-    "/auth/logout",
-    "/auth/logout-all",
-    "/auth/invalidate",
-    "/api/webhooks/razorpay" # <- Required!
-}
-```
+## Current API routes that touch Razorpay
 
-### 4.2. Cloudflared Tunnel Whitelisting
-Cloudflare's Bot Fight Mode will block Razorpay's IPN requests. Whitelist these Razorpay dispatch IPs in your WAF pointing to the tunnel:
-- `52.66.111.41`
-- `52.66.82.164`
-- `52.66.113.111`
-- `13.235.6.21`
+- `POST /api/payments/create-checkout`
+- `POST /api/payments/cancel-checkout-attempt`
+- `POST /api/payments/cancel-subscription`
+- `POST /api/payments/resume-subscription`
+- `POST /api/webhooks/razorpay`
+
+## Webhook flow
+
+1. Razorpay webhook hits `/api/webhooks/razorpay`.
+2. The signature is verified through the provider class.
+3. The webhook handler maps the event into internal payment states.
+4. The handler updates the Supabase-backed payment tables through the service-role path.
+5. Referral evaluation and cache invalidation run as internal follow-up steps.
+
+## Important truth notes
+
+- Razorpay is implemented behind the payment provider abstraction.
+- There is no separate Supabase Edge Function implementation for Razorpay.
+- Do not hardcode Razorpay logic directly into the router or webhook handler.
+- The current codebase supports checkout creation, unresolved-attempt cancellation, deferred cancellation, and referral-driven pause/resume.

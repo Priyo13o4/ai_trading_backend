@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from app.models import Strategy
+from trading_common.models import Strategy
 
 from app.core.dependencies import require_signals_context
 from app.authn.deps import require_session
@@ -24,7 +24,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+def _signal_latest_key(pair: str, *args, **kwargs):
+    return f"latest:signal:{pair.upper()}"
+
+def _signal_latest_ttl(data):
+    if hasattr(data, 'body'):
+        import json
+        payload = json.loads(data.body.decode('utf-8'))
+        return int(payload.get("expiry_minutes", 30)) * 60
+    elif isinstance(data, dict):
+        return int(data.get("expiry_minutes", 30)) * 60
+    return 30 * 60
+
 @router.get("/api/signals/{pair}")
+@singleflight_cache(key_builder=_signal_latest_key, ttl_func=_signal_latest_ttl)
 async def get_signal_latest(
     pair: str,
     ctx=Depends(require_session),
@@ -36,34 +49,15 @@ async def get_signal_latest(
     try:
         require_permission(ctx, "signals")
         
-        key = f"latest:signal:{pair.upper()}"
-        
-        # Try Redis cache first
-        cached = await REDIS.get(key)
-        if cached: 
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info(f"[API] Cache HIT (negative) for signal: {pair}")
-                raise HTTPException(404, f"No active strategy found for {pair}")
-            logger.info(f"[API] Cache HIT for signal: {pair}")
-            return JSONResponse(content=payload)
-
         # Cache miss - fetch from database
-        logger.info(f"[API] Cache MISS for signal: {pair}, querying database")
+        logger.info(f"[API] Cache MISS/Bypass for signal: {pair}, querying database")
         row = await get_latest_signal_from_db(db, pair)
         
         if not row: 
             logger.warning(f"[API] No active strategy found for pair: {pair}")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, f"No active strategy found for {pair}")
+            return {"_cache_status": "NOT_FOUND"}
         
-        # Cache the result
-        ttl = int(row.get("expiry_minutes") or 30) * 60
-        serialized = json_dumps(row)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached signal for {pair} with TTL={ttl}s")
-        
-        return JSONResponse(content=json.loads(serialized))
+        return row
     
     except HTTPException:
         raise
@@ -71,8 +65,12 @@ async def get_signal_latest(
         logger.error(f"[API ERROR] /api/signals/{pair}: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")
 
+def _signal_preview_key(pair: str, *args, **kwargs):
+    return f"preview:signal:v2:{pair.upper().strip()}"
+
 @router.get("/api/preview/{pair}")
-async def get_signal_preview(pair: str, request: Request, db: AsyncSession = Depends(get_db)):
+@singleflight_cache(key_builder=_signal_preview_key, ttl=3600)
+async def get_signal_preview(pair: str, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     """Get old strategy preview for main page (no auth required)"""
     logger.info(f"[API] GET /api/preview/{pair} - Public access")
     
@@ -83,35 +81,17 @@ async def get_signal_preview(pair: str, request: Request, db: AsyncSession = Dep
             supported = ", ".join(sorted(PREVIEW_SUPPORTED_PAIRS))
             raise HTTPException(404, f"Preview only available for: {supported}")
         
-        key = f"preview:signal:v2:{normalized_pair}"
-        response_headers = {"Cache-Control": "public, max-age=300"}
+        response.headers["Cache-Control"] = "public, max-age=300"
         
-        # Try Redis cache
-        cached = await REDIS.get(key)
-        if cached: 
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info(f"[API] Cache HIT (negative) for preview: {normalized_pair}")
-                raise HTTPException(404, "No preview available")
-            logger.info(f"[API] Cache HIT for preview: {normalized_pair}")
-            return JSONResponse(content=payload, headers=response_headers)
-
         # Cache miss - get old signal
-        logger.info(f"[API] Cache MISS for preview: {normalized_pair}, querying database")
+        logger.info(f"[API] Cache MISS/Bypass for preview: {normalized_pair}, querying database")
         row = await get_old_signal_from_db(db, normalized_pair)
         
         if not row: 
             logger.warning(f"[API] No preview strategy found for pair: {normalized_pair}")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, "No preview available")
+            return {"_cache_status": "NOT_FOUND"}
         
-        # Cache preview for 1 hour (it's old data)
-        ttl = 60 * 60
-        serialized = json_dumps(row)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached preview for {normalized_pair} with TTL={ttl}s")
-        
-        return JSONResponse(content=json.loads(serialized), headers=response_headers)
+        return row
     
     except HTTPException:
         raise
@@ -262,7 +242,20 @@ async def publish_strategy_update_endpoint(request: Request):
 
     return {"status": "ok"}
 
+def _strategy_by_id_key(strategy_id: int, *args, **kwargs):
+    return f"latest:strategy:id:{strategy_id}"
+
+def _strategy_by_id_ttl(data):
+    if hasattr(data, 'body'):
+        import json
+        payload = json.loads(data.body.decode('utf-8'))
+        return _strategy_cache_ttl([payload])
+    elif isinstance(data, dict):
+        return _strategy_cache_ttl([data])
+    return 300
+
 @router.get("/api/strategies/{strategy_id}")
+@singleflight_cache(key_builder=_strategy_by_id_key, ttl_func=_strategy_by_id_ttl)
 async def get_strategy_by_id(
     strategy_id: int,
     request: Request,
@@ -276,22 +269,12 @@ async def get_strategy_by_id(
     try:
         require_permission(ctx, "signals")
 
-        key = f"latest:strategy:id:{strategy_id}"
-        cached = await REDIS.get(key)
-        if cached:
-            logger.info(f"[API] Cache HIT for strategy id={strategy_id}")
-            return JSONResponse(content=json.loads(cached))
-
-        logger.info(f"[API] Cache MISS for strategy id={strategy_id}, querying database")
+        logger.info(f"[API] Cache MISS/Bypass for strategy id={strategy_id}, querying database")
         row = await get_strategy_by_id_from_db(db, strategy_id)
         if not row:
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, f"Strategy {strategy_id} not found")
+            return {"_cache_status": "NOT_FOUND"}
 
-        ttl = _strategy_cache_ttl([row])
-        serialized = json_dumps(row)
-        await REDIS.setex(key, ttl, serialized)
-        return JSONResponse(content=json.loads(serialized))
+        return row
     except HTTPException:
         raise
     except Exception as e:
@@ -336,6 +319,12 @@ async def n8n_push_strategy(request: Request, payload: StrategyPushRequest, db: 
             "risk_reward_ratio": float(strategy.risk_reward_ratio) if strategy.risk_reward_ratio else 0,
             "timestamp": strategy.timestamp.isoformat() if strategy.timestamp else None,
             "expiry_time": strategy.expiry_time.isoformat() if strategy.expiry_time else None,
+            "execution_allowed": bool(strategy.execution_allowed) if strategy.execution_allowed is not None else True,
+            "trade_recommended": bool(strategy.trade_recommended) if strategy.trade_recommended is not None else True,
+            "risk_level": strategy.risk_level,
+            "trade_mode": strategy.trade_mode,
+            "pre_entry_rule": strategy.pre_entry_rule,
+            "post_entry_rule": strategy.post_entry_rule,
         }
         
         # Publish to Redis Pub/Sub for api-worker to pick up
@@ -348,4 +337,3 @@ async def n8n_push_strategy(request: Request, payload: StrategyPushRequest, db: 
     except Exception as e:
         logger.error(f"Error processing strategy push: {e}", exc_info=True)
         raise HTTPException(500, "Internal server error")
-

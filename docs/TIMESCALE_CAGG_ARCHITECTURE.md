@@ -1,5 +1,5 @@
 # TimescaleDB Continuous Aggregates Architecture
-## Post-Migration Summary (Jan 2026)
+## Current State (May 2026)
 
 ---
 
@@ -12,6 +12,10 @@
   - `D1/W1/MN1` (broker-provided, DST/session aligned)
 - Timescale continuous aggregates store **derived truth** (fixed UTC buckets):
   - `candlesticks_m5`, `candlesticks_m15`, `candlesticks_m30`, `candlesticks_h1`, `candlesticks_h4`
+
+Current deployment truth:
+- `docker-compose.yml` sets `USE_TIMESCALE_CAGGS=true` for the live backend containers.
+- The gate still exists in code so derived timeframes can be disabled deliberately if needed.
 
 **Rule:** The API must never read derived TFs from `candlesticks`, and must never read D1/W1/MN1 from CAGGs.
 
@@ -49,6 +53,10 @@
   - `CALL refresh_continuous_aggregate('candlesticks_m5',  '2025-01-01', '2026-01-01');`
   - Repeat for `candlesticks_m15/m30/h1/h4`.
 - After that, Timescale policies keep the *recent rolling window* current automatically.
+- Current backend query paths already respect the hybrid model:
+  - `api-web/app/routes/historical.py` decides broker vs CAGG reads.
+  - `api-web/app/db/helpers.py` and `common/trading_common/timeframes.py` enforce the timeframe policy.
+  - `api-worker/scripts/worker/data_updater_scheduler.py` and `api-worker/scripts/calculate_recent_indicators_v2.py` honor the same `USE_TIMESCALE_CAGGS` switch.
 
 ## Verify it’s working
 

@@ -1,0 +1,39 @@
+services:
+  backtest-engine:
+    build:
+      context: .
+      dockerfile: backtest_engine/Dockerfile
+    image: pipfactor-backtest-engine:latest
+    profiles:
+      - backtest
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - BACKTEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/backtest_lab
+      - SOURCE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${TRADING_BOT_DB}
+      - PYTHONPATH=/app:/common
+    volumes:
+      - ./backtest_engine:/app
+      - ./common:/common
+    networks:
+      - default
+
+  # A helper to ensure the backtest_lab database exists before backtest runs
+  backtest-db-setup:
+    image: custom-postgres-timescale:pg18
+    profiles:
+      - backtest
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    command: >
+      bash -c "
+        export PGPASSWORD='${POSTGRES_PASSWORD}'
+        psql -h postgres -U ${POSTGRES_USER} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'backtest_lab'\" | grep -q 1 || psql -h postgres -U ${POSTGRES_USER} -d postgres -c 'CREATE DATABASE backtest_lab;'
+      "
+    networks:
+      - default
+    depends_on:
+      - postgres

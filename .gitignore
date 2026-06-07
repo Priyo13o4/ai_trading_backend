@@ -50,6 +50,7 @@ redisdata/
 pgdata/
 tmp/
 db_dumps/
+backtest_engine/reports/
 
 # ---- Scraper outputs / generated data ----
 **/scraped_data/

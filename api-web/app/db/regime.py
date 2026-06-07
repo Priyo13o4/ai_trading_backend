@@ -5,7 +5,7 @@ import pandas as pd
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import RegimeData
+from trading_common.models import RegimeData
 from trading_common.indicators.technical import calculate_all_indicators
 from .connection import _use_timescale_caggs
 from .helpers import _ohlcv_relation_for_timeframe, _compute_swing_analysis
@@ -68,10 +68,10 @@ async def get_regime_market_data_from_db(db: AsyncSession):
         failed_symbols = []
 
         # Discover symbols/timeframes from DB so adding new pairs doesn't require code changes
-        symbols_res = await db.execute(text("SELECT DISTINCT symbol FROM candlesticks ORDER BY symbol"))
+        symbols_res = await db.execute(text("SELECT DISTINCT symbol FROM candlesticks WHERE time >= NOW() - INTERVAL '7 days' ORDER BY symbol"))
         symbols = [row._mapping["symbol"] for row in symbols_res]
 
-        timeframes_res = await db.execute(text("SELECT DISTINCT timeframe FROM technical_indicators ORDER BY timeframe"))
+        timeframes_res = await db.execute(text("SELECT DISTINCT timeframe FROM technical_indicators WHERE time >= NOW() - INTERVAL '7 days' ORDER BY timeframe"))
         timeframes = [row._mapping["timeframe"] for row in timeframes_res]
 
         if not timeframes:
@@ -80,7 +80,7 @@ async def get_regime_market_data_from_db(db: AsyncSession):
                 timeframes = ["M5", "M15", "H1", "H4", "D1", "W1"]
             else:
                 tf_res = await db.execute(
-                    text("SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe <> 'M1' ORDER BY timeframe")
+                    text("SELECT DISTINCT timeframe FROM candlesticks WHERE timeframe <> 'M1' AND time >= NOW() - INTERVAL '7 days' ORDER BY timeframe")
                 )
                 timeframes = [row._mapping["timeframe"] for row in tf_res]
 

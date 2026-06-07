@@ -1,7 +1,7 @@
 import logging
 from sqlalchemy import Numeric, String, cast, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Strategy
+from trading_common.models import Strategy
 
 logger = logging.getLogger(__name__)
 

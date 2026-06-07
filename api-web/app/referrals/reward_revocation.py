@@ -6,6 +6,7 @@ from typing import Any
 from app.db import supabase_db, get_supabase_client
 from app.observability.debug import debug_log
 from app.referrals.utils import validate_uuid
+from app.referrals.pause_resume import _cas_cycle_status
 
 logger = logging.getLogger(__name__)
 
@@ -144,21 +145,16 @@ async def revoke_referral_reward_on_refund(
 
     # Attempt atomic CAS update: on_hold -> revoked.
     now_iso = now_utc.isoformat()
-    update_result = await supabase_db(
-        lambda: supabase.table("referral_rewards")
-        .update(
-            {
-                "status": "revoked",
-                "updated_at": now_iso,
-            }
-        )
-        .eq("referral_id", reward_id)
-        .eq("status", "on_hold")
-        .gt("hold_expires_at", now_iso)
-        .execute()
+    transitioned = await _cas_cycle_status(
+        supabase,
+        reward_id=reward_id,
+        cycle_number=None,
+        expected_status="on_hold",
+        new_status="revoked",
+        hold_expires_at_gt=now_iso,
     )
 
-    if not getattr(update_result, "data", None):
+    if not transitioned:
         # CAS failed, likely already revoked by concurrent call.
         # Re-fetch to confirm actual status.
         refetch_result = await supabase_db(

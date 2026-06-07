@@ -22,41 +22,21 @@ def _regime_all_key(request: Request, response: Response, ctx: dict = None) -> s
     return "regime:all"
 
 @router.get("/api/regime")
-@singleflight_cache(key_builder=_regime_all_key, ttl=60)
+@singleflight_cache(key_builder=_regime_all_key, ttl=900)
 async def get_regime(request: Request, response: Response, ctx: dict = Depends(require_signals_context)):
     """Get latest regime analysis for all trading pairs"""
     logger.info(f"[API] GET /api/regime - User: {ctx.get('user_id', 'anonymous')}")
     
     try:
-        key = "latest:regime"
-        
-        # Try cache
-        cached = await REDIS.get(key)
-        if cached:
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info("[API] Cache HIT (negative) for regime data")
-                raise HTTPException(404, "No regime data found")
-            logger.info("[API] Cache HIT for regime data")
-            return JSONResponse(content=payload)
-        
-        # Cache miss
-        logger.info("[API] Cache MISS for regime, querying database")
+        logger.info("[API] Cache MISS/Bypass for regime, querying database")
         async with AsyncSessionLocal() as db:
             rows = await get_latest_regime_from_db(db)
         
         if not rows:
             logger.warning("[API] No regime data found in database")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, "No regime data found")
+            return {"_cache_status": "NOT_FOUND"}
         
-        # Cache for 15 minutes
-        ttl = 15 * 60
-        serialized = json_dumps(rows)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached regime data for {len(rows)} pairs with TTL={ttl}s")
-        
-        return JSONResponse(content=json.loads(serialized))
+        return rows
     
     except HTTPException:
         raise
@@ -68,7 +48,7 @@ def _regime_market_data_key(request: Request, db: AsyncSession = None) -> str:
     return "regime:market_data"
 
 @router.get("/api/regime/market-data")
-@singleflight_cache(key_builder=_regime_market_data_key, ttl=60)
+@singleflight_cache(key_builder=_regime_market_data_key, ttl=300)
 async def get_regime_market_data_markdown(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Get comprehensive market data for regime analysis (n8n workflow endpoint)
@@ -85,26 +65,12 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
     logger.info("[API] GET /api/regime/market-data - n8n workflow request (authenticated)")
     
     try:
-        key = "regime:market-data:markdown"
-        
-        # Try cache (5 min TTL for fresh data)
-        cached = await REDIS.get(key)
-        if cached:
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info("[API] Cache HIT (negative) for regime market data (markdown)")
-                raise HTTPException(404, "No market data available")
-            logger.info("[API] Cache HIT for regime market data (markdown)")
-            return JSONResponse(content=payload)
-        
-        # Cache miss - fetch from database
-        logger.info("[API] Cache MISS for regime market data, querying database")
+        logger.info("[API] Cache MISS/Bypass for regime market data, querying database")
         data = await get_regime_market_data_from_db(db)
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, "No market data available")
+            return {"_cache_status": "NOT_FOUND"}
         
         # Convert to markdown format split by symbol
         market_data_raw = data.get("market_data", {})
@@ -271,13 +237,7 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
             "market_data": market_data_formatted
         }
         
-        # Cache for 5 minutes
-        ttl = 5 * 60
-        from app.utils import json_dumps
-        await REDIS.setex(key, ttl, json_dumps(response_data))
-        logger.info(f"[API] Cached regime market data for {len(market_data_formatted)} symbols with TTL={ttl}s")
-        
-        return JSONResponse(content=response_data)
+        return response_data
     
     except HTTPException:
         raise
@@ -289,7 +249,7 @@ def _regime_market_data_json_key(request: Request, symbol: Optional[str] = None,
     return f"regime:market_data_json:{symbol}:{symbols}"
 
 @router.get("/api/regime/market-data/json")
-@singleflight_cache(key_builder=_regime_market_data_json_key, ttl=60)
+@singleflight_cache(key_builder=_regime_market_data_json_key, ttl=300)
 async def get_regime_market_data_json(
     request: Request,
     symbol: Optional[str] = Query(None, description="Single symbol filter, e.g. XAUUSD"),
@@ -353,34 +313,14 @@ async def get_regime_market_data_json(
     )
     
     try:
-        key = "regime:market-data:json"
-        
-        # Try cache (5 min TTL for fresh data)
-        cached = await REDIS.get(key)
-        if cached:
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info("[API] Cache HIT (negative) for JSON market data")
-                raise HTTPException(404, "No market data available")
-            logger.info("[API] Cache HIT for JSON market data")
-            return JSONResponse(content=_apply_symbol_filter(payload))
-        
-        # Cache miss - fetch from database
-        logger.info("[API] Cache MISS for JSON market data, querying database")
+        logger.info("[API] Cache MISS/Bypass for JSON market data, querying database")
         data = await get_regime_market_data_from_db(db)
         
         if not data or not data.get("market_data"):
             logger.warning("[API] No market data available")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, "No market data available")
+            return {"_cache_status": "NOT_FOUND"}
         
-        # Cache for 5 minutes
-        ttl = 5 * 60
-        serialized = json_dumps(data)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached JSON market data for {len(data.get('market_data', {}))} symbols with TTL={ttl}s")
-        
-        return JSONResponse(content=_apply_symbol_filter(json.loads(serialized)))
+        return _apply_symbol_filter(data)
     
     except HTTPException:
         raise
@@ -392,41 +332,21 @@ def _regime_by_pair_key(pair: str, ctx: dict = None) -> str:
     return f"regime:pair:{pair}"
 
 @router.get("/api/regime/{pair}")
-@singleflight_cache(key_builder=_regime_by_pair_key, ttl=60)
+@singleflight_cache(key_builder=_regime_by_pair_key, ttl=900)
 async def get_regime_by_pair(pair: str, ctx=Depends(require_signals_context)):
     """Get latest regime analysis for a specific pair"""
     logger.info(f"[API] GET /api/regime/{pair} - User: {ctx.get('user_id', 'anonymous')}")
     
     try:
-        key = f"regime:{pair.upper()}"
-        
-        # Try cache
-        cached = await REDIS.get(key)
-        if cached:
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info(f"[API] Cache HIT (negative) for regime: {pair}")
-                raise HTTPException(404, f"No regime data for {pair}")
-            logger.info(f"[API] Cache HIT for regime: {pair}")
-            return JSONResponse(content=payload)
-        
-        # Cache miss
-        logger.info(f"[API] Cache MISS for regime: {pair}, querying database")
+        logger.info(f"[API] Cache MISS/Bypass for regime: {pair}, querying database")
         async with AsyncSessionLocal() as db:
             row = await get_regime_for_pair(db, pair)
         
         if not row:
             logger.warning(f"[API] No regime data found for pair: {pair}")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, f"No regime data for {pair}")
+            return {"_cache_status": "NOT_FOUND"}
         
-        # Cache for 15 minutes
-        ttl = 15 * 60
-        serialized = json_dumps(row)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info(f"[API] Cached regime for {pair} with TTL={ttl}s")
-        
-        return JSONResponse(content=json.loads(serialized))
+        return row
     
     except HTTPException:
         raise

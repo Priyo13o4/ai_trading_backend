@@ -1,36 +1,59 @@
-# Referral Reward Evaluator Integration Note
+# Referral Reward Evaluation Truth Note
 
-This note documents the current referral reward evaluator wiring and contract boundaries.
+This note describes the live referral reward evaluator wiring in `ai_trading_bot`.
+The current implementation is in `api-web/app/referrals/reward_evaluator.py`.
 
-## Current State
+## Current wiring
 
-- Module added: `api-web/app/referrals/reward_evaluator.py`
-- Wiring is active in webhook success handling.
-- Evaluation remains feature-gated by `REFERRAL_REWARD_EVALUATION_ENABLED=true`.
-- Hard reject policy is payment-identity collision only; IP/UA/device are soft-signal logs.
+- Feature flag: `REFERRAL_REWARD_EVALUATION_ENABLED`
+- Entry point: `evaluate_referral_reward(referred_user_id, trigger_payment_id)`
+- Default RPC name: `qualify_referral_reward`
+- Override env var: `REFERRAL_REWARD_EVALUATION_RPC_NAME`
+- Hold window: 7 days
 
-## Wiring Point
+The evaluator is called internally after successful payment processing, once idempotency checks have already passed.
+It does not change the public payment API surface.
 
-The integration call is:
+## What the evaluator does today
 
-- `evaluate_referral_reward(referred_user_id=<user_id>, trigger_payment_id=<payment_tx_id>)`
+1. Validates both UUID inputs.
+2. Loads the pending referral row for the referred user.
+3. Applies fraud checks.
+4. Calls the qualification RPC through `supabase_db()` and the service-role path.
+5. Returns a structured outcome for logs and downstream handling.
 
-This runs after payment success is finalized and idempotency checks are complete in internal payment processing flow.
+## Fraud and safety behavior
 
-## Safety / Transaction Semantics
+- Duplicate payment identity under the same referrer is treated as a hard block.
+- Same-network IP/UA matches are logged as soft signals only.
+- The current fraud check uses the `check_duplicate_payment_identity` RPC.
+- The evaluator is fail-safe: if the fraud path errors, the main qualification flow still handles the request deterministically.
 
-Current implementation uses deterministic qualification flow with idempotent guards.
-For production-safe exactly-once semantics, implement one SQL transaction (or RPC) that does:
+## Pause/resume cycle support
 
-1. Lock `referral_tracking` pending row for referred user.
-2. Lock/select first succeeded payment deterministically (`ORDER BY created_at ASC, id ASC LIMIT 1`).
-3. Insert reward row with `status=on_hold` and `hold_expires_at=now()+7 days` (or configured hold days).
-4. Update tracking status to `qualified`.
+Referral free-month rewards are not just a single event.
+The live backend also has a worker-driven pause/resume flow in `api-web/app/referrals/pause_resume.py`.
+That worker:
 
-## Contract Impact
+- Pauses Razorpay referral subscriptions on schedule.
+- Resumes them when the pause window expires.
+- Uses CAS-style updates on `referral_reward_pause_cycles` to stay idempotent under concurrent workers.
 
-No payment callback/request schema changes are required.
+## Current outcomes
 
-- No provider webhook payload contract changes
-- No provider request payload changes
-- Integration remains internal to existing webhook-processing paths.
+The evaluator can return outcomes such as:
+
+- `feature_disabled`
+- `skip_invalid_input`
+- `skip_no_pending_referral`
+- `skip_not_first_success`
+- `success_reward_created`
+- `success_already_rewarded_reconciled`
+- `fraud_blocked_duplicate_identity`
+- `error_controlled`
+
+## Truth note
+
+- There are no provider payload schema changes required for referral reward evaluation.
+- The integration is internal to the payment webhook-processing path.
+- Use this file as the current behavior note, not as a future implementation spec.

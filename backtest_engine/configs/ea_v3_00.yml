@@ -1,0 +1,84 @@
+# TradeExecutor v3.00 patched configuration profile for backtesting.
+# Keep these names close to the EA input names so config drift is visible.
+
+trade_pairs: "ALL"
+magic_number: 260529
+
+zone_buffer_atr_multiplier: 0.5
+
+min_lot_size: 0.01
+max_lot_size: 0.1
+base_lot_size: 0.02
+use_dynamic_sizing: true
+high_confidence_multiplier: 1.5
+medium_confidence_multiplier: 1.0
+low_confidence_multiplier: 0.7
+
+max_risk_percent_per_trade: 2.0
+max_total_risk_percent: 8.0
+use_drawdown_protection: true
+drawdown_threshold: 10.0
+drawdown_reduction_factor: 0.5
+
+use_atr_filter: true
+min_atr_multiplier: 0.8
+atr_period: 14
+atr_lookback: 20
+
+use_ma_trailing_stop: false
+ma_trail_period: 21
+ma_trail_min_step_percent: 5.0
+
+use_trailing_stop: true
+trailing_start_percent: 100.0
+trailing_step_percent: 50.0
+
+use_break_even: true
+break_even_percent: 20.0
+break_even_atr_multiplier: 2.0
+
+use_partial_closing: true
+partial_close_percent: 50.0
+
+# Round-turn commission assumptions belong to broker/account economics, not
+# strategy logic. MT5 SymbolInfo does not expose commission, so keep explicit
+# per-symbol assumptions here until the broker-spec export is manually enriched.
+# XAUUSD: $0.22 per 0.01 lot round turn = $22.00 per 1.00 lot round turn.
+#USER NOTE to agent : These are actual comissions extracted from symbol specifications of our current broker as of June 2026.
+#USER NOTE2 to agent :These are counted as complete one trade , ie open and close together per lot. 
+default_commission_per_lot_round_turn: 0.0
+commission_per_lot_round_turn_by_symbol:
+  XAUUSD: 11.0
+  AUDUSD : 6.0
+  BTCUSD : 8.75
+  ETHUSD : 1.0
+  EURUSD : 5.0
+  GBPUSD : 6.250
+  NZDUSD : 9.0
+  USDCAD : 7.0
+  USDCHF : 10.50
+  USDJPY : 5.0
+  XAGUSD : 95.0 #YES THAT IS TRUE LOL 
+
+break_even_spread_buffer_points: 0.5
+entry_spread_buffer_pips: 5.0
+entry_spread_buffer_pips_by_symbol:
+  BTCUSD: 1000.0   # $10 buffer (since 1 pip = 0.01)
+  ETHUSD: 150.0    # $1.50 buffer
+  XAUUSD: 25.0     # 25 pips ($0.25 buffer)
+  XAGUSD: 30.0     # 30 pips ($0.30 buffer)
+
+max_concurrent_trades: 3
+use_correlation_filter: true
+max_correlated_exposure: 0.2
+
+filter_market_hours: true
+market_close_hour: 21
+market_reopen_hour: 22
+prevent_new_trades_minutes_before: 15
+
+max_signal_memory: 50
+allow_duplicate_signals: false
+duplicate_price_tolerance_points: 3.0
+use_smart_invalidation: true
+invalidation_points: 50

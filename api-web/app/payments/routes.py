@@ -572,6 +572,7 @@ async def cancel_checkout_attempt(
                 }
             )
             .eq("id", tx["id"])
+            .eq("user_id", user_id)
             .in_("status", [PaymentTransactionStatus.PENDING.value, PaymentTransactionStatus.PROCESSING.value])
             .execute()
         ))
@@ -656,7 +657,7 @@ async def cancel_subscription(
             # Stop future renewals in DB regardless of provider API outcome.
             update_payload["auto_renew"] = False
 
-        await supabase_db(lambda: supabase.table("user_subscriptions").update(update_payload).eq("id", subscription["id"]).execute())
+        await supabase_db(lambda: supabase.table("user_subscriptions").update(update_payload).eq("id", subscription["id"]).eq("user_id", user_id).execute())
         
         # Log the user intent
         await supabase_db(lambda: supabase.table("payment_audit_logs").insert({
@@ -715,7 +716,7 @@ async def resume_subscription(
         # Revert the flag
         await supabase_db(lambda: supabase.table("user_subscriptions").update({
             "cancel_at_period_end": False
-        }).eq("id", subscription["id"]).execute())
+        }).eq("id", subscription["id"]).eq("user_id", user_id).execute())
         
         await supabase_db(lambda: supabase.table("payment_audit_logs").insert({
             "entity_type": "user_subscription",

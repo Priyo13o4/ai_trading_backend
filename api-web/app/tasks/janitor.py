@@ -64,14 +64,33 @@ async def _run_strategy_expiry_janitor_tick() -> int:
 
 
 async def strategy_expiry_janitor_loop(stop_event: asyncio.Event) -> None:
+    from app.redis_cache import CACHE_REDIS
+    from app.payments.tasks import LeaseManager, JANITOR_LEASE_SECONDS, JANITOR_LEADER_LOCK_RETRY_SECONDS
+    
     logger.info("[JANITOR] Strategy expiry janitor started")
+    lease_mgr = LeaseManager(CACHE_REDIS, "strategy_expiry", lease_seconds=JANITOR_LEASE_SECONDS)
+    
     while not stop_event.is_set():
         try:
+            if not await lease_mgr.acquire():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=JANITOR_LEADER_LOCK_RETRY_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
             await _run_strategy_expiry_janitor_tick()
+            
+            if not await lease_mgr.still_owner():
+                logger.warning("[JANITOR] Strategy expiry janitor lost lease")
+                continue
+                
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("[JANITOR] Strategy janitor tick failed: %s", exc, exc_info=True)
+        finally:
+            await lease_mgr.release()
 
         try:
             await asyncio.wait_for(
@@ -85,11 +104,22 @@ async def strategy_expiry_janitor_loop(stop_event: asyncio.Event) -> None:
 
 
 async def session_index_prune_janitor_loop(stop_event: asyncio.Event) -> None:
+    from app.redis_cache import CACHE_REDIS
+    from app.payments.tasks import LeaseManager, JANITOR_LEASE_SECONDS, JANITOR_LEADER_LOCK_RETRY_SECONDS
+    
     logger.info("[JANITOR] Session index prune janitor started")
+    lease_mgr = LeaseManager(CACHE_REDIS, "session_index_prune", lease_seconds=JANITOR_LEASE_SECONDS)
     cursor = 0
 
     while not stop_event.is_set():
         try:
+            if not await lease_mgr.acquire():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=JANITOR_LEADER_LOCK_RETRY_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
             cursor, stats = await prune_stale_session_indexes_scan(
                 cursor=cursor,
                 user_scan_count=SESSION_INDEX_PRUNE_USER_SCAN_COUNT,
@@ -105,10 +135,17 @@ async def session_index_prune_janitor_loop(stop_event: asyncio.Event) -> None:
                     stats.get("errors", 0),
                     cursor,
                 )
+                
+            if not await lease_mgr.still_owner():
+                logger.warning("[JANITOR] Session index prune janitor lost lease")
+                continue
+                
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("[JANITOR] Session index prune tick failed: %s", exc, exc_info=True)
+        finally:
+            await lease_mgr.release()
 
         try:
             await asyncio.wait_for(

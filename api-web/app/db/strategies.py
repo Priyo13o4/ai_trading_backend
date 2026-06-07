@@ -2,7 +2,7 @@ import logging
 from typing import Any
 from sqlalchemy import or_, select, text, func, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Strategy
+from trading_common.models import Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ async def expire_elapsed_strategies_batch(db: AsyncSession, batch_size: int = 10
                     FROM public.strategies
                     WHERE status = 'active'
                       AND expiry_time <= NOW()
+                      AND (execution_status IS NULL OR execution_status NOT IN ('open', 'partial_close'))
                     ORDER BY expiry_time ASC, strategy_id ASC
                     LIMIT :batch_size
                     FOR UPDATE SKIP LOCKED

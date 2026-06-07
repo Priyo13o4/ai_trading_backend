@@ -37,6 +37,7 @@ class Strategy(Base, ToDictMixin):
     detailed_analysis: Mapped[str | None] = mapped_column(Text)
     market_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     status: Mapped[str | None] = mapped_column(String(20))
+    execution_status: Mapped[str] = mapped_column(String(50), default="untriggered")
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user_rating: Mapped[Decimal | None] = mapped_column(Numeric(2, 1))
@@ -49,6 +50,9 @@ class Strategy(Base, ToDictMixin):
     trade_recommended: Mapped[bool] = mapped_column(Boolean)
     summary: Mapped[str | None] = mapped_column(Text)
     news_context: Mapped[str | None] = mapped_column(Text)
+    pre_entry_rule: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    post_entry_rule: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    strategy_version: Mapped[str | None] = mapped_column(String(10), default="v1")
     
     signals: Mapped[list["Signal"]] = relationship("Signal", back_populates="strategy")
 

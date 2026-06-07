@@ -1,0 +1,24 @@
+variants:
+  # 10% TP distance
+  - id: be_10pct_atr_0.5
+    overrides: {use_break_even: true, break_even_percent: 10.0, break_even_atr_multiplier: 0.5, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_10pct_atr_1.0
+    overrides: {use_break_even: true, break_even_percent: 10.0, break_even_atr_multiplier: 1.0, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_10pct_atr_2.0
+    overrides: {use_break_even: true, break_even_percent: 10.0, break_even_atr_multiplier: 2.0, use_ma_trailing_stop: true, use_trailing_stop: false}
+    
+  # 15% TP distance
+  - id: be_15pct_atr_0.5
+    overrides: {use_break_even: true, break_even_percent: 15.0, break_even_atr_multiplier: 0.5, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_15pct_atr_1.0
+    overrides: {use_break_even: true, break_even_percent: 15.0, break_even_atr_multiplier: 1.0, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_15pct_atr_2.0
+    overrides: {use_break_even: true, break_even_percent: 15.0, break_even_atr_multiplier: 2.0, use_ma_trailing_stop: true, use_trailing_stop: false}
+
+  # 20% TP distance (Baseline)
+  - id: be_20pct_atr_0.5
+    overrides: {use_break_even: true, break_even_percent: 20.0, break_even_atr_multiplier: 0.5, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_20pct_atr_1.0
+    overrides: {use_break_even: true, break_even_percent: 20.0, break_even_atr_multiplier: 1.0, use_ma_trailing_stop: true, use_trailing_stop: false}
+  - id: be_20pct_atr_2.0
+    overrides: {use_break_even: true, break_even_percent: 20.0, break_even_atr_multiplier: 2.0, use_ma_trailing_stop: true, use_trailing_stop: false}

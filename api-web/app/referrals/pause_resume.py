@@ -67,12 +67,13 @@ async def _get_cycles_by_status(
 async def _cas_cycle_status(
     supabase,
     reward_id: str,
-    cycle_number: int,
+    cycle_number: Optional[int],
     expected_status: str,
     new_status: str,
     extra_fields: Optional[dict] = None,
+    hold_expires_at_gt: Optional[str] = None,
 ) -> bool:
-    """Compare-and-swap cycle status. Returns True if exactly 1 row was updated."""
+    """Compare-and-swap status. If cycle_number is provided, updates pause cycle. Otherwise updates the parent reward. Returns True if exactly 1 row was updated."""
     payload: dict[str, Any] = {
         "status": new_status,
         "updated_at": _now_utc().isoformat(),
@@ -80,14 +81,18 @@ async def _cas_cycle_status(
     if extra_fields:
         payload.update(extra_fields)
 
-    result = await supabase_db(
-        lambda: supabase.table("referral_reward_pause_cycles")
-        .update(payload)
-        .eq("reward_id", reward_id)
-        .eq("cycle_number", cycle_number)
-        .eq("status", expected_status)
-        .execute()
-    )
+    table = "referral_reward_pause_cycles" if cycle_number is not None else "referral_rewards"
+    id_col = "reward_id" if cycle_number is not None else "referral_id"
+
+    def _build_query():
+        query = supabase.table(table).update(payload).eq(id_col, reward_id).eq("status", expected_status)
+        if cycle_number is not None:
+            query = query.eq("cycle_number", cycle_number)
+        if hold_expires_at_gt is not None:
+            query = query.gt("hold_expires_at", hold_expires_at_gt)
+        return query.execute()
+
+    result = await supabase_db(_build_query)
     updated = result.data or []
     return len(updated) > 0
 
@@ -252,13 +257,19 @@ async def _process_resume_pending_cycles(supabase) -> tuple[int, int, list[str]]
 
                 # Update the parent referral_rewards status to 'applied'
                 # (confirms the free month was delivered)
-                await supabase_db(
-                    lambda: supabase.table("referral_rewards")
-                    .update({"status": "applied", "updated_at": now_iso})
-                    .eq("referral_id", reward_id)
-                    .eq("status", "claimed")
-                    .execute()
+                transitioned_reward = await _cas_cycle_status(
+                    supabase,
+                    reward_id=reward_id,
+                    cycle_number=None,
+                    expected_status="claimed",
+                    new_status="applied"
                 )
+                if not transitioned_reward:
+                    logger.warning(
+                        "event=referral_resume_cas_reward_skipped reward_id=%s "
+                        "(parent reward already transitioned by another worker)",
+                        reward_id,
+                    )
             else:
                 logger.warning(
                     "event=referral_resume_cas_skipped reward_id=%s cycle=%s "

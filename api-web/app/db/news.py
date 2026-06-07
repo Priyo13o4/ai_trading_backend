@@ -2,7 +2,7 @@ import logging
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EmailNewsAnalysis, WeeklyMacroPlaybook, EconomicEventAnalysis
+from trading_common.models import EmailNewsAnalysis, WeeklyMacroPlaybook, EconomicEventAnalysis
 
 logger = logging.getLogger(__name__)
 

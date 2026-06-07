@@ -13,7 +13,7 @@ import os
 import struct
 from collections import deque
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import redis.asyncio as aioredis
 from sqlalchemy import select
@@ -36,6 +36,99 @@ from .mt5_wire import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value: Any, default: bool = True) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalised = value.strip().lower()
+        if normalised in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalised in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _parse_event_time(value: Any, fallback: datetime) -> datetime:
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+
+    text = str(value).strip()
+    if not text:
+        return fallback
+    if text.isdigit():
+        return datetime.fromtimestamp(int(text), tz=timezone.utc)
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y.%m.%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return fallback
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalise_trade_status(status: Any) -> str:
+    normalised = str(status or "open").strip().lower()
+    if normalised == "executed":
+        return "open"
+    return normalised
+
+
+def _is_lifecycle_only(status: str, ticket: int) -> bool:
+    return (
+        ticket <= 0
+        or status in {"expired", "invalidated", "rejected", "unsupported_condition_type"}
+        or status.startswith("rejected_")
+    )
+
+
+def _is_closed_status(status: str) -> bool:
+    return status == "closed" or status.startswith("closed_")
+
+
+def _derive_exit_flags(status: str, close_reason: Any) -> tuple[bool | None, bool | None]:
+    reason = str(close_reason or "").strip().lower()
+    hit_tp = None
+    hit_sl = None
+    if "tp" in reason or "take_profit" in reason or status == "closed_tp":
+        hit_tp = True
+        hit_sl = False
+    elif "sl" in reason or "stop_loss" in reason or status == "closed_sl":
+        hit_tp = False
+        hit_sl = True
+    return hit_tp, hit_sl
+
+
+def _accumulate(existing: Any, added: Any) -> float:
+    return _as_float(existing) + _as_float(added)
 
 class BridgeSession:
     def __init__(self, session_id: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str):
@@ -145,7 +238,13 @@ class MT5ExecutorServer:
                                 expiry_minutes=data.get("expiry_minutes", 240),
                                 risk_reward_ratio=float(data.get("risk_reward_ratio", 0) or 0),
                                 timestamp=data.get("timestamp"),
-                                expiry_time=data.get("expiry_time")
+                                expiry_time=data.get("expiry_time"),
+                                execution_allowed=_as_bool(data.get("execution_allowed"), True),
+                                trade_recommended=_as_bool(data.get("trade_recommended"), True),
+                                risk_level=data.get("risk_level"),
+                                trade_mode=data.get("trade_mode"),
+                                pre_entry_rule=data.get("pre_entry_rule"),
+                                post_entry_rule=data.get("post_entry_rule"),
                             )
                         )
                         sent = await self._broadcast(frame)
@@ -232,7 +331,9 @@ class MT5ExecutorServer:
             try:
                 if frame.msg_type == MSG_TRADE_EVENT:
                     event = unpack_trade_event(frame.payload)
-                    logger.info(f"[MT5-EXEC] TRADE_EVENT ticket={event['ticket']} strategy_id={event['strategy_id']} status={event['status']} pnl={event['pnl']}")
+                    status_val = event.get('status', 'open')
+                    pnl_val = event.get('pnl', 0.0)
+                    logger.info(f"[MT5-EXEC] TRADE_EVENT ticket={event['ticket']} strategy_id={event['strategy_id']} status={status_val} pnl={pnl_val}")
                     asyncio.create_task(self._handle_trade_event(event))
                     continue
 
@@ -262,30 +363,121 @@ class MT5ExecutorServer:
     async def _handle_trade_event(self, event: dict) -> None:
         try:
             async with AsyncSessionLocal() as db:
-                from app.models import Signal
+                from trading_common.models import Signal, Strategy
+
                 now = datetime.now(timezone.utc)
-                stmt = select(Signal).where(Signal.mt5_ticket == event['ticket'])
-                signal = (await db.execute(stmt)).scalars().first()
-                if signal:
-                    signal.status = event['status']
-                    signal.pnl = event['pnl']
-                    signal.updated_at = now
-                else:
-                    new_signal = Signal(
-                        strategy_id=event['strategy_id'],
-                        mt5_ticket=event['ticket'],
-                        trading_pair=event['symbol'],
-                        direction=event.get('direction', 'UNKNOWN'),
-                        entry_price=event['price'],
-                        lot_size=event.get('volume', 0.01),
-                        entry_time=now,
-                        status=event['status'],
-                        pnl=event.get('pnl', 0.0),
-                        source='MT5_TRADE_EVENT'
+                status = _normalise_trade_status(event.get("status"))
+                ticket = _as_int(event.get("ticket"))
+                strategy_id = _as_int(event.get("strategy_id"))
+                event_time = _parse_event_time(event.get("event_time"), now)
+
+                # Fetch and lock strategy
+                strategy = None
+                if strategy_id > 0:
+                    strat_stmt = select(Strategy).where(Strategy.strategy_id == strategy_id).with_for_update()
+                    strategy = (await db.execute(strat_stmt)).scalars().first()
+
+                if strategy:
+                    strategy.execution_status = status or strategy.execution_status
+                    if status in {
+                        "open",
+                        "partial_close",
+                        "closed",
+                        "expired",
+                        "invalidated",
+                        "rejected",
+                        "unsupported_condition_type",
+                    } or status.startswith("rejected_") or status.startswith("closed_"):
+                        strategy.executed_at = now
+                    if status in {"invalidated", "expired"}:
+                        strategy.status = status
+
+                if _is_lifecycle_only(status, ticket):
+                    await db.commit()
+                    logger.info(
+                        "[MT5-EXEC] Saved strategy lifecycle event strategy_id=%s status=%s ticket=%s",
+                        strategy_id,
+                        status,
+                        ticket,
                     )
-                    db.add(new_signal)
+                    return
+
+                stmt = select(Signal).where(Signal.mt5_ticket == ticket).with_for_update()
+                signal = (await db.execute(stmt)).scalars().first()
+
+                if signal is None:
+                    signal = Signal(
+                        strategy_id=strategy_id or None,
+                        mt5_ticket=ticket,
+                        mt5_magic_number=event.get("magic_number"),
+                        trading_pair=event.get("symbol", "UNKNOWN"),
+                        direction=event.get("direction", "UNKNOWN"),
+                        entry_price=_as_float(event.get("price")),
+                        lot_size=_as_float(event.get("volume"), 0.01),
+                        entry_time=event_time,
+                        status="open" if _is_closed_status(status) else status,
+                        pnl=0.0,
+                        commission=0.0,
+                        swap=0.0,
+                        partial_close_executed=False,
+                        break_even_moved=False,
+                        source="live_ea",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(signal)
+
+                signal.updated_at = now
+                signal.mt5_magic_number = event.get("magic_number", signal.mt5_magic_number)
+                signal.trading_pair = event.get("symbol", signal.trading_pair)
+                signal.direction = event.get("direction", signal.direction)
+                signal.source = signal.source or "live_ea"
+
+                if status == "open":
+                    signal.status = "open"
+                    signal.entry_price = _as_float(event.get("price"), _as_float(signal.entry_price))
+                    signal.lot_size = _as_float(event.get("volume"), _as_float(signal.lot_size, 0.01))
+                    signal.entry_time = signal.entry_time or event_time
+                    if strategy:
+                        strategy.execution_status = "open"
+
+                elif status == "partial_close":
+                    signal.status = "partial_close"
+                    signal.partial_close_executed = bool(event.get("partial_close_executed", True))
+                    if strategy:
+                        strategy.execution_status = "partial_close"
+
+                elif _is_closed_status(status):
+                    signal.status = status
+                    signal.exit_price = _as_float(event.get("price"), _as_float(signal.exit_price))
+                    signal.exit_time = event_time
+                    hit_tp, hit_sl = _derive_exit_flags(status, event.get("close_reason"))
+                    if hit_tp is not None:
+                        signal.hit_tp = hit_tp
+                    if hit_sl is not None:
+                        signal.hit_sl = hit_sl
+                    if strategy:
+                        strategy.execution_status = status
+
+                else:
+                    signal.status = status
+
+                if status == "open":
+                    signal.pnl = _as_float(event.get("pnl"))
+                    signal.commission = _as_float(event.get("commission"))
+                    signal.swap = _as_float(event.get("swap"))
+                else:
+                    signal.pnl = _accumulate(signal.pnl, event.get("pnl"))
+                    signal.commission = _accumulate(signal.commission, event.get("commission"))
+                    signal.swap = _accumulate(signal.swap, event.get("swap"))
+
+                if event.get("partial_close_executed") is not None:
+                    signal.partial_close_executed = bool(event.get("partial_close_executed"))
+                if event.get("break_even_moved") is not None:
+                    signal.break_even_moved = bool(event.get("break_even_moved"))
+
                 await db.commit()
         except Exception as e:
-            logger.error(f"[MT5-EXEC] DB Error saving trade event: {e}")
+            logger.error(f"[MT5-EXEC] DB Error saving trade event: {e}", exc_info=True)
 
 mt5_executor_server = MT5ExecutorServer()

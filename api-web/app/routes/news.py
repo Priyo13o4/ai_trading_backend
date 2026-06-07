@@ -493,41 +493,25 @@ async def get_news_markers(
         logger.error(f"Error fetching news markers for {symbol}: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to fetch news markers: {str(e)}")
 
+def _news_preview_key(*args, **kwargs):
+    return "preview:news:latest"
+
 @router.get("/api/news/preview")
+@singleflight_cache(key_builder=_news_preview_key, ttl=1800)
 async def get_news_preview(request: Request, db: AsyncSession = Depends(get_db)):
     """Get latest high-impact news item for landing page (no auth required)."""
     logger.info("[API] GET /api/news/preview - Public access")
 
     try:
-        key = "preview:news:latest"
-
-        # Try Redis cache (30 min TTL - news changes slowly enough)
-        cached = await REDIS.get(key)
-        if cached:
-            payload = json.loads(cached)
-            if isinstance(payload, dict) and payload.get("_cache_status") == "NOT_FOUND":
-                logger.info("[API] Cache HIT (negative) for news preview")
-                raise HTTPException(404, "No news preview available")
-            logger.info("[API] Cache HIT for news preview")
-            return JSONResponse(content=payload)
-
-        logger.info("[API] Cache MISS for news preview, querying database")
+        logger.info("[API] Cache MISS/Bypass for news preview, querying database")
         row = await get_news_preview_from_db(db)
 
         if not row:
             logger.warning("[API] No high-impact news found for preview")
-            await REDIS.setex(key, 60, json_dumps({"_cache_status": "NOT_FOUND"}))
-            raise HTTPException(404, "No news preview available")
+            return {"_cache_status": "NOT_FOUND"}
 
-        ttl = 30 * 60  # 30 minutes
-        serialized = json_dumps(row)
-        await REDIS.setex(key, ttl, serialized)
-        logger.info("[API] Cached news preview with TTL=%ss", ttl)
+        return row
 
-        return JSONResponse(content=json.loads(serialized))
-
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"[API ERROR] /api/news/preview: {str(e)}", exc_info=True)
         raise HTTPException(500, "Internal server error")

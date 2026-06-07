@@ -503,7 +503,7 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                 and latest_status == PaymentTransactionStatus.REFUNDED.value
             )
 
-            if new_status == PaymentTransactionStatus.SUCCEEDED and status_updated:
+            if effective_succeeded:
                 tx_metadata = transaction.get("metadata", {})
                 if not isinstance(tx_metadata, dict):
                     tx_metadata = {}
@@ -533,33 +533,38 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                     )
                 else:
                     subscription_id = transaction.get("subscription_id")
-                    renewal_requested = provider_name == "plisio" and (
-                        bool(tx_metadata.get("renewal_intent")) or bool(subscription_id)
-                    )
+                    
+                    # Idempotency: Check if subscription is already active
+                    already_active = False
+                    if subscription_id:
+                        existing_sub = await supabase_db(
+                            lambda: supabase.table("user_subscriptions")
+                            .select("id,status")
+                            .eq("id", subscription_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        if existing_sub.data and existing_sub.data[0].get("status") == "active":
+                            already_active = True
+
                     subscription_state_changed = False
 
                     try:
-                        if renewal_requested:
-                            if not subscription_id:
-                                raise ValueError(f"renewal transaction {tx_id} missing subscription_id")
-
-                            existing_sub = await supabase_db(
-                                lambda: supabase.table("user_subscriptions")
-                                .select("id,status")
-                                .eq("id", subscription_id)
-                                .limit(1)
-                                .execute()
+                        if already_active:
+                            logger.info(
+                                "Subscription %s already active, skipping activation logic tx=%s",
+                                subscription_id,
+                                tx_id,
                             )
-
-                            existing_sub_data = existing_sub.data[0] if existing_sub.data else None
-                            if existing_sub_data and existing_sub_data.get("status") == "active":
-                                logger.info(
-                                    "Subscription already active, skipping renewal side effects tx=%s subscription=%s",
-                                    tx_id,
-                                    subscription_id,
-                                )
-                                subscription_state_changed = False
-                            else:
+                        else:
+                            renewal_requested = provider_name == "plisio" and (
+                                bool(tx_metadata.get("renewal_intent")) or bool(subscription_id)
+                            )
+                            
+                            if renewal_requested:
+                                if not subscription_id:
+                                    raise ValueError(f"renewal transaction {tx_id} missing subscription_id")
+    
                                 renew_response = await supabase_db(
                                     lambda: supabase.rpc(
                                         "renew_subscription",
@@ -574,61 +579,61 @@ async def process_claimed_webhook_event(event_row: dict) -> None:
                                         f"renew_subscription returned non-true for tx={tx_id} subscription={subscription_id} payload={renew_response.data}"
                                     )
                                 subscription_state_changed = True
-                        else:
-                            plan_id = tx_metadata.get("plan_id")
-                            if plan_id:
-                                try:
-                                    uuid.UUID(str(plan_id))
-                                except (ValueError, TypeError):
-                                    plan_lookup = await supabase_db(
-                                        lambda: supabase.table("subscription_plans")
-                                        .select("id")
-                                        .eq("name", plan_id)
-                                        .execute()
+                            else:
+                                plan_id = tx_metadata.get("plan_id")
+                                if plan_id:
+                                    try:
+                                        uuid.UUID(str(plan_id))
+                                    except (ValueError, TypeError):
+                                        plan_lookup = await supabase_db(
+                                            lambda: supabase.table("subscription_plans")
+                                            .select("id")
+                                            .eq("name", plan_id)
+                                            .execute()
+                                        )
+                                        if plan_lookup.data:
+                                            plan_id = plan_lookup.data[0]["id"]
+                                        else:
+                                            raise ValueError(f"Could not resolve plan name '{plan_id}' to a UUID")
+    
+                                if not plan_id:
+                                    raise ValueError(
+                                        f"first-time transaction {tx_id} missing plan_id for subscription creation"
                                     )
-                                    if plan_lookup.data:
-                                        plan_id = plan_lookup.data[0]["id"]
-                                    else:
-                                        raise ValueError(f"Could not resolve plan name '{plan_id}' to a UUID")
-
-                            if not plan_id:
-                                raise ValueError(
-                                    f"first-time transaction {tx_id} missing plan_id for subscription creation"
+    
+                                sub_response = await supabase_db(
+                                    lambda: supabase.rpc(
+                                        "create_subscription",
+                                        {
+                                            "p_user_id": tx_user_id,
+                                            "p_plan_id": plan_id,
+                                            "p_payment_provider": provider_name,
+                                            "p_external_id": provider_payment_id,
+                                            "p_trial_days": 0,
+                                        },
+                                    ).execute()
                                 )
-
-                            sub_response = await supabase_db(
-                                lambda: supabase.rpc(
-                                    "create_subscription",
-                                    {
-                                        "p_user_id": tx_user_id,
-                                        "p_plan_id": plan_id,
-                                        "p_payment_provider": provider_name,
-                                        "p_external_id": provider_payment_id,
-                                        "p_trial_days": 0,
-                                    },
-                                ).execute()
-                            )
-
-                            new_sub_id = sub_response.data
-                            if not new_sub_id:
-                                raise ValueError(f"create_subscription returned empty result for tx={tx_id}")
-
-                            await supabase_db(
-                                lambda: supabase.table("payment_transactions")
-                                .update({"subscription_id": new_sub_id})
-                                .eq("id", tx_id)
-                                .execute()
-                            )
-
-                            if provider_name == "plisio":
-                                _plisio_debug(
-                                    "PLISIO_CALLBACK subscription_created event_id=%s tx_id=%s subscription_id=%s",
-                                    event_id,
-                                    tx_id,
-                                    new_sub_id,
+    
+                                new_sub_id = sub_response.data
+                                if not new_sub_id:
+                                    raise ValueError(f"create_subscription returned empty result for tx={tx_id}")
+    
+                                await supabase_db(
+                                    lambda: supabase.table("payment_transactions")
+                                    .update({"subscription_id": new_sub_id})
+                                    .eq("id", tx_id)
+                                    .execute()
                                 )
-
-                            subscription_state_changed = True
+    
+                                if provider_name == "plisio":
+                                    _plisio_debug(
+                                        "PLISIO_CALLBACK subscription_created event_id=%s tx_id=%s subscription_id=%s",
+                                        event_id,
+                                        tx_id,
+                                        new_sub_id,
+                                    )
+    
+                                subscription_state_changed = True
 
                         if subscription_state_changed:
                             from app.authn.session_store import update_all_sessions_for_user_perms

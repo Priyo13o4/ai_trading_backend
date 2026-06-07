@@ -334,7 +334,13 @@ def pack_strategy_push(
     expiry_minutes: int = 240,
     risk_reward_ratio: float = 0.0,
     timestamp: str = None,
-    expiry_time: str = None
+    expiry_time: str = None,
+    execution_allowed: bool = True,
+    trade_recommended: bool = True,
+    risk_level: str = None,
+    trade_mode: str = None,
+    pre_entry_rule: dict = None,
+    post_entry_rule: dict = None
 ) -> bytes:
     # Instead of a fixed C struct, we pack the full JSON string to send to MT5.
     # The MT5 EA parses this string in ProcessTCPFrame.
@@ -350,7 +356,13 @@ def pack_strategy_push(
         "expiry_minutes": expiry_minutes,
         "risk_reward_ratio": risk_reward_ratio,
         "timestamp": timestamp,
-        "expiry_time": expiry_time
+        "expiry_time": expiry_time,
+        "execution_allowed": execution_allowed,
+        "trade_recommended": trade_recommended,
+        "risk_level": risk_level,
+        "trade_mode": trade_mode,
+        "pre_entry_rule": pre_entry_rule or {},
+        "post_entry_rule": post_entry_rule or {},
     }
     # Ensure it's a valid JSON string encoded as bytes
     return json.dumps(payload_dict).encode("utf-8")
@@ -361,19 +373,37 @@ def unpack_trade_event(payload: bytes) -> dict:
     try:
         data = json.loads(payload.decode("utf-8", errors="ignore"))
         
-        # MT5 uses `deal_type` (0 = BUY, 1 = SELL)
-        deal_type = data.get("type", 0)
-        direction = "long" if deal_type == 0 else "short"
+        # MT5 uses `type`/`deal_type` (0 = BUY, 1 = SELL). Prefer explicit
+        # direction when newer EAs send it because close deals can be opposite
+        # the original position direction.
+        deal_type = data.get("type", data.get("deal_type", 0))
+        try:
+            deal_type_int = int(deal_type)
+        except (TypeError, ValueError):
+            deal_type_int = 0
+        direction = data.get("direction")
+        if not direction:
+            direction = "long" if deal_type_int == 0 else "short"
         
-        # We need to map to what the ingest script expects
         return {
             "ticket": data.get("ticket", 0),
+            "deal_id": data.get("deal_id", data.get("deal", 0)),
+            "order_id": data.get("order_id", data.get("order", 0)),
+            "magic_number": data.get("magic_number", data.get("magic", None)),
             "strategy_id": data.get("strategy_id", 0),
             "symbol": data.get("symbol", "UNKNOWN"),
             "price": data.get("price", 0.0),
             "volume": data.get("volume", 0.0),
-            "status": "executed", # we assume deal_add means executed
-            "direction": direction
+            "status": data.get("status", "executed"),
+            "pnl": data.get("pnl", 0.0),
+            "commission": data.get("commission", 0.0),
+            "swap": data.get("swap", 0.0),
+            "event_time": data.get("event_time"),
+            "close_reason": data.get("close_reason", data.get("reason")),
+            "partial_close_executed": data.get("partial_close_executed"),
+            "break_even_moved": data.get("break_even_moved"),
+            "direction": direction,
+            "raw": data,
         }
     except Exception as e:
         raise ProtocolError(f"Failed to parse TRADE_EVENT JSON payload: {e}")
