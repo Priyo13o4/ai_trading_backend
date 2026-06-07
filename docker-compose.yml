@@ -418,8 +418,8 @@ services:
     restart: always
     environment:
       DOCKER_HOST: http://socket-proxy:2375
-      N8N_WEBHOOK_URL: ${N8N_ERROR_ALERT_BASE_URL:-http://ai_trading_bot:5678/webhook/af570dae-9df5-4279-8f23-cca2097443b9/error-alert/system_check}
-      N8N_ERROR_ALERT_SECRET: ${N8N_ERROR_ALERT_SECRET:-UvqovG6Yxlmnhb5f5FRHSjtXoopYsroK}
+      N8N_WEBHOOK_URL: ${N8N_ERROR_ALERT_BASE_URL:?N8N_ERROR_ALERT_BASE_URL is required}
+      N8N_ERROR_ALERT_SECRET: ${N8N_ERROR_ALERT_SECRET:?N8N_ERROR_ALERT_SECRET is required}
       POLL_INTERVAL_SECONDS: 60
       CPU_ALERT_THRESHOLD: 80
       MEM_ALERT_THRESHOLD: 85

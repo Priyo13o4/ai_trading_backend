@@ -10,7 +10,7 @@ class Config:
     # Database Configuration
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "postgresql://Priyo13o4:YOUR_POSTGRES_PASSWORD@postgres:5432/ai_trading_bot_data"
+        "postgresql://YOUR_POSTGRES_USER:YOUR_POSTGRES_PASSWORD@postgres:5432/ai_trading_bot_data"
     )
     
     # Gemini API Configuration
