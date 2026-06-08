@@ -95,10 +95,35 @@ def _parse_event_time(value: Any, fallback: datetime) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _normalise_trade_status(status: Any) -> str:
+def _normalise_trade_status(status: Any, close_reason: Any = None) -> str:
+    """Normalise the EA status string to a DB-valid signals status value.
+
+    The EA sends a generic ``"closed"`` status for all position closures.
+    The DB check constraint requires one of the specific variants:
+      closed_tp | closed_sl | closed_manual | closed_expired | closed_breakeven
+
+    We resolve the specific variant from ``close_reason`` (sent alongside the
+    status) so the DB write never violates the constraint.
+    """
     normalised = str(status or "open").strip().lower()
     if normalised == "executed":
         return "open"
+
+    # Resolve generic "closed" → specific DB-valid closed_* variant
+    if normalised == "closed":
+        reason = str(close_reason or "").strip().lower()
+        if "tp" in reason or "take_profit" in reason:
+            return "closed_tp"
+        elif "sl" in reason or "stop_loss" in reason or "structure_break" in reason:
+            return "closed_sl"
+        elif "breakeven" in reason or "break_even" in reason:
+            return "closed_breakeven"
+        elif "expir" in reason or "time_stall" in reason or "fail_to_reach" in reason or "timeout" in reason:
+            return "closed_expired"
+        else:
+            # Generic manual/EA-triggered close — covers early_exit rules etc.
+            return "closed_manual"
+
     return normalised
 
 
@@ -121,7 +146,7 @@ def _derive_exit_flags(status: str, close_reason: Any) -> tuple[bool | None, boo
     if "tp" in reason or "take_profit" in reason or status == "closed_tp":
         hit_tp = True
         hit_sl = False
-    elif "sl" in reason or "stop_loss" in reason or status == "closed_sl":
+    elif "sl" in reason or "stop_loss" in reason or status == "closed_sl" or "structure_break" in reason:
         hit_tp = False
         hit_sl = True
     return hit_tp, hit_sl
@@ -366,7 +391,7 @@ class MT5ExecutorServer:
                 from trading_common.models import Signal, Strategy
 
                 now = datetime.now(timezone.utc)
-                status = _normalise_trade_status(event.get("status"))
+                status = _normalise_trade_status(event.get("status"), event.get("close_reason"))
                 ticket = _as_int(event.get("ticket"))
                 strategy_id = _as_int(event.get("strategy_id"))
                 event_time = _parse_event_time(event.get("event_time"), now)
