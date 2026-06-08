@@ -442,6 +442,8 @@ class MT5ExecutorServer:
                         trading_pair=event.get("symbol", "UNKNOWN"),
                         direction=event.get("direction", "UNKNOWN"),
                         entry_price=_as_float(event.get("price")),
+                        take_profit=_as_float(event.get("tp")),
+                        stop_loss=_as_float(event.get("sl")),
                         lot_size=_as_float(event.get("volume"), 0.01),
                         entry_time=event_time,
                         status="open" if _is_closed_status(status) else status,
@@ -465,6 +467,8 @@ class MT5ExecutorServer:
                 if status == "open":
                     signal.status = "open"
                     signal.entry_price = _as_float(event.get("price"), _as_float(signal.entry_price))
+                    signal.take_profit = _as_float(event.get("tp"), _as_float(signal.take_profit))
+                    signal.stop_loss = _as_float(event.get("sl"), _as_float(signal.stop_loss))
                     signal.lot_size = _as_float(event.get("volume"), _as_float(signal.lot_size, 0.01))
                     signal.entry_time = signal.entry_time or event_time
                     if strategy:
