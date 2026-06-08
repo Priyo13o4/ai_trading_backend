@@ -19,6 +19,7 @@ import redis.asyncio as aioredis
 from sqlalchemy import select
 
 from .db import AsyncSessionLocal
+from .error_alerts import report_runtime_error
 from .mt5_wire import (
     Frame,
     ProtocolError,
@@ -108,6 +109,9 @@ def _normalise_trade_status(status: Any, close_reason: Any = None) -> str:
     normalised = str(status or "open").strip().lower()
     if normalised == "executed":
         return "open"
+        
+    if normalised == "closed_early":
+        return "closed_expired"
 
     # Resolve generic "closed" → specific DB-valid closed_* variant
     if normalised == "closed":
@@ -473,7 +477,12 @@ class MT5ExecutorServer:
                         strategy.execution_status = "partial_close"
 
                 elif _is_closed_status(status):
-                    signal.status = status
+                    # Prevent overwriting a specific closure status with generic manual close
+                    if status == "closed_manual" and signal.status in {"closed_tp", "closed_sl", "closed_expired", "closed_breakeven"}:
+                        status = signal.status
+                    else:
+                        signal.status = status
+                    
                     signal.exit_price = _as_float(event.get("price"), _as_float(signal.exit_price))
                     signal.exit_time = event_time
                     hit_tp, hit_sl = _derive_exit_flags(status, event.get("close_reason"))
@@ -504,5 +513,14 @@ class MT5ExecutorServer:
                 await db.commit()
         except Exception as e:
             logger.error(f"[MT5-EXEC] DB Error saving trade event: {e}", exc_info=True)
+            report_runtime_error(
+                path="mt5_executor.py/_handle_trade_event",
+                method="TCP",
+                status_code=500,
+                message_safe="Failed to save MT5 trade event to database",
+                message_internal=str(e),
+                context={"event": event},
+                severity="error"
+            )
 
 mt5_executor_server = MT5ExecutorServer()
