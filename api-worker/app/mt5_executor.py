@@ -173,6 +173,7 @@ class MT5ExecutorServer:
 
         self._heartbeat_file = os.getenv("MT5_EXECUTOR_HEARTBEAT_FILE", "/tmp/mt5_executor_heartbeat")
         self._heartbeat_interval_seconds = int(os.getenv("MT5_HEARTBEAT_INTERVAL_SECONDS", "15"))
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._strategy_pubsub_task: Optional[asyncio.Task] = None
         self._processed_deals: set[int] = set()
 
