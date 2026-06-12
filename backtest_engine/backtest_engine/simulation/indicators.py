@@ -71,6 +71,15 @@ def is_hammer(df: pd.DataFrame, shift: int) -> bool:
     lower_shadow = min(c['open'], c['close']) - c['low']
     return (body > 0) and (lower_shadow > body * 2) and (upper_shadow < body * 0.5)
 
+def is_shooting_star(df: pd.DataFrame, shift: int) -> bool:
+    if len(df) <= shift:
+        return False
+    c = df.iloc[-(shift + 1)]
+    body = abs(c['close'] - c['open'])
+    upper_shadow = c['high'] - max(c['open'], c['close'])
+    lower_shadow = min(c['open'], c['close']) - c['low']
+    return (body > 0) and (upper_shadow > body * 2) and (lower_shadow < body * 0.5)
+
 def is_pin_bar(df: pd.DataFrame, shift: int) -> bool:
     if len(df) <= shift:
         return False
@@ -82,6 +91,28 @@ def is_pin_bar(df: pd.DataFrame, shift: int) -> bool:
     
     if range_ <= 0: return False
     return (body / range_ < 0.33) and ((upper_shadow > body * 3) or (lower_shadow > body * 3))
+
+def is_bearish_pin_bar(df: pd.DataFrame, shift: int) -> bool:
+    if len(df) <= shift:
+        return False
+    c = df.iloc[-(shift + 1)]
+    body = abs(c['close'] - c['open'])
+    range_ = c['high'] - c['low']
+    upper_shadow = c['high'] - max(c['open'], c['close'])
+    
+    if range_ <= 0: return False
+    return (body / range_ < 0.33) and (upper_shadow > body * 3)
+
+def is_bullish_pin_bar(df: pd.DataFrame, shift: int) -> bool:
+    if len(df) <= shift:
+        return False
+    c = df.iloc[-(shift + 1)]
+    body = abs(c['close'] - c['open'])
+    range_ = c['high'] - c['low']
+    lower_shadow = min(c['open'], c['close']) - c['low']
+    
+    if range_ <= 0: return False
+    return (body / range_ < 0.33) and (lower_shadow > body * 3)
 
 def is_liquidity_sweep(df: pd.DataFrame, shift: int, direction: str, level: float) -> bool:
     if len(df) <= shift:

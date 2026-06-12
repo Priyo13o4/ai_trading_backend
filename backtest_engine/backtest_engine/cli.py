@@ -31,6 +31,63 @@ from backtest_engine.reporting.csv_export import export_frame_to_csv, export_res
 from backtest_engine.reporting.aggregates import results_to_frame
 from backtest_engine.reporting.plots import generate_plots
 from backtest_engine.sweeps import load_sweep_variants, merge_config, validate_management_config
+from sqlalchemy import text
+
+def determine_management_family(config: dict) -> str:
+    if config.get("use_partial_closing") and config.get("use_ma_trailing_stop"):
+        return "partial_then_trail"
+    elif config.get("use_partial_closing") and config.get("use_break_even"):
+        return "partial_then_be"
+    elif config.get("use_partial_closing"):
+        return "partial_close"
+    elif config.get("use_ma_trailing_stop"):
+        return "ma_trailing"
+    elif config.get("use_trailing_stop"):
+        return "atr_trailing"
+    elif config.get("use_break_even"):
+        return "break_even"
+    else:
+        return "fixed_tp"
+
+async def get_strategy_regime(session, symbol: str, timestamp: datetime) -> str:
+    query = text("""
+        SELECT regime_type 
+        FROM regime_data 
+        WHERE trading_pair = :symbol AND created_at <= :timestamp 
+        ORDER BY created_at DESC 
+        LIMIT 1
+    """)
+    res = await session.execute(query, {"symbol": symbol, "timestamp": timestamp})
+    row = res.fetchone()
+    return row[0] if row else "Ranging"
+
+async def get_strategy_news_state(session, symbol: str, timestamp: datetime) -> str:
+    if len(symbol) >= 6:
+        base = symbol[:3]
+        quote = symbol[3:6]
+    else:
+        base = symbol
+        quote = symbol
+        
+    start_time = timestamp - timedelta(hours=2)
+    query = text("""
+        SELECT COUNT(*) 
+        FROM email_news_analysis 
+        WHERE email_received_at BETWEEN :start_time AND :end_time
+          AND (primary_instrument LIKE :base OR primary_instrument LIKE :quote 
+               OR headline ILIKE :base_like OR headline ILIKE :quote_like)
+          AND (importance_score >= 4 OR breaking_news = TRUE)
+    """)
+    res = await session.execute(query, {
+        "start_time": start_time,
+        "end_time": timestamp,
+        "base": f"%{base}%",
+        "quote": f"%{quote}%",
+        "base_like": f"%{base}%",
+        "quote_like": f"%{quote}%"
+    })
+    count = res.scalar()
+    return "active_news_window" if count > 0 else "quiet"
 
 @click.group()
 def cli():
@@ -76,6 +133,7 @@ def db_dump(out):
 @click.option('--universe', default='expired', help='Strategy universe to filter by')
 @click.option('--strategy-id', type=int, help='Filter by a specific strategy ID')
 @click.option('--symbol', help='Filter by symbol')
+@click.option('--strategy-version', help='Filter by strategy version (e.g. v2)')
 @click.option('--from', 'from_date', help='Start date (ISO format)')
 @click.option('--to', 'to_date', help='End date (ISO format)')
 @click.option('--limit', type=int, help='Maximum number of strategies to run')
@@ -92,7 +150,7 @@ def db_dump(out):
 @click.option('--sweep-id', help='Optional id to group sweep runs')
 @click.option('--max-combinations', default=24, type=int, help='Safety cap for sweep variants')
 def run_command(
-    profile, universe, strategy_id, symbol, from_date, to_date, limit,
+    profile, universe, strategy_id, symbol, strategy_version, from_date, to_date, limit,
     reuse, dry_run, report_dir, fail_on_missing_specs, ea_config, broker_specs,
     replay_until, max_trade_horizon_days, sweep_config, variant, sweep_id, max_combinations
 ):
@@ -102,6 +160,7 @@ def run_command(
         universe=universe,
         strategy_id=strategy_id,
         symbol=symbol,
+        strategy_version=strategy_version,
         from_date=from_date,
         to_date=to_date,
         limit=limit,
@@ -120,11 +179,29 @@ def run_command(
     ))
 
 
+def _run_variant_process_wrapper(kwargs: dict) -> dict:
+    import asyncio
+    # Create a new event loop for the process
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_run_single_backtest(**kwargs))
+    finally:
+        loop.close()
+
+
+def _init_worker():
+    from backtest_engine.db import engine as dest_engine
+    from backtest_engine.source_db import source_engine
+    dest_engine.sync_engine.dispose(close=False)
+    source_engine.sync_engine.dispose(close=False)
+
 async def run_backtest_async(
     profile_name: str,
     universe: str,
     strategy_id: int | None,
     symbol: str | None,
+    strategy_version: str | None,
     from_date: str | None,
     to_date: str | None,
     limit: int | None,
@@ -157,47 +234,54 @@ async def run_backtest_async(
             raise RuntimeError(f"Sweep has {len(variants)} variants, exceeding --max-combinations={max_combinations}")
         sweep_id = sweep_id or datetime.now(timezone.utc).strftime("sweep-%Y%m%d%H%M%S")
 
-    sweep_rows = []
-
-    sweep_rows = []
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
     
-    sem = asyncio.Semaphore(4)
+    tasks_kwargs = []
+    for sweep_variant in variants:
+        ea_cfg = base_config
+        variant_id = None
+        variant_overrides = {}
+        if sweep_variant is not None:
+            variant_id = sweep_variant.variant_id
+            variant_overrides = sweep_variant.overrides
+            ea_cfg = merge_config(base_config, variant_overrides)
+        validate_management_config(ea_cfg)
+
+        tasks_kwargs.append({
+            "profile_name": profile_name if variant_id is None else f"{profile_name}_{variant_id}",
+            "universe": universe,
+            "strategy_id": strategy_id,
+            "symbol": variant_overrides.get("symbol", symbol),
+            "strategy_version": strategy_version,
+            "from_date": from_date,
+            "to_date": to_date,
+            "limit": limit,
+            "dry_run": dry_run,
+            "fail_on_missing_specs": fail_on_missing_specs,
+            "ea_config": ea_cfg,
+            "ea_hash": generate_dict_hash(ea_cfg),
+            "broker_hash": broker_hash,
+            "broker_specs_path": broker_specs_path,
+            "output_dir": output_dir,
+            "replay_until": replay_until,
+            "max_trade_horizon_days": max_trade_horizon_days,
+            "sweep_id": sweep_id,
+            "variant_id": variant_id,
+            "variant_description": getattr(sweep_variant, "description", "") if sweep_variant else "",
+            "variant_overrides": variant_overrides,
+        })
+
+    loop = asyncio.get_running_loop()
+    max_workers = min(len(tasks_kwargs), multiprocessing.cpu_count()) or 1
     
-    async def run_variant(sweep_variant):
-        async with sem:
-            ea_cfg = base_config
-            variant_id = None
-            variant_overrides = {}
-            if sweep_variant is not None:
-                variant_id = sweep_variant.variant_id
-                variant_overrides = sweep_variant.overrides
-                ea_cfg = merge_config(base_config, variant_overrides)
-            validate_management_config(ea_cfg)
-
-            return await _run_single_backtest(
-                profile_name=profile_name if variant_id is None else f"{profile_name}_{variant_id}",
-                universe=universe,
-                strategy_id=strategy_id,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-                dry_run=dry_run,
-                fail_on_missing_specs=fail_on_missing_specs,
-                ea_config=ea_cfg,
-                ea_hash=generate_dict_hash(ea_cfg),
-                broker_hash=broker_hash,
-                broker_specs_path=broker_specs_path,
-                output_dir=output_dir,
-                replay_until=replay_until,
-                max_trade_horizon_days=max_trade_horizon_days,
-                sweep_id=sweep_id,
-                variant_id=variant_id,
-                variant_description=getattr(sweep_variant, "description", "") if sweep_variant else "",
-                variant_overrides=variant_overrides,
-            )
-
-    sweep_rows = await asyncio.gather(*(run_variant(v) for v in variants))
+    print(f"Running {len(tasks_kwargs)} variants across {max_workers} processes in parallel...")
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as pool:
+        futures = [
+            loop.run_in_executor(pool, _run_variant_process_wrapper, kwargs)
+            for kwargs in tasks_kwargs
+        ]
+        sweep_rows = await asyncio.gather(*futures)
 
     if sweep_config_path and sweep_id:
         _write_sweep_summary(Path(output_dir), sweep_id, sweep_rows)
@@ -261,6 +345,8 @@ def _result_summary_row(run: BacktestRun, results: list, variant_id: str | None,
         "partials": int(df["partial_close_executed"].sum()) if not df.empty else 0,
         "be_moves": int(df["break_even_moved"].sum()) if not df.empty else 0,
         "net_pnl": round(float(df["net_pnl"].sum()), 2) if not df.empty else 0.0,
+        "avg_mae": round(float(df["mae_pips"].mean()), 2) if not df.empty and "mae_pips" in df.columns else 0.0,
+        "avg_mfe": round(float(df["mfe_pips"].mean()), 2) if not df.empty and "mfe_pips" in df.columns else 0.0,
     }
 
 
@@ -286,13 +372,14 @@ def _write_sweep_summary(output_dir: Path, sweep_id: str, rows: list[dict]) -> N
         "",
         f"Sweep ID: `{sweep_id}`",
         "",
-        "| Variant | Run ID | Entered | TP | SL | Trailing SL | Net PnL |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Variant | Run ID | Entered | TP | SL | Trailing SL | Avg MAE | Avg MFE | Net PnL |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in sorted_rows:
         lines.append(
             f"| {row['variant_id']} | `{row['run_id']}` | {row['entered_trades']} | "
-            f"{row['closed_tp']} | {row['closed_sl']} | {row['closed_trailing_sl']} | {row['net_pnl']:.2f} |"
+            f"{row['closed_tp']} | {row['closed_sl']} | {row['closed_trailing_sl']} | "
+            f"{row['avg_mae']} | {row['avg_mfe']} | {row['net_pnl']:.2f} |"
         )
     md_path.write_text("\n".join(lines) + "\n")
 
@@ -301,7 +388,9 @@ async def _run_single_backtest(
     profile_name: str,
     universe: str,
     strategy_id: int | None,
+    strategy_ids: list[int] | None,
     symbol: str | None,
+    strategy_version: str | None,
     from_date: str | None,
     to_date: str | None,
     limit: int | None,
@@ -344,9 +433,13 @@ async def _run_single_backtest(
     source_db_name = source_url.path.lstrip('/')
     
     run_id = uuid.uuid4()
+    management_fam = determine_management_family(ea_config)
     run = BacktestRun(
         run_id=run_id,
         run_name=f"{profile_name}-{start_time.strftime('%Y%m%d%H%M%S')}",
+        sweep_id=sweep_id,
+        sweep_name=sweep_id,
+        management_family=management_fam,
         profile_name=profile_name,
         profile_version="1.0",
         engine_version="1.0",
@@ -386,6 +479,7 @@ async def _run_single_backtest(
         universe=universe,
         from_date=parsed_from,
         to_date=parsed_to,
+        strategy_version=strategy_version,
     )
     
     if limit is not None:
@@ -399,59 +493,73 @@ async def _run_single_backtest(
     no_trade_count = 0
     unsupported_count = 0
     
-    for strategy in strategies:
-        print(f"Simulating Strategy {strategy.strategy_id} - {strategy.symbol} {strategy.direction}")
-        
-        spec = broker_specs.get(strategy.symbol)
-        if not spec:
-            print(f"Symbol {strategy.symbol} not found in broker specs.")
-            if fail_on_missing_specs:
-                raise RuntimeError(f"Missing broker spec for {strategy.symbol}")
-            continue
+    strat_sem = asyncio.Semaphore(20)
+    
+    async def process_strategy(strategy):
+        async with strat_sem:
+            print(f"Simulating Strategy {strategy.strategy_id} - {strategy.symbol} {strategy.direction}")
             
-        timeframe = strategy.entry_signal.get('timeframe', 'H1') if strategy.entry_signal else 'H1'
-        if parsed_replay_until is not None:
-            candle_end = parsed_replay_until
-        elif max_trade_horizon_days > 0:
-            candle_end = strategy.expiry_time + timedelta(days=max_trade_horizon_days)
-        else:
-            candle_end = None
+            spec = broker_specs.get(strategy.symbol)
+            if not spec:
+                print(f"Symbol {strategy.symbol} not found in broker specs.")
+                if fail_on_missing_specs:
+                    raise RuntimeError(f"Missing broker spec for {strategy.symbol}")
+                return None
+                
+            timeframe = strategy.entry_signal.get('timeframe', 'H1') if strategy.entry_signal else 'H1'
+            if parsed_replay_until is not None:
+                candle_end = parsed_replay_until
+            elif max_trade_horizon_days > 0:
+                candle_end = strategy.expiry_time + timedelta(days=max_trade_horizon_days)
+            else:
+                candle_end = None
 
-        normalized_timeframe = str(timeframe or "H1").upper()
-        if normalized_timeframe == "M1":
-            cagg_df = await load_m1_candles(source_session, strategy.symbol, strategy.timestamp, candle_end)
-        elif normalized_timeframe in {"D1", "W1", "MN1"}:
-            cagg_df = await load_raw_broker_candles(source_session, strategy.symbol, normalized_timeframe, strategy.timestamp, candle_end)
-        else:
-            cagg_df = await load_cagg_candles(source_session, strategy.symbol, normalized_timeframe, strategy.timestamp, candle_end)
+            normalized_timeframe = str(timeframe or "H1").upper()
+            if normalized_timeframe == "M1":
+                cagg_df = await load_m1_candles(source_session, strategy.symbol, strategy.timestamp, candle_end)
+            elif normalized_timeframe in {"D1", "W1", "MN1"}:
+                cagg_df = await load_raw_broker_candles(source_session, strategy.symbol, normalized_timeframe, strategy.timestamp, candle_end)
+            else:
+                cagg_df = await load_cagg_candles(source_session, strategy.symbol, normalized_timeframe, strategy.timestamp, candle_end)
+                
+            m1_df = await load_m1_candles(source_session, strategy.symbol, strategy.timestamp, candle_end)
             
-        m1_df = await load_m1_candles(source_session, strategy.symbol, strategy.timestamp, candle_end)
-        
-        # This will need to be updated to match the new BacktestResult schema
-        # For now, we mock the call and response mapping
-        try:
-            res = await simulate_strategy(
-                strategy=strategy,
-                cagg_df=cagg_df,
-                m1_df=m1_df,
-                ea_config=ea_config,
-                broker_spec=spec,
-                run_id=run.run_id,
-                current_balance=500.0 # dummy
-            )
+            # Fetch regime and news context from source DB
+            regime = await get_strategy_regime(source_session, strategy.symbol, strategy.timestamp)
+            news = await get_strategy_news_state(source_session, strategy.symbol, strategy.timestamp)
+            
+            try:
+                res = await simulate_strategy(
+                    strategy=strategy,
+                    cagg_df=cagg_df,
+                    m1_df=m1_df,
+                    ea_config=ea_config,
+                    broker_spec=spec,
+                    run_id=run.run_id,
+                    current_balance=500.0,
+                    management_family=management_fam,
+                    regime_type=regime,
+                    news_state=news
+                )
+                return res
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"Simulation failed for {strategy.strategy_id}: {e}")
+                return None
+
+    tasks = [process_strategy(s) for s in strategies]
+    outcomes = await asyncio.gather(*tasks)
+    
+    for res in outcomes:
+        if res is not None:
             results.append(res)
-            # Update metrics based on PRDS outcome vocabulary
             if getattr(res, 'entry_time', None) is not None:
                 executed_count += 1
             if getattr(res, 'outcome', '') == "unsupported_condition_type":
                 unsupported_count += 1
             if getattr(res, 'entry_time', None) is None and getattr(res, 'outcome', '') != "unsupported_condition_type":
                 no_trade_count += 1
-                
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"Simulation failed for {strategy.strategy_id}: {e}")
             
     run.finished_at = datetime.now(timezone.utc)
     run.processed_strategies = len(results)
@@ -525,6 +633,11 @@ async def _run_single_backtest(
     
     await source_session.close()
     await dest_session.close()
+
+    from backtest_engine.db import engine as dest_engine
+    from backtest_engine.source_db import source_engine
+    await source_engine.dispose()
+    await dest_engine.dispose()
 
     return _result_summary_row(run, results, variant_id, variant_description)
 

@@ -32,7 +32,7 @@ def send_alert(container_name, cpu, mem, duration):
     
     headers = {"Content-Type": "application/json"}
     if N8N_SECRET and N8N_SECRET != "CHANGE_ME":
-        headers["x-n8n-alert-secret"] = N8N_SECRET
+        headers["X-Error-Alert-Secret"] = N8N_SECRET
 
     try:
         r = requests.post(N8N_WEBHOOK_URL, json=payload, headers=headers, timeout=10)

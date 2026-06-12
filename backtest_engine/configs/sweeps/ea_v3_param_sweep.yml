@@ -1,0 +1,591 @@
+# Massive Management Parameter Sweep
+# Auto-generated
+variants:
+- id: fixed_start50_step25
+  description: Fixed trailing start 50.0%, step 25.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 50.0
+    trailing_step_percent: 25.0
+- id: fixed_start50_step50
+  description: Fixed trailing start 50.0%, step 50.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 50.0
+    trailing_step_percent: 50.0
+- id: fixed_start100_step25
+  description: Fixed trailing start 100.0%, step 25.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 100.0
+    trailing_step_percent: 25.0
+- id: fixed_start100_step50
+  description: Fixed trailing start 100.0%, step 50.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 100.0
+    trailing_step_percent: 50.0
+- id: fixed_start150_step25
+  description: Fixed trailing start 150.0%, step 25.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 150.0
+    trailing_step_percent: 25.0
+- id: fixed_start150_step50
+  description: Fixed trailing start 150.0%, step 50.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: true
+    use_ma_trailing_stop: false
+    trailing_start_percent: 150.0
+    trailing_step_percent: 50.0
+- id: ma_ema9_step1
+  description: MA trailing EMA 9, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 1.0
+- id: ma_ema9_step5
+  description: MA trailing EMA 9, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 5.0
+- id: ma_ema9_step7
+  description: MA trailing EMA 9, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 7.0
+- id: ma_ema9_step10
+  description: MA trailing EMA 9, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 10.0
+- id: ma_ema9_step12
+  description: MA trailing EMA 9, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 12.0
+- id: ma_ema9_step15
+  description: MA trailing EMA 9, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 15.0
+- id: ma_sma9_step1
+  description: MA trailing SMA 9, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 1.0
+- id: ma_sma9_step5
+  description: MA trailing SMA 9, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 5.0
+- id: ma_sma9_step7
+  description: MA trailing SMA 9, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 7.0
+- id: ma_sma9_step10
+  description: MA trailing SMA 9, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 10.0
+- id: ma_sma9_step12
+  description: MA trailing SMA 9, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 12.0
+- id: ma_sma9_step15
+  description: MA trailing SMA 9, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 9
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 15.0
+- id: ma_ema14_step1
+  description: MA trailing EMA 14, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 1.0
+- id: ma_ema14_step5
+  description: MA trailing EMA 14, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 5.0
+- id: ma_ema14_step7
+  description: MA trailing EMA 14, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 7.0
+- id: ma_ema14_step10
+  description: MA trailing EMA 14, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 10.0
+- id: ma_ema14_step12
+  description: MA trailing EMA 14, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 12.0
+- id: ma_ema14_step15
+  description: MA trailing EMA 14, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 15.0
+- id: ma_sma14_step1
+  description: MA trailing SMA 14, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 1.0
+- id: ma_sma14_step5
+  description: MA trailing SMA 14, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 5.0
+- id: ma_sma14_step7
+  description: MA trailing SMA 14, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 7.0
+- id: ma_sma14_step10
+  description: MA trailing SMA 14, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 10.0
+- id: ma_sma14_step12
+  description: MA trailing SMA 14, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 12.0
+- id: ma_sma14_step15
+  description: MA trailing SMA 14, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 14
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 15.0
+- id: ma_ema21_step1
+  description: MA trailing EMA 21, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 1.0
+- id: ma_ema21_step5
+  description: MA trailing EMA 21, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 5.0
+- id: ma_ema21_step7
+  description: MA trailing EMA 21, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 7.0
+- id: ma_ema21_step10
+  description: MA trailing EMA 21, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 10.0
+- id: ma_ema21_step12
+  description: MA trailing EMA 21, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 12.0
+- id: ma_ema21_step15
+  description: MA trailing EMA 21, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 15.0
+- id: ma_sma21_step1
+  description: MA trailing SMA 21, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 1.0
+- id: ma_sma21_step5
+  description: MA trailing SMA 21, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 5.0
+- id: ma_sma21_step7
+  description: MA trailing SMA 21, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 7.0
+- id: ma_sma21_step10
+  description: MA trailing SMA 21, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 10.0
+- id: ma_sma21_step12
+  description: MA trailing SMA 21, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 12.0
+- id: ma_sma21_step15
+  description: MA trailing SMA 21, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 21
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 15.0
+- id: ma_ema50_step1
+  description: MA trailing EMA 50, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 1.0
+- id: ma_ema50_step5
+  description: MA trailing EMA 50, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 5.0
+- id: ma_ema50_step7
+  description: MA trailing EMA 50, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 7.0
+- id: ma_ema50_step10
+  description: MA trailing EMA 50, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 10.0
+- id: ma_ema50_step12
+  description: MA trailing EMA 50, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 12.0
+- id: ma_ema50_step15
+  description: MA trailing EMA 50, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: ema
+    ma_trail_min_step_percent: 15.0
+- id: ma_sma50_step1
+  description: MA trailing SMA 50, min step 1.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 1.0
+- id: ma_sma50_step5
+  description: MA trailing SMA 50, min step 5.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 5.0
+- id: ma_sma50_step7
+  description: MA trailing SMA 50, min step 7.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 7.0
+- id: ma_sma50_step10
+  description: MA trailing SMA 50, min step 10.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 10.0
+- id: ma_sma50_step12
+  description: MA trailing SMA 50, min step 12.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 12.0
+- id: ma_sma50_step15
+  description: MA trailing SMA 50, min step 15.0%
+  overrides:
+    use_atr_filter: false
+    use_partial_closing: true
+    use_break_even: true
+    use_trailing_stop: false
+    use_ma_trailing_stop: true
+    ma_trail_period: 50
+    ma_trail_method: sma
+    ma_trail_min_step_percent: 15.0

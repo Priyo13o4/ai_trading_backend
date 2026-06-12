@@ -1,0 +1,1390 @@
+{
+  "variants": [
+    {
+      "id": "v001",
+      "description": "AUDUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v002",
+      "description": "AUDUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v003",
+      "description": "AUDUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v004",
+      "description": "AUDUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v005",
+      "description": "AUDUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v006",
+      "description": "AUDUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v007",
+      "description": "AUDUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v008",
+      "description": "AUDUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v009",
+      "description": "AUDUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v010",
+      "description": "AUDUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v011",
+      "description": "AUDUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v012",
+      "description": "AUDUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "AUDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v013",
+      "description": "BTCUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v014",
+      "description": "BTCUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v015",
+      "description": "BTCUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v016",
+      "description": "BTCUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v017",
+      "description": "BTCUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v018",
+      "description": "BTCUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v019",
+      "description": "BTCUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v020",
+      "description": "BTCUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v021",
+      "description": "BTCUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v022",
+      "description": "BTCUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v023",
+      "description": "BTCUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v024",
+      "description": "BTCUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "BTCUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v025",
+      "description": "ETHUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v026",
+      "description": "ETHUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v027",
+      "description": "ETHUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v028",
+      "description": "ETHUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v029",
+      "description": "ETHUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v030",
+      "description": "ETHUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v031",
+      "description": "ETHUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v032",
+      "description": "ETHUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v033",
+      "description": "ETHUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v034",
+      "description": "ETHUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v035",
+      "description": "ETHUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v036",
+      "description": "ETHUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "ETHUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v037",
+      "description": "EURUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v038",
+      "description": "EURUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v039",
+      "description": "EURUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v040",
+      "description": "EURUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v041",
+      "description": "EURUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v042",
+      "description": "EURUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v043",
+      "description": "EURUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v044",
+      "description": "EURUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v045",
+      "description": "EURUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v046",
+      "description": "EURUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v047",
+      "description": "EURUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v048",
+      "description": "EURUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "EURUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v049",
+      "description": "GBPUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v050",
+      "description": "GBPUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v051",
+      "description": "GBPUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v052",
+      "description": "GBPUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v053",
+      "description": "GBPUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v054",
+      "description": "GBPUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v055",
+      "description": "GBPUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v056",
+      "description": "GBPUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v057",
+      "description": "GBPUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v058",
+      "description": "GBPUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v059",
+      "description": "GBPUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v060",
+      "description": "GBPUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "GBPUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v061",
+      "description": "NZDUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v062",
+      "description": "NZDUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v063",
+      "description": "NZDUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v064",
+      "description": "NZDUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v065",
+      "description": "NZDUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v066",
+      "description": "NZDUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v067",
+      "description": "NZDUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v068",
+      "description": "NZDUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v069",
+      "description": "NZDUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v070",
+      "description": "NZDUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v071",
+      "description": "NZDUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v072",
+      "description": "NZDUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "NZDUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v073",
+      "description": "USDCAD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v074",
+      "description": "USDCAD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v075",
+      "description": "USDCAD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v076",
+      "description": "USDCAD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v077",
+      "description": "USDCAD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v078",
+      "description": "USDCAD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v079",
+      "description": "USDCAD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v080",
+      "description": "USDCAD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v081",
+      "description": "USDCAD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v082",
+      "description": "USDCAD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v083",
+      "description": "USDCAD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v084",
+      "description": "USDCAD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDCAD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v085",
+      "description": "USDCHF_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v086",
+      "description": "USDCHF_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v087",
+      "description": "USDCHF_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v088",
+      "description": "USDCHF_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v089",
+      "description": "USDCHF_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v090",
+      "description": "USDCHF_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v091",
+      "description": "USDCHF_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v092",
+      "description": "USDCHF_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v093",
+      "description": "USDCHF_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v094",
+      "description": "USDCHF_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v095",
+      "description": "USDCHF_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v096",
+      "description": "USDCHF_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDCHF",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v097",
+      "description": "USDJPY_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v098",
+      "description": "USDJPY_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v099",
+      "description": "USDJPY_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v100",
+      "description": "USDJPY_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v101",
+      "description": "USDJPY_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v102",
+      "description": "USDJPY_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v103",
+      "description": "USDJPY_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v104",
+      "description": "USDJPY_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v105",
+      "description": "USDJPY_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v106",
+      "description": "USDJPY_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v107",
+      "description": "USDJPY_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v108",
+      "description": "USDJPY_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "USDJPY",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v109",
+      "description": "XAGUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v110",
+      "description": "XAGUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v111",
+      "description": "XAGUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v112",
+      "description": "XAGUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v113",
+      "description": "XAGUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v114",
+      "description": "XAGUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v115",
+      "description": "XAGUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v116",
+      "description": "XAGUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v117",
+      "description": "XAGUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v118",
+      "description": "XAGUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v119",
+      "description": "XAGUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v120",
+      "description": "XAGUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "XAGUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v121",
+      "description": "XAUUSD_BE1.5_MATrail14",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v122",
+      "description": "XAUUSD_BE1.5_MATrail21",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v123",
+      "description": "XAUUSD_BE1.5_MATrail50",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v124",
+      "description": "XAUUSD_BE1.5_NoMATrail",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 1.5,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v125",
+      "description": "XAUUSD_BE2.0_MATrail14",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v126",
+      "description": "XAUUSD_BE2.0_MATrail21",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v127",
+      "description": "XAUUSD_BE2.0_MATrail50",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v128",
+      "description": "XAUUSD_BE2.0_NoMATrail",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.0,
+        "use_ma_trailing_stop": false
+      }
+    },
+    {
+      "id": "v129",
+      "description": "XAUUSD_BE2.5_MATrail14",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 14,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v130",
+      "description": "XAUUSD_BE2.5_MATrail21",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 21,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v131",
+      "description": "XAUUSD_BE2.5_MATrail50",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": true,
+        "ma_trail_period": 50,
+        "use_trailing_stop": false
+      }
+    },
+    {
+      "id": "v132",
+      "description": "XAUUSD_BE2.5_NoMATrail",
+      "overrides": {
+        "symbol": "XAUUSD",
+        "break_even_atr_multiplier": 2.5,
+        "use_ma_trailing_stop": false
+      }
+    }
+  ]
+}

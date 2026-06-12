@@ -78,8 +78,10 @@ def calculate_lot_size(
     
     if tick_size > 0 and tick_value > 0:
         risk_in_money_per_lot = (stop_distance / tick_size) * tick_value
+        commission_assumption = getattr(spec, 'commission_per_lot_round_turn_assumption', 0.0)
+        risk_in_money_per_lot += commission_assumption
         if risk_in_money_per_lot > 0:
             max_lot_by_risk = risk_amount / risk_in_money_per_lot
-            lot_size = min(lot_size, max_lot_by_risk)
+            lot_size = max_lot_by_risk
             
     return normalize_volume(lot_size, spec, min_lot_size, max_lot_size)

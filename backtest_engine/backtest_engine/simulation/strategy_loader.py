@@ -16,12 +16,13 @@ async def load_strategies(
     universe: str = "expired",
     from_date: datetime | None = None,
     to_date: datetime | None = None,
+    strategy_version: str | None = None,
 ) -> List[Strategy]:
     """
     Load strategies ordered by timestamp.
     Only loads expired strategies to simulate after the fact.
     """
-    stmt = select(Strategy)
+    stmt = select(Strategy).distinct(Strategy.symbol, Strategy.direction, Strategy.timestamp)
 
     if universe == "expired":
         stmt = stmt.where(Strategy.status == "expired")
@@ -39,6 +40,9 @@ async def load_strategies(
     if strategy_id is not None:
         stmt = stmt.where(Strategy.strategy_id == strategy_id)
 
+    if strategy_version is not None:
+        stmt = stmt.where(Strategy.strategy_version == strategy_version)
+
     if from_date is not None:
         stmt = stmt.where(Strategy.timestamp >= from_date)
 
@@ -46,7 +50,12 @@ async def load_strategies(
         stmt = stmt.where(Strategy.timestamp <= to_date)
         
     # Process oldest first to simulate correctly in time order
-    stmt = stmt.order_by(asc(Strategy.timestamp), asc(Strategy.strategy_id))
+    stmt = stmt.order_by(
+        asc(Strategy.symbol),
+        asc(Strategy.direction),
+        asc(Strategy.timestamp),
+        asc(Strategy.strategy_id)
+    )
     
     if limit is not None:
         stmt = stmt.limit(limit)

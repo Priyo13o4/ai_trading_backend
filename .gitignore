@@ -69,3 +69,4 @@ node_modules/
 .axon/
 AGENTS.md
 .agents/
+ai_trading_backtest_dashboard/

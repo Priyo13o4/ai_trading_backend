@@ -1,0 +1,44 @@
+variants:
+  # SMA variants
+  - id: sma_fast
+    description: SMA Trailing Stop (Fast - 9)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "sma", ma_trail_period: 9, trailing_start_percent: 100.0}
+  - id: sma_med
+    description: SMA Trailing Stop (Medium - 21)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "sma", ma_trail_period: 21, trailing_start_percent: 100.0}
+  - id: sma_slow
+    description: SMA Trailing Stop (Slow - 50)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "sma", ma_trail_period: 50, trailing_start_percent: 100.0}
+
+  # EMA variants
+  - id: ema_fast
+    description: EMA Trailing Stop (Fast - 9)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "ema", ma_trail_period: 9, trailing_start_percent: 100.0}
+  - id: ema_med
+    description: EMA Trailing Stop (Medium - 21)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "ema", ma_trail_period: 21, trailing_start_percent: 100.0}
+  - id: ema_slow
+    description: EMA Trailing Stop (Slow - 50)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "ema", ma_trail_period: 50, trailing_start_percent: 100.0}
+
+  # SMMA variants
+  - id: smma_fast
+    description: SMMA Trailing Stop (Fast - 9)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "smma", ma_trail_period: 9, trailing_start_percent: 100.0}
+  - id: smma_med
+    description: SMMA Trailing Stop (Medium - 21)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "smma", ma_trail_period: 21, trailing_start_percent: 100.0}
+  - id: smma_slow
+    description: SMMA Trailing Stop (Slow - 50)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "smma", ma_trail_period: 50, trailing_start_percent: 100.0}
+
+  # LWMA variants
+  - id: lwma_fast
+    description: LWMA Trailing Stop (Fast - 9)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "lwma", ma_trail_period: 9, trailing_start_percent: 100.0}
+  - id: lwma_med
+    description: LWMA Trailing Stop (Medium - 21)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "lwma", ma_trail_period: 21, trailing_start_percent: 100.0}
+  - id: lwma_slow
+    description: LWMA Trailing Stop (Slow - 50)
+    overrides: {use_ma_trailing_stop: true, use_trailing_stop: false, ma_trail_method: "lwma", ma_trail_period: 50, trailing_start_percent: 100.0}

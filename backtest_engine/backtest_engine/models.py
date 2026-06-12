@@ -15,6 +15,9 @@ class BacktestRun(Base):
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_name: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    sweep_id: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    sweep_name: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    management_family: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
     profile_name: Mapped[str] = mapped_column(TEXT, nullable=False)
     profile_version: Mapped[str] = mapped_column(TEXT, nullable=False)
     engine_version: Mapped[str] = mapped_column(TEXT, nullable=False)
@@ -76,6 +79,8 @@ class BacktestResult(Base):
     lot_size: Mapped[Optional[float]] = mapped_column(NUMERIC(12, 4), nullable=True)
     partial_close_executed: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
     break_even_moved: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
+    mae_pips: Mapped[Optional[float]] = mapped_column(NUMERIC(18, 4), nullable=True)
+    mfe_pips: Mapped[Optional[float]] = mapped_column(NUMERIC(18, 4), nullable=True)
     hit_tp: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
     hit_sl: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
     gross_pnl: Mapped[Optional[float]] = mapped_column(NUMERIC(18, 4), nullable=True)
@@ -91,6 +96,22 @@ class BacktestResult(Base):
     bars_scanned: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     debug: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    # Sweep analysis fields
+    management_family: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    regime_type: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    session: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    news_state: Mapped[Optional[str]] = mapped_column(TEXT, nullable=True)
+    exit_efficiency: Mapped[Optional[float]] = mapped_column(NUMERIC(18, 4), nullable=True)
+    
+    # Theoretical Hold-to-Target outcomes (for decoupling entry vs execution)
+    theoretical_fixed_tp_net_pnl: Mapped[Optional[float]] = mapped_column(NUMERIC(18, 4), nullable=True)
+    theoretical_fixed_tp_win: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
+    opportunity_cost_flag: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
+    
+    # Risk and lot floor auditing flags
+    lot_floor_violation: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
+    risk_exceeded_due_to_min_lot: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, server_default=text("false"))
 
     run: Mapped["BacktestRun"] = relationship(back_populates="results")
 

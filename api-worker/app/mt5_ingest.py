@@ -225,6 +225,10 @@ def _update_forming_state_from_closed_m1_sync(*, symbol: str, closed_dt: datetim
                 redis_client.expire(key, _forming_state_ttl_seconds(tf))
                 continue
 
+            last_ts = state.get("last_ts")
+            if last_ts is not None and int(last_ts) >= int(closed_dt.timestamp()):
+                continue
+
             try:
                 high_max = float(state.get("high"))
             except Exception:

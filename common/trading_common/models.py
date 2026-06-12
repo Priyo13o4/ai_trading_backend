@@ -76,6 +76,8 @@ class Signal(Base, ToDictMixin):
     status: Mapped[str | None] = mapped_column(String(20))
     pnl: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     pnl_pips: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    mae_pips: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    mfe_pips: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     hit_tp: Mapped[bool | None] = mapped_column(Boolean)
     hit_sl: Mapped[bool | None] = mapped_column(Boolean)
     partial_close_executed: Mapped[bool | None] = mapped_column(Boolean)

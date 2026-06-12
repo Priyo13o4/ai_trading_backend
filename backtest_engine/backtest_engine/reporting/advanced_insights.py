@@ -188,10 +188,20 @@ def _is_zone_condition(condition_type: str | None) -> bool:
 
 
 def _pip_size(spec: BrokerSymbolSpec) -> float:
+    import pandas as pd
+    import os
+    csv_path = os.path.join(os.path.dirname(__file__), "../../../../MT5_stuff/pipfactor_broker_specs_20260529_195422.csv")
+    try:
+        df = pd.read_csv(csv_path)
+        row = df[df['symbol'] == spec.symbol]
+        if not row.empty:
+            return float(row.iloc[0]['point'])
+    except Exception:
+        pass
     point = float(getattr(spec, "point", 0.0) or 0.0)
     tick_size = float(getattr(spec, "tick_size", 0.0) or 0.0)
     if point > 0:
-        return point * 10.0
+        return point
     if tick_size > 0:
         return tick_size
     return 1.0

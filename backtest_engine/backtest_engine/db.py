@@ -14,7 +14,7 @@ BACKTEST_DB = os.getenv("BACKTEST_DB", "backtest_lab")
 if "BACKTEST_DATABASE_URL" in os.environ:
     DATABASE_URL = os.environ["BACKTEST_DATABASE_URL"]
 elif BACKTEST_DB:
-    DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{BACKTEST_DB}"
+    DATABASE_URL = f"postgresql+psycopg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{BACKTEST_DB}"
 else:
     raise RuntimeError("BACKTEST_DATABASE_URL or BACKTEST_DB is required for backtest writes")
 
@@ -30,7 +30,7 @@ def assert_backtest_db_is_isolated(source_url: str) -> None:
             "Backtest destination DB matches source DB. Set BACKTEST_DATABASE_URL to an isolated database."
         )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False, connect_args={"prepare_threshold": None})
 AsyncSessionLocal = async_sessionmaker(
     bind=engine, class_=AsyncSession, expire_on_commit=False
 )

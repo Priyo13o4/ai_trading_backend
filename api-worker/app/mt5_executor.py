@@ -132,11 +132,7 @@ def _normalise_trade_status(status: Any, close_reason: Any = None) -> str:
 
 
 def _is_lifecycle_only(status: str, ticket: int) -> bool:
-    return (
-        ticket <= 0
-        or status in {"expired", "invalidated", "rejected", "unsupported_condition_type"}
-        or status.startswith("rejected_")
-    )
+    return ticket <= 0
 
 
 def _is_closed_status(status: str) -> bool:
@@ -177,8 +173,8 @@ class MT5ExecutorServer:
 
         self._heartbeat_file = os.getenv("MT5_EXECUTOR_HEARTBEAT_FILE", "/tmp/mt5_executor_heartbeat")
         self._heartbeat_interval_seconds = int(os.getenv("MT5_HEARTBEAT_INTERVAL_SECONDS", "15"))
-        self._heartbeat_task: Optional[asyncio.Task] = None
         self._strategy_pubsub_task: Optional[asyncio.Task] = None
+        self._processed_deals: set[int] = set()
 
     def _touch(self, path: str) -> None:
         try:
@@ -400,6 +396,16 @@ class MT5ExecutorServer:
                 strategy_id = _as_int(event.get("strategy_id"))
                 event_time = _parse_event_time(event.get("event_time"), now)
 
+                # Deduplicate deal events using in-memory set
+                deal_id = event.get("deal_id")
+                if deal_id and int(deal_id) > 0:
+                    if int(deal_id) in self._processed_deals:
+                        logger.info(f"[MT5-EXEC] Skipping duplicate deal_id={deal_id}")
+                        return
+                    self._processed_deals.add(int(deal_id))
+                    if len(self._processed_deals) > 10000:
+                        self._processed_deals.clear()
+
                 # Fetch and lock strategy
                 strategy = None
                 if strategy_id > 0:
@@ -464,20 +470,25 @@ class MT5ExecutorServer:
                 signal.direction = event.get("direction", signal.direction)
                 signal.source = signal.source or "live_ea"
 
+                # Guard against out-of-order updates reverting a closed trade to open/partial_close
+                is_currently_closed = signal.status is not None and signal.status.startswith("closed_")
+
                 if status == "open":
-                    signal.status = "open"
+                    if not is_currently_closed:
+                        signal.status = "open"
                     signal.entry_price = _as_float(event.get("price"), _as_float(signal.entry_price))
                     signal.take_profit = _as_float(event.get("tp"), _as_float(signal.take_profit))
                     signal.stop_loss = _as_float(event.get("sl"), _as_float(signal.stop_loss))
                     signal.lot_size = _as_float(event.get("volume"), _as_float(signal.lot_size, 0.01))
                     signal.entry_time = signal.entry_time or event_time
-                    if strategy:
+                    if strategy and not is_currently_closed:
                         strategy.execution_status = "open"
 
                 elif status == "partial_close":
-                    signal.status = "partial_close"
+                    if not is_currently_closed:
+                        signal.status = "partial_close"
                     signal.partial_close_executed = bool(event.get("partial_close_executed", True))
-                    if strategy:
+                    if strategy and not is_currently_closed:
                         strategy.execution_status = "partial_close"
 
                 elif _is_closed_status(status):
@@ -488,6 +499,8 @@ class MT5ExecutorServer:
                         signal.status = status
                     
                     signal.exit_price = _as_float(event.get("price"), _as_float(signal.exit_price))
+                    signal.take_profit = _as_float(event.get("tp"), _as_float(signal.take_profit))
+                    signal.stop_loss = _as_float(event.get("sl"), _as_float(signal.stop_loss))
                     signal.exit_time = event_time
                     hit_tp, hit_sl = _derive_exit_flags(status, event.get("close_reason"))
                     if hit_tp is not None:
@@ -497,16 +510,42 @@ class MT5ExecutorServer:
                     if strategy:
                         strategy.execution_status = status
 
+                    if signal.entry_price and signal.exit_price and signal.trading_pair and signal.direction:
+                        symbol_upper = signal.trading_pair.upper()
+                        if "JPY" in symbol_upper:
+                            multiplier = 100.0
+                        elif "XAUUSD" in symbol_upper or "GOLD" in symbol_upper:
+                            multiplier = 10.0  # 1 pip = 0.1 USD
+                        elif "XAG" in symbol_upper:
+                            multiplier = 100.0  # 1 pip = 0.01 USD
+                        elif "BTC" in symbol_upper or "ETH" in symbol_upper:
+                            multiplier = 1.0   # 1 pip = 1.0 USD
+                        elif any(idx in symbol_upper for idx in ("US30", "SPX", "NAS100", "GER30", "EUSTX50", "UK100")):
+                            multiplier = 1.0   # 1 pip = 1 index point
+                        else:
+                            multiplier = 10000.0
+                        diff = float(signal.exit_price) - float(signal.entry_price)
+                        if signal.direction.lower() in ("sell", "short"):
+                            diff = -diff
+                        signal.pnl_pips = round(diff * multiplier, 2)
+
+                    if "mae_pips" in event:
+                        signal.mae_pips = _as_float(event.get("mae_pips"))
+                    if "mfe_pips" in event:
+                        signal.mfe_pips = _as_float(event.get("mfe_pips"))
+
                 else:
                     signal.status = status
 
-                if status == "open":
-                    signal.pnl = _as_float(event.get("pnl"))
-                    signal.commission = _as_float(event.get("commission"))
-                    signal.swap = _as_float(event.get("swap"))
-                else:
+                # Update PnL, commission, and swap only if they were explicitly sent in the raw payload
+                # to prevent overwriting with 0.0 during modification events.
+                # Avoid accumulation on closed events to prevent double counting.
+                raw_payload = event.get("raw", {})
+                if "pnl" in raw_payload:
                     signal.pnl = _accumulate(signal.pnl, event.get("pnl"))
+                if "commission" in raw_payload:
                     signal.commission = _accumulate(signal.commission, event.get("commission"))
+                if "swap" in raw_payload:
                     signal.swap = _accumulate(signal.swap, event.get("swap"))
 
                 if event.get("partial_close_executed") is not None:
