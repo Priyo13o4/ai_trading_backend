@@ -125,19 +125,19 @@ async def handle_n8n_news_update(request: Request):
                 updates_sent.append("strategies_snapshot")
 
         if news_type in ["regime", "all"]:
-            # Only clear the frontend-facing caches to preserve internal n8n pipeline caches
-            await REDIS.delete("latest:regime")
-            deleted_count += 1
+            # Clear all frontend-facing regime caches under the unified latest:regime:* namespace
+            r_cursor = 0
+            while True:
+                r_cursor, r_keys = await REDIS.scan(r_cursor, match="latest:regime:*", count=100)
+                if r_keys:
+                    await REDIS.delete(*r_keys)
+                    deleted_count += len(r_keys)
+                if r_cursor == 0:
+                    break
             
             async with AsyncSessionLocal() as db:
                 latest_regimes = await get_latest_regime_from_db(db)
             if latest_regimes:
-                # Targeted deletion of pair-specific frontend caches (avoid wildcard regime:*)
-                pair_keys = [f"regime:{r['trading_pair'].upper()}" for r in latest_regimes]
-                if pair_keys:
-                    await REDIS.delete(*pair_keys)
-                    deleted_count += len(pair_keys)
-                    
                 for regime in latest_regimes:
                     publish_regime_update(regime)
                 updates_sent.append("regime_updates")
@@ -157,7 +157,7 @@ async def handle_n8n_news_update(request: Request):
 def _current_news_key(*args, **kwargs):
     limit = kwargs.get('limit', 20)
     offset = kwargs.get('offset', 0)
-    return f"current_news:v2:limit{limit}:offset{offset}"
+    return f"latest:news:current:v2:limit{limit}:offset{offset}"
 
 @router.get("/api/news/current")
 @singleflight_cache(key_builder=_current_news_key, ttl=300)
@@ -195,7 +195,7 @@ async def get_current_news(
 
 def _news_by_id_key(*args, **kwargs):
     item_id = kwargs.get('item_id')
-    return f"singleflight:news_by_id:{item_id}"
+    return f"latest:news:item_sf:{item_id}"
 
 @router.get("/api/news/{item_id:int}")
 @singleflight_cache(key_builder=_news_by_id_key, ttl=3600)
@@ -203,7 +203,7 @@ async def get_news_by_id(item_id: int, request: Request, response: Response, ctx
     """Fetch a specific news record securely with TTL caching"""
     logger.info(f"[API] GET /api/news/{item_id} - User: {ctx.get('user_id', 'anonymous')}")
     try:
-        key = f"news:item:{item_id}"
+        key = f"latest:news:item:{item_id}"
         cached = await REDIS.get(key)
         if cached:
             payload = json.loads(cached)
@@ -333,7 +333,7 @@ def _news_markers_key(*args, **kwargs):
     before = kwargs.get('before')
     
     if before is None and limit == 500:
-        return f"news_markers:v2:{symbol}:{hours}h:imp{min_imp}"
+        return f"latest:news:markers:v2:{symbol}:{hours}h:imp{min_imp}"
     return None
 
 @router.get("/api/news/markers/{symbol}")
@@ -494,7 +494,7 @@ async def get_news_markers(
         raise HTTPException(500, f"Failed to fetch news markers: {str(e)}")
 
 def _news_preview_key(*args, **kwargs):
-    return "preview:news:latest"
+    return "latest:news:preview"
 
 @router.get("/api/news/preview")
 @singleflight_cache(key_builder=_news_preview_key, ttl=1800)

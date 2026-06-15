@@ -336,7 +336,7 @@ async def get_historical_data(
 
         # ── Forming candle (Redis state maintained by mt5_ingest, no DB write) ─
         forming_row: Optional[dict] = None
-        if include_forming and use_caggs:
+        if include_forming:
             try:
                 minutes = timeframe_minutes(tf)
                 if minutes is not None:

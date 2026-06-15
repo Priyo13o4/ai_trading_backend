@@ -112,8 +112,13 @@ def _strategies_all_key(*args, **kwargs):
         
     return f"strategies:all:v3:{_t(symbol)}:{_t(direction)}:{_t(status)}:{_t(search)}:{limit}:{offset}"
 
+def _strategies_legacy_key(pair: Optional[str] = None, status: Optional[str] = None, include_historical: bool = False, limit: int = 20, offset: int = 0, *args, **kwargs):
+    def _t(v):
+        return str(v).lower().strip() if v else "none"
+    return f"latest:strategies:legacy:v3:{_t(pair)}:{_t(status)}:{include_historical}:{limit}:{offset}"
 
 @router.get("/api/strategies")
+@singleflight_cache(key_builder=_strategies_legacy_key, ttl=3600)
 async def get_strategies(
     request: Request,
     response: Response,
@@ -233,10 +238,19 @@ async def publish_strategy_update_endpoint(request: Request):
     publish_strategy_update(payload)
 
     pair = payload.get("trading_pair") or payload.get("symbol") or payload.get("pair")
+    strategy_id = payload.get("strategy_id")
+    
     try:
         async with AsyncSessionLocal() as db:
             strategies = await get_active_strategies(db, pair)
         StrategyCache.set(strategies, pair or "all")
+        
+        from app.cache import invalidate_strategy_cache_domain
+        if strategy_id:
+            invalidate_strategy_cache_domain([int(strategy_id)])
+        else:
+            invalidate_strategy_cache_domain([])
+            
     except Exception as exc:
         logger.warning("Failed to refresh strategies cache after publish: %s", exc)
 

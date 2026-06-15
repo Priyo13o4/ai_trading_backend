@@ -47,6 +47,9 @@ MSG_HIST_END = 23           # EA -> backend
 MSG_STRATEGY_PUSH = 30      # Backend/bridge -> EA
 MSG_TRADE_EVENT = 31        # EA -> backend
 
+MSG_POSITION_SYNC_REQUEST  = 40  # EA -> backend: list of {ticket, signal_hash} for open positions
+MSG_POSITION_SYNC_RESPONSE = 41  # backend -> EA: full state record per open ticket
+
 # Timeframe codes (must match MT5 EA)
 TF_M1 = 1
 TF_M5 = 2
@@ -369,10 +372,25 @@ def pack_strategy_push(
 
 # Trade event payload
 def unpack_trade_event(payload: bytes) -> dict:
-    # MT5 EA sends: {"ticket":..., "strategy_id":..., "symbol":..., "type":..., "price":..., "volume":...}
+    """Parse a TRADE_EVENT JSON payload from the MT5 EA.
+
+    All keys emitted by the EA are surfaced at the top level of the returned
+    dict.  Previously tp/sl/mae_pips/mfe_pips were only accessible via
+    ``result['raw']``; they are now explicit top-level keys so callers don't
+    have to fish through the raw dict.
+
+    Full key list (EA v3.30):
+        ticket, deal_id, order_id, magic_number, strategy_id, symbol,
+        type (deal_type int), direction, price, volume, status, pnl,
+        commission, swap, event_time, close_reason,
+        partial_close_executed, break_even_moved,
+        tp, sl, mae_pips, mfe_pips
+    The ``raw`` key retains the original decoded dict for backward
+    compatibility.
+    """
     try:
         data = json.loads(payload.decode("utf-8", errors="ignore"))
-        
+
         # MT5 uses `type`/`deal_type` (0 = BUY, 1 = SELL). Prefer explicit
         # direction when newer EAs send it because close deals can be opposite
         # the original position direction.
@@ -384,26 +402,33 @@ def unpack_trade_event(payload: bytes) -> dict:
         direction = data.get("direction")
         if not direction:
             direction = "long" if deal_type_int == 0 else "short"
-        
+
         return {
-            "ticket": data.get("ticket", 0),
-            "deal_id": data.get("deal_id", data.get("deal", 0)),
-            "order_id": data.get("order_id", data.get("order", 0)),
-            "magic_number": data.get("magic_number", data.get("magic", None)),
-            "strategy_id": data.get("strategy_id", 0),
-            "symbol": data.get("symbol", "UNKNOWN"),
-            "price": data.get("price", 0.0),
-            "volume": data.get("volume", 0.0),
-            "status": data.get("status", "executed"),
-            "pnl": data.get("pnl", 0.0),
-            "commission": data.get("commission", 0.0),
-            "swap": data.get("swap", 0.0),
-            "event_time": data.get("event_time"),
-            "close_reason": data.get("close_reason", data.get("reason")),
-            "partial_close_executed": data.get("partial_close_executed"),
-            "break_even_moved": data.get("break_even_moved"),
-            "direction": direction,
-            "raw": data,
+            "ticket":                 data.get("ticket", 0),
+            "deal_id":               data.get("deal_id", data.get("deal", 0)),
+            "order_id":              data.get("order_id", data.get("order", 0)),
+            "magic_number":          data.get("magic_number", data.get("magic", None)),
+            "strategy_id":           data.get("strategy_id", 0),
+            "symbol":                data.get("symbol", "UNKNOWN"),
+            "type":                  deal_type_int,
+            "direction":             direction,
+            "price":                 data.get("price", 0.0),
+            "volume":                data.get("volume", 0.0),
+            "status":                data.get("status", "executed"),
+            "pnl":                   data.get("pnl", 0.0),
+            "commission":            data.get("commission", 0.0),
+            "swap":                  data.get("swap", 0.0),
+            "event_time":            data.get("event_time"),
+            "close_reason":          data.get("close_reason", data.get("reason")),
+            "partial_close_executed":data.get("partial_close_executed"),
+            "break_even_moved":      data.get("break_even_moved"),
+            # Fields previously missing from top-level (WS1 fix)
+            "tp":                    data.get("tp"),
+            "sl":                    data.get("sl"),
+            "mae_pips":              data.get("mae_pips"),
+            "mfe_pips":              data.get("mfe_pips"),
+            # Retain raw dict for backward compat / audit
+            "raw":                   data,
         }
     except Exception as e:
         raise ProtocolError(f"Failed to parse TRADE_EVENT JSON payload: {e}")

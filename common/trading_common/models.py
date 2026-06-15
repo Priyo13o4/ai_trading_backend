@@ -27,8 +27,8 @@ class Strategy(Base, ToDictMixin):
     symbol: Mapped[str] = mapped_column(String(10))
     direction: Mapped[str] = mapped_column(String(10))
     entry_signal: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    take_profit: Mapped[Decimal] = mapped_column(Numeric(10, 5))
-    stop_loss: Mapped[Decimal] = mapped_column(Numeric(10, 5))
+    take_profit: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    stop_loss: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     risk_reward_ratio: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     confidence: Mapped[str] = mapped_column(String(10))
     expiry_minutes: Mapped[int | None] = mapped_column(Integer)
@@ -66,10 +66,10 @@ class Signal(Base, ToDictMixin):
     mt5_magic_number: Mapped[int | None] = mapped_column(Integer)
     trading_pair: Mapped[str] = mapped_column(String(10))
     direction: Mapped[str] = mapped_column(String(10))
-    entry_price: Mapped[Decimal] = mapped_column(Numeric(10, 5))
-    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 5))
-    take_profit: Mapped[Decimal | None] = mapped_column(Numeric(10, 5))
-    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(10, 5))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    take_profit: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     lot_size: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -183,7 +183,10 @@ class EmailNewsAnalysis(Base, ToDictMixin):
     attention_window: Mapped[str | None] = mapped_column(String(20))
     confidence_label: Mapped[str | None] = mapped_column(String(20))
     expected_followups: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
-    is_priced_in: Mapped[bool | None] = mapped_column(Boolean)
+    pricing_state: Mapped[str | None] = mapped_column(String(50))
+    reaction_certainty: Mapped[str | None] = mapped_column(String(50))
+    directional_confidence: Mapped[float | None] = mapped_column(Float)
+    repricing_type: Mapped[str | None] = mapped_column(String(50))
 
 
 class RegimeData(Base, ToDictMixin):
@@ -199,6 +202,11 @@ class RegimeData(Base, ToDictMixin):
     market_data: Mapped[dict[str, Any]] = mapped_column(JSONB)
     collection_info: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dominant_driver: Mapped[str | None] = mapped_column(String(50))
+    macro_counterforce_active: Mapped[bool | None] = mapped_column(Boolean)
+    macro_counterforce_note: Mapped[str | None] = mapped_column(Text)
+    regime_fragility: Mapped[str | None] = mapped_column(String(20))
+    regime_break_probability: Mapped[int | None] = mapped_column(Integer)
 
 
 class WeeklyMacroPlaybook(Base, ToDictMixin):
@@ -215,6 +223,58 @@ class WeeklyMacroPlaybook(Base, ToDictMixin):
     pair_bias: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     playbook_hash: Mapped[str | None] = mapped_column(Text)
+
+
+class LiveTradeState(Base, ToDictMixin):
+    """Per-ticket runtime record for every open MT5 trade.
+
+    Issued fields (ticket, strategy_id, direction, timeframe, entry_price,
+    original_sl, original_tp, pre_entry_rule, post_entry_rule) are written
+    once on the first TRADE_EVENT(status=open) and must never be overwritten
+    by later modify/close events.
+
+    Running-state fields (partial_closed, break_even_moved,
+    max_favorable_price, max_adverse_price, latest_mae_pips, latest_mfe_pips,
+    state) are updated on every subsequent event.
+
+    Used by the POSITION_SYNC_RESPONSE TCP message to rehydrate the EA after
+    a restart.
+    """
+    __tablename__ = "live_trade_state"
+
+    # Primary key: MT5 position ticket (always present in TRADE_EVENT)
+    ticket: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    # Optional linkage to signal_hash from order comment AI_{sid}_{hash}
+    # The EA does not currently send this in TRADE_EVENT JSON, so nullable.
+    signal_hash: Mapped[str | None] = mapped_column(Text, unique=True, index=True)
+
+    strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("strategies.strategy_id", ondelete="SET NULL")
+    )
+
+    # --- Issued fields (set once, never overwritten) ---
+    direction: Mapped[str] = mapped_column(String(10))
+    timeframe: Mapped[str | None] = mapped_column(String(10))  # from strategy.entry_signal->>'timeframe'
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    original_sl: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    original_tp: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    pre_entry_rule: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    post_entry_rule: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    # --- Running-state fields (updated on every event) ---
+    partial_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    break_even_moved: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_favorable_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    max_adverse_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    latest_mae_pips: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    latest_mfe_pips: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    state: Mapped[str] = mapped_column(String(20), default="open")
+
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    strategy: Mapped["Strategy"] = relationship("Strategy")
 
 
 class EconomicEventAnalysis(Base, ToDictMixin):

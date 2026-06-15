@@ -239,9 +239,13 @@ class DatabaseManager:
                         confidence_label,
                         expected_followups,
                         email_received_at,
-                        forexfactory_urls
+                        forexfactory_urls,
+                        pricing_state,
+                        reaction_certainty,
+                        directional_confidence,
+                        repricing_type
                     ) VALUES (
-                        :content_id, :headline, :scraped_content, :ai_analysis_summary, :forex_relevant, :forex_instruments, :primary_instrument, :us_political_related, :forexfactory_category, :trade_deal_related, :central_bank_related, :importance_score, :sentiment_score, :analysis_confidence, :news_category, :entities_mentioned, :trading_sessions, :market_impact_prediction, :impact_timeframe, :volatility_expectation, :similar_news_context, :similar_news_ids, :human_takeaway, :attention_score, :news_state, :market_pressure, :attention_window, :confidence_label, :expected_followups, :email_received_at, :forexfactory_urls
+                        :content_id, :headline, :scraped_content, :ai_analysis_summary, :forex_relevant, :forex_instruments, :primary_instrument, :us_political_related, :forexfactory_category, :trade_deal_related, :central_bank_related, :importance_score, :sentiment_score, :analysis_confidence, :news_category, :entities_mentioned, :trading_sessions, :market_impact_prediction, :impact_timeframe, :volatility_expectation, :similar_news_context, :similar_news_ids, :human_takeaway, :attention_score, :news_state, :market_pressure, :attention_window, :confidence_label, :expected_followups, :email_received_at, :forexfactory_urls, :pricing_state, :reaction_certainty, :directional_confidence, :repricing_type
                     )
                     RETURNING email_id
                 """), {
@@ -273,6 +277,10 @@ class DatabaseManager:
                     "market_pressure": analysis_data.get('market_pressure'),
                     "attention_window": analysis_data.get('attention_window'),
                     "confidence_label": analysis_data.get('confidence_label'),
+                    "pricing_state": analysis_data.get('pricing_state'),
+                    "reaction_certainty": analysis_data.get('reaction_certainty'),
+                    "directional_confidence": analysis_data.get('directional_confidence'),
+                    "repricing_type": analysis_data.get('repricing_type'),
                     "expected_followups": analysis_data.get('expected_followups', []),
                     "email_received_at": published_date,
                     "forexfactory_urls": [forexfactory_url] if forexfactory_url else None,

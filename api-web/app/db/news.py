@@ -82,7 +82,10 @@ async def get_latest_news_from_db(db: AsyncSession, limit: int = 50, offset: int
                 similar_news_context,
                 similar_news_ids,
                 primary_instrument,
-                is_priced_in
+                pricing_state,
+                reaction_certainty,
+                directional_confidence,
+                repricing_type
               FROM email_news_analysis
               WHERE forex_relevant = true
               AND importance_score >= 2

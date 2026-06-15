@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 def _regime_all_key(request: Request, response: Response, ctx: dict = None) -> str:
-    return "regime:all"
+    return "latest:regime:all"
 
 @router.get("/api/regime")
 @singleflight_cache(key_builder=_regime_all_key, ttl=900)
@@ -45,7 +45,7 @@ async def get_regime(request: Request, response: Response, ctx: dict = Depends(r
         raise HTTPException(500, "Internal server error")
 
 def _regime_market_data_key(request: Request, db: AsyncSession = None) -> str:
-    return "regime:market_data"
+    return "latest:regime:market_data"
 
 @router.get("/api/regime/market-data")
 @singleflight_cache(key_builder=_regime_market_data_key, ttl=300)
@@ -246,7 +246,7 @@ async def get_regime_market_data_markdown(request: Request, db: AsyncSession = D
         raise HTTPException(500, "Internal server error")
 
 def _regime_market_data_json_key(request: Request, symbol: Optional[str] = None, symbols: Optional[str] = None, db: AsyncSession = None) -> str:
-    return f"regime:market_data_json:{symbol}:{symbols}"
+    return f"latest:regime:market_data_json:{symbol}:{symbols}"
 
 @router.get("/api/regime/market-data/json")
 @singleflight_cache(key_builder=_regime_market_data_json_key, ttl=300)
@@ -329,7 +329,7 @@ async def get_regime_market_data_json(
         raise HTTPException(500, "Internal server error")
 
 def _regime_by_pair_key(pair: str, ctx: dict = None) -> str:
-    return f"regime:pair:{pair}"
+    return f"latest:regime:pair:{pair}"
 
 @router.get("/api/regime/{pair}")
 @singleflight_cache(key_builder=_regime_by_pair_key, ttl=900)

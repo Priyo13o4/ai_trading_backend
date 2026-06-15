@@ -28,6 +28,8 @@ from .mt5_wire import (
     MSG_ERROR,
     MSG_STRATEGY_PUSH,
     MSG_TRADE_EVENT,
+    MSG_POSITION_SYNC_REQUEST,
+    MSG_POSITION_SYNC_RESPONSE,
     HEADER_LEN,
     pack_frame,
     read_frame,
@@ -363,6 +365,10 @@ class MT5ExecutorServer:
                     asyncio.create_task(self._handle_trade_event(event))
                     continue
 
+                elif frame.msg_type == MSG_POSITION_SYNC_REQUEST:
+                    asyncio.create_task(self._handle_position_sync_request(writer, frame.payload))
+                    continue
+
                 elif frame.msg_type == MSG_ERROR:
                     try:
                         error_data = json.loads(frame.payload.decode('utf-8', errors='ignore'))
@@ -389,7 +395,7 @@ class MT5ExecutorServer:
     async def _handle_trade_event(self, event: dict) -> None:
         try:
             async with AsyncSessionLocal() as db:
-                from trading_common.models import Signal, Strategy
+                from trading_common.models import Signal, Strategy, LiveTradeState
 
                 now = datetime.now(timezone.utc)
                 status = _normalise_trade_status(event.get("status"), event.get("close_reason"))
@@ -425,8 +431,7 @@ class MT5ExecutorServer:
                         "unsupported_condition_type",
                     } or status.startswith("rejected_") or status.startswith("closed_"):
                         strategy.executed_at = now
-                    if status in {"invalidated", "expired"}:
-                        strategy.status = status
+                    # We no longer update strategy.status from MT5. The cron job owns it.
 
                 if _is_lifecycle_only(status, ticket):
                     await db.commit()
@@ -498,7 +503,7 @@ class MT5ExecutorServer:
                         status = signal.status
                     else:
                         signal.status = status
-                    
+
                     signal.exit_price = _as_float(event.get("price"), _as_float(signal.exit_price))
                     signal.take_profit = _as_float(event.get("tp"), _as_float(signal.take_profit))
                     signal.stop_loss = _as_float(event.get("sl"), _as_float(signal.stop_loss))
@@ -530,29 +535,34 @@ class MT5ExecutorServer:
                             diff = -diff
                         signal.pnl_pips = round(diff * multiplier, 2)
 
-                    if "mae_pips" in event:
-                        signal.mae_pips = _as_float(event.get("mae_pips"))
-                    if "mfe_pips" in event:
-                        signal.mfe_pips = _as_float(event.get("mfe_pips"))
-
                 else:
                     signal.status = status
 
+                # --- WS1 fix: write mae_pips/mfe_pips on EVERY event status ---
+                # The EA populates these from the position's running max_favorable/max_adverse
+                # price, so they are meaningful on open and partial_close events too.
+                raw_event = event.get("raw", {})
+                if event.get("mae_pips") is not None:
+                    signal.mae_pips = _as_float(event.get("mae_pips"))
+                if event.get("mfe_pips") is not None:
+                    signal.mfe_pips = _as_float(event.get("mfe_pips"))
+
                 # Update PnL, commission, and swap only if they were explicitly sent in the raw payload
                 # to prevent overwriting with 0.0 during modification events.
-                # Avoid accumulation on closed events to prevent double counting.
-                raw_payload = event.get("raw", {})
-                if "pnl" in raw_payload:
+                if "pnl" in raw_event:
                     signal.pnl = _accumulate(signal.pnl, event.get("pnl"))
-                if "commission" in raw_payload:
+                if "commission" in raw_event:
                     signal.commission = _accumulate(signal.commission, event.get("commission"))
-                if "swap" in raw_payload:
+                if "swap" in raw_event:
                     signal.swap = _accumulate(signal.swap, event.get("swap"))
 
                 if event.get("partial_close_executed") is not None:
                     signal.partial_close_executed = bool(event.get("partial_close_executed"))
                 if event.get("break_even_moved") is not None:
                     signal.break_even_moved = bool(event.get("break_even_moved"))
+
+                # --- WS2A: persist / update live_trade_state ---
+                await self._upsert_live_trade_state(db, event, status, strategy, now)
 
                 await db.commit()
         except Exception as e:
@@ -566,5 +576,165 @@ class MT5ExecutorServer:
                 context={"event": event},
                 severity="error"
             )
+
+    async def _upsert_live_trade_state(self, db, event: dict, status: str, strategy, now: datetime) -> None:
+        """Persist or update the live_trade_state row for this ticket.
+
+        Issued fields (direction, timeframe, entry_price, original_sl,
+        original_tp, pre_entry_rule, post_entry_rule) are written only on
+        the first ``open`` event and never overwritten.
+
+        Running-state fields are updated on every event.
+        """
+        from trading_common.models import LiveTradeState
+
+        ticket = _as_int(event.get("ticket"))
+        if ticket <= 0:
+            return
+
+        lts_stmt = select(LiveTradeState).where(LiveTradeState.ticket == ticket).with_for_update()
+        lts = (await db.execute(lts_stmt)).scalars().first()
+
+        if lts is None and status == "open":
+            # --- First open event: write issued fields from strategy + event ---
+            timeframe = None
+            original_sl = _as_float(event.get("sl")) or None
+            original_tp = _as_float(event.get("tp")) or None
+            pre_entry_rule = None
+            post_entry_rule = None
+
+            if strategy is not None:
+                # Timeframe lives in strategy.entry_signal.timeframe (JSONB)
+                entry_signal = strategy.entry_signal or {}
+                timeframe = entry_signal.get("timeframe") or None
+                # Original SL/TP: prefer strategy values (they are the signal-time prices)
+                if strategy.stop_loss:
+                    original_sl = float(strategy.stop_loss)
+                if strategy.take_profit:
+                    original_tp = float(strategy.take_profit)
+                pre_entry_rule = strategy.pre_entry_rule
+                post_entry_rule = strategy.post_entry_rule
+
+            lts = LiveTradeState(
+                ticket=ticket,
+                signal_hash=None,  # EA doesn't send this in TRADE_EVENT JSON today
+                strategy_id=_as_int(event.get("strategy_id")) or None,
+                direction=event.get("direction", "long"),
+                timeframe=timeframe,
+                entry_price=_as_float(event.get("price")),
+                original_sl=original_sl,
+                original_tp=original_tp,
+                pre_entry_rule=pre_entry_rule,
+                post_entry_rule=post_entry_rule,
+                partial_closed=False,
+                break_even_moved=False,
+                state="open",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(lts)
+            logger.info(
+                "[MT5-EXEC] LiveTradeState created ticket=%s strategy_id=%s timeframe=%s",
+                ticket,
+                lts.strategy_id,
+                lts.timeframe,
+            )
+        elif lts is not None:
+            # --- Subsequent events: update running state only ---
+            lts.updated_at = now
+
+            if event.get("partial_close_executed"):
+                lts.partial_closed = True
+            if event.get("break_even_moved"):
+                lts.break_even_moved = True
+            if event.get("mae_pips") is not None:
+                lts.latest_mae_pips = _as_float(event.get("mae_pips"))
+            if event.get("mfe_pips") is not None:
+                lts.latest_mfe_pips = _as_float(event.get("mfe_pips"))
+
+            # Derive max_favorable/max_adverse prices from EA's MAE/MFE pips
+            # (price-level tracking would require per-symbol pip multiplier here;
+            #  we store the pip metrics and leave max_favorable/max_adverse as
+            #  an optional future enrichment).
+
+            if _is_closed_status(status):
+                lts.state = status
+            elif status == "partial_close":
+                lts.state = "partial_close"
+
+    async def _handle_position_sync_request(self, writer: asyncio.StreamWriter, payload: bytes) -> None:
+        """WS2B: Respond to a POSITION_SYNC_REQUEST from the EA.
+
+        The EA sends a JSON list of {ticket, signal_hash} for its currently
+        open positions.  The backend returns a POSITION_SYNC_RESPONSE with
+        the full live_trade_state record for each matched ticket.
+
+        Payload contract per position:
+          {"signal_hash": str, "ticket": int, "strategy_id": int,
+           "direction": "long|short", "timeframe": "M5|...",
+           "entry_price": float, "original_sl": float, "original_tp": float,
+           "partial_closed": bool, "break_even_moved": bool,
+           "max_favorable_price": float, "max_adverse_price": float,
+           "pre_entry_rule": {"rule_type": "none", "params": {}},
+           "post_entry_rule": {"rule_type": "none", "params": {}}}
+        """
+        try:
+            from trading_common.models import LiveTradeState
+
+            request_list = json.loads(payload.decode("utf-8", errors="ignore"))
+            if not isinstance(request_list, list):
+                request_list = []
+
+            tickets = [_as_int(item.get("ticket")) for item in request_list if _as_int(item.get("ticket")) > 0]
+
+            async with AsyncSessionLocal() as db:
+                results = []
+                if tickets:
+                    stmt = select(LiveTradeState).where(
+                        LiveTradeState.ticket.in_(tickets),
+                    )
+                    rows = (await db.execute(stmt)).scalars().all()
+                else:
+                    # No tickets supplied: return all currently-open records
+                    stmt = select(LiveTradeState).where(
+                        LiveTradeState.state.in_(["open", "partial_close"])
+                    )
+                    rows = (await db.execute(stmt)).scalars().all()
+
+                _NONE_RULE = {"rule_type": "none", "params": {}}
+
+                for row in rows:
+                    results.append({
+                        "signal_hash":         row.signal_hash or "",
+                        "ticket":              row.ticket,
+                        "strategy_id":         row.strategy_id or 0,
+                        "direction":           row.direction,
+                        "timeframe":           row.timeframe or "M15",
+                        "entry_price":         float(row.entry_price) if row.entry_price else 0.0,
+                        "original_sl":         float(row.original_sl) if row.original_sl else 0.0,
+                        "original_tp":         float(row.original_tp) if row.original_tp else 0.0,
+                        "partial_closed":      bool(row.partial_closed),
+                        "break_even_moved":    bool(row.break_even_moved),
+                        "max_favorable_price": float(row.max_favorable_price) if row.max_favorable_price else 0.0,
+                        "max_adverse_price":   float(row.max_adverse_price) if row.max_adverse_price else 0.0,
+                        "pre_entry_rule":      row.pre_entry_rule or _NONE_RULE,
+                        "post_entry_rule":     row.post_entry_rule or _NONE_RULE,
+                    })
+
+            response_payload = json.dumps(results).encode("utf-8")
+            frame = pack_frame(MSG_POSITION_SYNC_RESPONSE, response_payload)
+            try:
+                writer.write(frame)
+                await writer.drain()
+            except Exception as send_err:
+                logger.warning("[MT5-EXEC] POSITION_SYNC_RESPONSE send failed: %s", send_err)
+            logger.info(
+                "[MT5-EXEC] POSITION_SYNC_RESPONSE sent tickets=%s positions=%s",
+                tickets,
+                len(results),
+            )
+        except Exception as e:
+            logger.error("[MT5-EXEC] _handle_position_sync_request error: %s", e, exc_info=True)
+
 
 mt5_executor_server = MT5ExecutorServer()

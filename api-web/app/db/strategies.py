@@ -20,14 +20,18 @@ async def expire_elapsed_strategies_batch(db: AsyncSession, batch_size: int = 10
                     FROM public.strategies
                     WHERE status = 'active'
                       AND expiry_time <= NOW()
-                      AND (execution_status IS NULL OR execution_status NOT IN ('open', 'partial_close'))
                     ORDER BY expiry_time ASC, strategy_id ASC
                     LIMIT :batch_size
                     FOR UPDATE SKIP LOCKED
                 ),
                 updated AS (
                     UPDATE public.strategies s
-                    SET status = 'expired'
+                    SET 
+                        status = 'expired',
+                        execution_status = CASE 
+                            WHEN s.execution_status IN ('open', 'partial_close', 'closed') THEN s.execution_status 
+                            ELSE 'expired' 
+                        END
                     FROM candidates c
                     WHERE s.strategy_id = c.strategy_id
                     RETURNING s.strategy_id, c.expiry_time

@@ -55,6 +55,18 @@ class NewsAnalysis(BaseModel):
     confidence_label: Literal['low', 'medium', 'high'] = Field(
         description="Human-readable confidence label: low|medium|high"
     )
+    pricing_state: Literal['not_priced_in', 'partially_priced_in', 'priced_in', 'unclear'] = Field(
+        description="Market pricing state"
+    )
+    reaction_certainty: Literal['clear', 'contested'] = Field(
+        description="Certainty of the market's reaction direction"
+    )
+    directional_confidence: float = Field(
+        ge=0.0, le=1.0, description="Confidence in the first directional move"
+    )
+    repricing_type: Literal['none', 'fundamental', 'positioning_unwind', 'credibility_shock', 'mixed'] = Field(
+        description="The mechanical nature of the repricing"
+    )
     expected_followups: List[str] = Field(
         default_factory=list,
         description="Likely next developments traders should watch (no wild speculation)"
@@ -320,6 +332,10 @@ Output parser :
     "market_pressure",
     "attention_window",
     "confidence_label",
+    "pricing_state",
+    "reaction_certainty",
+    "directional_confidence",
+    "repricing_type",
     "expected_followups"
   ]
 }"""
