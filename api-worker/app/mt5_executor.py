@@ -109,7 +109,7 @@ def _normalise_trade_status(status: Any, close_reason: Any = None) -> str:
     status) so the DB write never violates the constraint.
     """
     normalised = str(status or "open").strip().lower()
-    if normalised == "executed":
+    if normalised in ("executed", "partial_close"):
         return "open"
         
     if normalised == "closed_early":

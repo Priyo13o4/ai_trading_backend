@@ -58,6 +58,10 @@ logconfig_dict = {
 }
 EOF
 
+# Run database migrations
+echo "Running Alembic migrations..."
+alembic upgrade head
+
 # Start the API server
 echo "Starting FastAPI server (web only)..."
 # Number of workers.
