@@ -361,7 +361,9 @@ class MT5ExecutorServer:
                     event = unpack_trade_event(frame.payload)
                     status_val = event.get('status', 'open')
                     pnl_val = event.get('pnl', 0.0)
-                    logger.info(f"[MT5-EXEC] TRADE_EVENT ticket={event['ticket']} strategy_id={event['strategy_id']} status={status_val} pnl={pnl_val}")
+                    mae_val = event.get('mae_pips')
+                    mfe_val = event.get('mfe_pips')
+                    logger.info(f"[MT5-EXEC] TRADE_EVENT ticket={event['ticket']} strategy_id={event['strategy_id']} status={status_val} pnl={pnl_val} mae={mae_val} mfe={mfe_val}")
                     asyncio.create_task(self._handle_trade_event(event))
                     continue
 
