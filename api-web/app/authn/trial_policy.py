@@ -182,6 +182,29 @@ async def _mark_device_trial_first_use(
     return isinstance(result, list) and len(result) > 0
 
 
+async def _device_belongs_to_current_user(device_id_hash: str, user_id: str) -> bool:
+    """True if the device was first registered by this exact user (re-signup / double-exchange)."""
+    url = _rest_url(
+        f"/rest/v1/device_trials"
+        f"?device_id_hash=eq.{device_id_hash}&first_user_id=eq.{user_id}&limit=1"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(url, headers=_base_headers())
+    except httpx.RequestError as exc:
+        raise TrialPolicyError("device owner lookup unavailable") from exc
+
+    if resp.status_code >= 400:
+        raise TrialPolicyError(f"device owner lookup failed ({resp.status_code})")
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+
+    return isinstance(payload, list) and len(payload) > 0
+
+
 async def _disable_trial_entitlement(user_id: str) -> None:
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = _rest_url(f"/rest/v1/user_subscriptions?user_id=eq.{user_id}&status=eq.trial")
@@ -189,6 +212,10 @@ async def _disable_trial_entitlement(user_id: str) -> None:
         "status": "expired",
         "expires_at": now_iso,
         "trial_ends_at": now_iso,
+        "metadata": {
+            "trial_block_reason": "device_already_used",
+            "blocked_at": now_iso,
+        },
     }
 
     try:
@@ -238,6 +265,19 @@ async def apply_trial_policy_for_exchange(
         return TrialPolicyOutcome(
             trial_allowed=True,
             reason="allow_first_device_trial",
+            device_id_hash=device_hash,
+            had_active_trial=True,
+        )
+
+    # Device row already existed but was created by THIS user — safe re-signup or double-exchange.
+    if await _device_belongs_to_current_user(device_hash, user_id):
+        logger.info(
+            "auth.trial_policy outcome=allow_trial user_id=%s reason=same_user_device_resumption",
+            user_id,
+        )
+        return TrialPolicyOutcome(
+            trial_allowed=True,
+            reason="allow_same_user_device_resumption",
             device_id_hash=device_hash,
             had_active_trial=True,
         )
