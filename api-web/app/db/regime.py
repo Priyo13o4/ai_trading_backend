@@ -169,7 +169,8 @@ async def get_regime_market_data_from_db(db: AsyncSession):
                         try:
                             def _run_calc(clist):
                                 # Prepare DataFrame for calculation (need at least 250 bars for lookbacks)
-                                df = pd.DataFrame(clist).sort_values('time').reset_index(drop=True)
+                                sorted_clist = sorted(clist, key=lambda x: x['time'])
+                                df = pd.DataFrame(sorted_clist).reset_index(drop=True)
                                 # Mapping columns to what calculate_all_indicators expects
                                 df = df.rename(columns={'time': 'datetime'})
                                 for col in ["open", "high", "low", "close", "volume"]:
