@@ -37,7 +37,6 @@ def _log(message: str) -> None:
 
 def main() -> int:
     if not _is_truthy("REFERRAL_PAUSE_RESUME_WORKER_ENABLED"):
-        _log("Worker disabled via REFERRAL_PAUSE_RESUME_WORKER_ENABLED")
         return 0
 
     _log("Starting referral pause/resume orchestration run")
@@ -46,13 +45,14 @@ def main() -> int:
 
     try:
         stats = run_referral_pause_resume_cycle()
-        _log(
-            "Completed run "
-            f"seeded={stats.seeded_cycles} "
-            f"paused={stats.paused_success} "
-            f"resumed={stats.resumed_success} "
-            f"failed_marked={stats.failed_marked}"
-        )
+        if stats.seeded_cycles > 0 or stats.paused_success > 0 or stats.resumed_success > 0 or stats.failed_marked > 0:
+            _log(
+                "Completed run "
+                f"seeded={stats.seeded_cycles} "
+                f"paused={stats.paused_success} "
+                f"resumed={stats.resumed_success} "
+                f"failed_marked={stats.failed_marked}"
+            )
         return 0
     except ReferralPauseResumeConfigurationError as exc:
         _log(f"Blocking configuration error during run: {exc}")

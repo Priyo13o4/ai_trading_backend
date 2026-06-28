@@ -189,17 +189,20 @@ def check_momentum_spike(df: pd.DataFrame, current_price: float, signal: dict, p
     return range_ > atr * 1.5
 
 def check_range_breakout(df: pd.DataFrame, current_price: float, signal: dict, point: float, atr: float) -> bool:
+    # EA-08 mirror: range_breakout triggers off the AI's `level` (+/- spread buffer),
+    # NOT the ATR-synthesized trigger_zone boundaries. This matches TradeExecutor
+    # (updated).mq5 CheckRangeBreakout, which was changed to fire on entry_level +/- buffer
+    # so a synthesized (level +/- 0.5*ATR) zone no longer inflates the breakout threshold.
     if len(df) < 2: return False
-    zone = signal.get('trigger_zone', [0, 0])
-    if not is_zone_valid(zone): return False
-    
-    spread_buffer = float(signal.get('entry_spread_buffer_pips', 0.0)) * 10.0 * point
     direction = signal_direction(signal)
     level = signal_level(signal)
+    if level <= 0: return False
+
+    spread_buffer = float(signal.get('entry_spread_buffer_pips', 0.0)) * 10.0 * point
     if direction == "long":
-        return (current_price > (zone[1] + spread_buffer)) and check_confirmation_pattern(df, 1, signal.get('confirmation'), direction, level, current_price)
+        return (current_price > (level + spread_buffer)) and check_confirmation_pattern(df, 1, signal.get('confirmation'), direction, level, current_price)
     else:
-        return (current_price < (zone[0] - spread_buffer)) and check_confirmation_pattern(df, 1, signal.get('confirmation'), direction, level, current_price)
+        return (current_price < (level - spread_buffer)) and check_confirmation_pattern(df, 1, signal.get('confirmation'), direction, level, current_price)
 
 def check_liquidity_grab(df: pd.DataFrame, current_price: float, signal: dict, point: float, atr: float) -> bool:
     if len(df) < 2: return False

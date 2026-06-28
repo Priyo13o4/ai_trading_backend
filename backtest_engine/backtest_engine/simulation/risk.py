@@ -2,14 +2,25 @@ import math
 from backtest_engine.broker_specs import BrokerSymbolSpec
 
 def normalize_volume(
-    volume: float, 
-    spec: BrokerSymbolSpec, 
-    min_lot_size: float = 0.01, 
+    volume: float,
+    spec: BrokerSymbolSpec,
+    min_lot_size: float = 0.01,
     max_lot_size: float = 0.1
 ) -> float:
+    # EA-18 mirror (entry path): if the risk-derived volume is below the broker minimum,
+    # this clamps it UP to the minimum (`max(volume, min_allowed)`) rather than aborting the
+    # trade. That matches NormalizeVolumeForSymbol(..., allowMinClamp=true) in
+    # TradeExecutor(updated).mq5 — high-conviction metal/news signals whose risk-based lot
+    # falls under the broker floor (e.g. XAUUSD ~0.003) still enter at the broker minimum,
+    # accepting the higher-than-target risk (state.py flags lot_floor_violation /
+    # risk_exceeded_due_to_min_lot but does NOT reject). The partial-close path keeps the
+    # EA's allowMinClamp=false behaviour: check_partial_close() returns size 0 (skip) when the
+    # close volume is below the broker minimum, so partials are never clamped up.
+    # Parity note: the EA clamps to SYMBOL_VOLUME_MIN; here min_allowed = max(config min_lot,
+    # broker_min), so keep config min_lot_size <= the broker minimum to stay faithful.
     if volume <= 0:
         return 0.0
-        
+
     broker_min = spec.volume_min
     broker_max = spec.volume_max
     broker_step = spec.volume_step

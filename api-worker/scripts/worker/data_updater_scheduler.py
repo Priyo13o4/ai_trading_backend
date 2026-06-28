@@ -422,11 +422,8 @@ def run_referral_reward_transitions() -> bool:
     Executes as a subprocess to isolate referral transition execution.
     Returns True if successful or disabled, False if execution failed.
     """
-    log("🎁 Starting referral reward transitions task...")
-    
     # Check if referral transitions are enabled
     if not (os.getenv("REFERRAL_REWARD_TRANSITIONS_ENABLED") or "").strip().lower() in {"1", "true", "yes"}:
-        log("⏸️  Referral reward transitions disabled (REFERRAL_REWARD_TRANSITIONS_ENABLED not set)")
         return True
     
     timeout_seconds = int(os.getenv("REFERRAL_TRANSITIONS_TIMEOUT_SECONDS", "60"))
@@ -454,7 +451,6 @@ def run_referral_reward_transitions() -> bool:
             time.sleep(0.5)
         
         if proc.returncode == 0:
-            log("✓ Referral reward transitions completed successfully")
             return True
         if proc.returncode == 2:
             log("🛑 Referral transitions blocked due to missing Supabase credentials or required RPC contract")
@@ -470,10 +466,7 @@ def run_referral_reward_transitions() -> bool:
 
 def run_referral_pause_resume_worker() -> bool:
     """Run Scope E referral pause/resume worker as a subprocess."""
-    log("🎁 Starting referral pause/resume task...")
-
     if not (os.getenv("REFERRAL_PAUSE_RESUME_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes"}:
-        log("⏸️  Referral pause/resume worker disabled (REFERRAL_PAUSE_RESUME_WORKER_ENABLED not set)")
         return True
 
     timeout_seconds = int(os.getenv("REFERRAL_PAUSE_RESUME_TIMEOUT_SECONDS", "120"))
@@ -501,7 +494,6 @@ def run_referral_pause_resume_worker() -> bool:
             time.sleep(0.5)
 
         if proc.returncode == 0:
-            log("✓ Referral pause/resume worker completed successfully")
             return True
         if proc.returncode == 2:
             log("🛑 Referral pause/resume worker blocked due to missing Supabase schema contract or credentials")

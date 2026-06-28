@@ -149,10 +149,14 @@ def db_dump(out):
 @click.option('--variant', help='Only run one variant id from --sweep-config')
 @click.option('--sweep-id', help='Optional id to group sweep runs')
 @click.option('--max-combinations', default=24, type=int, help='Safety cap for sweep variants')
+@click.option('--portfolio/--no-portfolio', default=True, help='Run the chronological portfolio/equity-curve model (EA-04/EA-16 mirror) on top of the per-strategy sims')
+@click.option('--starting-balance', default=500.0, type=float, help='Portfolio starting balance')
+@click.option('--dashboard-out', default=None, help='Also write the Trust/Edge/Contamination dashboard JSON to this path (e.g. the dashboard public/ dir)')
 def run_command(
     profile, universe, strategy_id, symbol, strategy_version, from_date, to_date, limit,
     reuse, dry_run, report_dir, fail_on_missing_specs, ea_config, broker_specs,
-    replay_until, max_trade_horizon_days, sweep_config, variant, sweep_id, max_combinations
+    replay_until, max_trade_horizon_days, sweep_config, variant, sweep_id, max_combinations,
+    portfolio, starting_balance, dashboard_out
 ):
     """Run a backtest simulation."""
     asyncio.run(run_backtest_async(
@@ -176,6 +180,9 @@ def run_command(
         variant=variant,
         sweep_id=sweep_id,
         max_combinations=max_combinations,
+        portfolio=portfolio,
+        starting_balance=starting_balance,
+        dashboard_out=dashboard_out,
     ))
 
 
@@ -217,6 +224,9 @@ async def run_backtest_async(
     variant: str | None = None,
     sweep_id: str | None = None,
     max_combinations: int = 24,
+    portfolio: bool = True,
+    starting_balance: float = 500.0,
+    dashboard_out: str | None = None,
 ):
     assert_backtest_db_is_isolated(SOURCE_DATABASE_URL)
 
@@ -248,6 +258,10 @@ async def run_backtest_async(
             ea_cfg = merge_config(base_config, variant_overrides)
         validate_management_config(ea_cfg)
 
+        if portfolio:
+            # ensure per-strategy sims capture the M1 mark-path for floating-equity valuation
+            ea_cfg = {**ea_cfg, "record_mark_path": True}
+
         tasks_kwargs.append({
             "profile_name": profile_name if variant_id is None else f"{profile_name}_{variant_id}",
             "universe": universe,
@@ -270,6 +284,9 @@ async def run_backtest_async(
             "variant_id": variant_id,
             "variant_description": getattr(sweep_variant, "description", "") if sweep_variant else "",
             "variant_overrides": variant_overrides,
+            "portfolio": portfolio,
+            "starting_balance": starting_balance,
+            "dashboard_out": dashboard_out,
         })
 
     loop = asyncio.get_running_loop()
@@ -384,6 +401,39 @@ def _write_sweep_summary(output_dir: Path, sweep_id: str, rows: list[dict]) -> N
     md_path.write_text("\n".join(lines) + "\n")
 
 
+def _portfolio_markdown(summary: dict) -> str:
+    lines = [
+        "# Portfolio / Equity-Curve Result",
+        "",
+        "Chronological single-account model (EA-04 opposite-conflict, EA-16 equity drawdown sizing,",
+        "concurrency + total-risk caps). PnL re-scaled to the portfolio lot; floating equity marked",
+        "at decision points from each open position's M1 path.",
+        "",
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Starting balance | ${summary['starting_balance']:.2f} |",
+        f"| Final balance | ${summary['final_balance']:.2f} |",
+        f"| Total net PnL | ${summary['total_net_pnl']:.2f} |",
+        f"| Return | {summary['return_pct']:.2f}% |",
+        f"| Max drawdown | {summary['max_drawdown_pct']:.2f}% (${summary['max_drawdown_abs']:.2f}) |",
+        f"| Peak equity | ${summary['peak_equity']:.2f} |",
+        f"| Profit factor | {summary['profit_factor']} |",
+        f"| Win rate | {summary['win_rate'] * 100:.1f}% |",
+        f"| Admitted / candidates | {summary['num_admitted']} / {summary['num_candidates']} |",
+        f"| Rejected | {summary['num_rejected']} |",
+        f"| Peak concurrent | {summary['peak_concurrent']} |",
+        "",
+        "## Reject reasons",
+        "",
+    ]
+    if summary["reject_reasons"]:
+        for reason, count in sorted(summary["reject_reasons"].items(), key=lambda x: -x[1]):
+            lines.append(f"- `{reason}`: {count}")
+    else:
+        lines.append("- (none)")
+    return "\n".join(lines) + "\n"
+
+
 async def _run_single_backtest(
     profile_name: str,
     universe: str,
@@ -407,6 +457,9 @@ async def _run_single_backtest(
     variant_id: str | None,
     variant_description: str,
     variant_overrides: dict,
+    portfolio: bool = True,
+    starting_balance: float = 500.0,
+    dashboard_out: str | None = None,
 ) -> dict:
     print(f"Starting backtest run: {profile_name}")
     broker_specs = apply_commission_overrides(load_broker_specs(broker_specs_path), ea_config)
@@ -561,6 +614,17 @@ async def _run_single_backtest(
             if getattr(res, 'entry_time', None) is None and getattr(res, 'outcome', '') != "unsupported_condition_type":
                 no_trade_count += 1
             
+    portfolio_outcome = None
+    if portfolio:
+        from backtest_engine.simulation.portfolio import simulate_portfolio
+        portfolio_outcome = simulate_portfolio(results, ea_config, broker_specs, starting_balance)
+        po = portfolio_outcome
+        print(
+            f"Portfolio: start ${po.starting_balance:.2f} -> end ${po.final_balance:.2f} | "
+            f"net ${po.total_net_pnl:.2f} | maxDD {po.max_drawdown_pct:.1f}% | PF {po.profit_factor:.2f} | "
+            f"admitted {po.num_admitted}/{po.num_candidates} | rejected {po.reject_reasons}"
+        )
+
     run.finished_at = datetime.now(timezone.utc)
     run.processed_strategies = len(results)
     run.executed_trades = executed_count
@@ -604,6 +668,56 @@ async def _run_single_backtest(
         export_frame_to_csv(frame, csv_path)
         md_path.write_text(generate_summary_report(name.replace("_", " ").title(), frame, title_cols[name]))
         artifacts.extend([csv_path, md_path])
+
+    if portfolio_outcome is not None:
+        import json as _json
+        from backtest_engine.reporting.dashboard_export import build_dashboard_payload, write_dashboard_payload
+
+        po = portfolio_outcome
+        eq_path = dirs["raw"] / "portfolio_equity_curve.csv"
+        with eq_path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "equity", "balance"])
+            for (t, eq, bal) in po.equity_curve:
+                w.writerow([t.isoformat() if hasattr(t, "isoformat") and t is not None else "",
+                            round(eq, 4), round(bal, 4)])
+        artifacts.append(eq_path)
+
+        pt_path = dirs["raw"] / "portfolio_trades.csv"
+        with pt_path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["strategy_id", "symbol", "direction", "entry_time", "exit_time", "admitted",
+                        "reject_reason", "independent_lot", "portfolio_lot", "net_pnl", "equity_at_entry",
+                        "drawdown_pct_at_entry", "drawdown_sizing_applied", "balance_after", "concurrent_at_entry"])
+            for t in po.trades:
+                w.writerow([t.strategy_id, t.symbol, t.direction,
+                            t.entry_time.isoformat() if t.entry_time else "",
+                            t.exit_time.isoformat() if t.exit_time else "",
+                            t.admitted, t.reject_reason or "", round(t.independent_lot, 4),
+                            round(t.portfolio_lot, 4), round(t.net_pnl, 2), round(t.equity_at_entry, 2),
+                            round(t.drawdown_pct_at_entry, 2), t.drawdown_sizing_applied,
+                            round(t.balance_after, 2), t.concurrent_at_entry])
+        artifacts.append(pt_path)
+
+        summary = po.to_summary_dict()
+        ps_json = dirs["root"] / "portfolio_summary.json"
+        ps_json.write_text(_json.dumps(summary, indent=2))
+        artifacts.append(ps_json)
+        ps_md = dirs["root"] / "portfolio_summary.md"
+        ps_md.write_text(_portfolio_markdown(summary))
+        artifacts.append(ps_md)
+
+        repo_root = Path(__file__).parent.parent.parent.parent
+        payload = build_dashboard_payload(run, results, po, ea_config, repo_root=repo_root)
+        dash_path = dirs["root"] / "dashboard_data.json"
+        write_dashboard_payload(payload, dash_path)
+        artifacts.append(dash_path)
+        if dashboard_out:
+            extra = Path(dashboard_out)
+            if extra.suffix != ".json":
+                extra = extra / "dashboard_data.json"
+            write_dashboard_payload(payload, extra)
+            print(f"Dashboard payload also written to {extra}")
 
     if not dry_run:
         advanced_insights = await generate_advanced_trade_insights(

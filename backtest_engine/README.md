@@ -49,8 +49,39 @@ backtest-engine --help
 | `db restore`       | `pg_restore` a dump into backtest_lab            |
 | `inspect-source`   | Print source DB stats (strategies, candles, etc.)|
 
+## Portfolio model & dashboard (EA-01/04/08/16/18 mirror)
+
+The engine mirrors the live EA's account-level behaviour via a chronological single-account
+portfolio walk (`simulation/portfolio.py`), on by default:
+
+- **EA-04** rejects a new entry when an opposite-direction position is open on the symbol.
+- **EA-16** sizes off floating EQUITY and reduces lots by `drawdown_reduction_factor` in drawdown.
+- Concurrency (`max_concurrent_trades`) and total-risk (`max_total_risk_percent`) caps; an equity
+  curve, max drawdown and profit factor.
+- **EA-01** (`max_entry_distance_atr`) and **EA-08** (range-breakout off `level`) act on entry detection.
+
+It emits a decision-grade `dashboard_data.json` (Trust / Edge / Contamination / Portfolio) that the
+`ai_trading_backtest_dashboard` app reads directly (no API / no `backtest_lab` needed):
+
+```bash
+# Run with the portfolio model and refresh the dashboard payload in one shot
+python -m backtest_engine.cli run --portfolio \
+  --dashboard-out ../ai_trading_backtest_dashboard/public/
+
+# Offline dashboard demo data (no DB), reading the real EA version for the trust card
+PYTHONPATH=. .venv/bin/python scripts/generate_sample_dashboard.py
+```
+
+Flags: `--portfolio/--no-portfolio` (default on), `--starting-balance` (default 500),
+`--dashboard-out PATH`. Artifacts per run: `portfolio_summary.{md,json}`,
+`raw/portfolio_equity_curve.csv`, `raw/portfolio_trades.csv`, `dashboard_data.json`.
+
+> Parity note: full Layer-A bit-exact parity (VALIDATION_DESIGN/03) still needs an MT5
+> Strategy-Tester EA decision trace; until then the dashboard trust card shows surfaces as
+> *audited status*, not trace-measured. See `VALIDATION_DESIGN/07_ROADMAP.md` for status.
+
 ## Configuration
 
-- **EA config**: YAML file (see `configs/ea_v3_00.yml`)
+- **EA config**: YAML file (see `configs/ea_v3_00.yml`); `ea_version` pins it to the deployed EA build
 - **Broker specs**: JSONL file with per-symbol execution parameters
 - **DB connections**: All from environment variables (never hardcoded)

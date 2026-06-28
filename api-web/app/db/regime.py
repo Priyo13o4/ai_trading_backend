@@ -12,6 +12,10 @@ from .helpers import _ohlcv_relation_for_timeframe, _compute_swing_analysis
 
 logger = logging.getLogger(__name__)
 
+# Process-wide lock to prevent NumPy/TA-Lib segfaults when multiple threads
+# attempt to calculate indicators concurrently during a cache miss/stampede.
+_numpy_calc_lock = asyncio.Lock()
+
 
 async def get_latest_regime_from_db(session: AsyncSession):
     """
@@ -188,7 +192,10 @@ async def get_regime_market_data_from_db(db: AsyncSession):
                                     momentum_ema=21,
                                     volatility_lookback=100
                                 )
-                            calc_res = await asyncio.to_thread(_run_calc, candle_list)
+                            
+                            # Run synchronously on main thread to avoid NumPy/Gunicorn threading segfaults
+                            async with _numpy_calc_lock:
+                                calc_res = _run_calc(candle_list)
                             
                             if calc_res:
                                 indicators['ema_9'] = calc_res.get('emas', {}).get('EMA_9')

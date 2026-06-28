@@ -1,10 +1,21 @@
-# TradeExecutor v3.00 patched configuration profile for backtesting.
+# TradeExecutor configuration profile for backtesting.
 # Keep these names close to the EA input names so config drift is visible.
+#
+# ea_version pins the config to the deployed EA build (VALIDATION_DESIGN/03 D15 version-pin).
+# The dashboard trust card fails the version check if this != #property version in
+# MT5_stuff/TradeExecutor(updated).mq5. Reconciled v3.00 -> v3.31 after the EA roadmap fixes
+# were deployed; the permissive caps below (max_concurrent_trades=20, max_total_risk_percent=95)
+# mirror the EA's live testing configuration (EA-02 kept permissive per the operator).
+ea_version: "3.31"
 
 trade_pairs: "ALL"
 magic_number: 260529
 
 zone_buffer_atr_multiplier: 0.5
+
+# EA-01 mirror: skip an entry when live price is more than this multiple of ATR (+ entry
+# buffer) from the AI's level, so conditions firing far past the level are not chased.
+max_entry_distance_atr: 1.5
 
 min_lot_size: 0.01
 max_lot_size: 0.1
@@ -15,7 +26,7 @@ medium_confidence_multiplier: 1.0
 low_confidence_multiplier: 0.7
 
 max_risk_percent_per_trade: 2.0
-max_total_risk_percent: 8.0
+max_total_risk_percent: 95.0   # reconciled to deployed EA (was 8.0 in the v3.00 profile)
 use_drawdown_protection: true
 drawdown_threshold: 10.0
 drawdown_reduction_factor: 0.5
@@ -68,7 +79,12 @@ entry_spread_buffer_pips_by_symbol:
   XAUUSD: 25.0     # 25 pips ($0.25 buffer)
   XAGUSD: 30.0     # 30 pips ($0.30 buffer)
 
-max_concurrent_trades: 3
+# Portfolio model (EA-02/EA-04/EA-16 mirror). Concurrency reconciled to the deployed EA's
+# permissive live value (was 3 in the v3.00 profile -> now 20 to match the running EA).
+# max_total_risk_percent lives in the risk section above (single source of truth).
+max_concurrent_trades: 20
+block_opposite_open_positions: true   # EA-04: reject a new signal if an opposite position is open
+portfolio_starting_balance: 500.0
 use_correlation_filter: true
 max_correlated_exposure: 0.2
 

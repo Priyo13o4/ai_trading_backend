@@ -237,7 +237,7 @@ def calculate_all_indicators(
         return {}
 
     if len(df) < volatility_lookback:
-        logger.warning(
+        logger.debug(
             f"Data shorter than volatility lookback ({len(df)} < {volatility_lookback}); "
             "raw indicators will still be computed, percentile fields may be null"
         )

@@ -50,37 +50,20 @@ async def run_referral_reward_transitions() -> bool:
     
     Returns True if successful, False otherwise.
     """
-    log("Starting referral reward transitions orchestration...")
-
-    # Step 1: Transition expired on_hold to available
-    log("Step 1: Transitioning expired on_hold rewards to available...")
     hold_result = await transition_rewards_on_hold_to_available()
-    log(f"✓ Transitioned {hold_result.transitioned_count} on_hold rewards to available")
-
-    # Step 2: Apply available rewards
-    log("Step 2: Applying available rewards...")
     apply_result = await apply_available_rewards()
-    log(f"✓ Applied {apply_result.transitioned_count} available rewards")
-
-    log("Referral reward transitions orchestration completed")
     return True
 
 
 def main() -> int:
     """Main entry point for the referral rewards transition orchestrator."""
-    log("=" * 80)
-    log("REFERRAL REWARDS TRANSITION ORCHESTRATOR")
-    log("=" * 80)
-    
     if _is_debug_enabled():
         log("✓ Debug logging enabled (AUTHDBG_ENABLED=1)")
     
     try:
         success = asyncio.run(run_referral_reward_transitions())
         if success:
-            log("Orchestration completed successfully")
             return 0
-        log("Orchestration failed")
         return 1
     except ReferralTransitionConfigurationError as e:
         log(f"✗ Blocking configuration error: {e}")

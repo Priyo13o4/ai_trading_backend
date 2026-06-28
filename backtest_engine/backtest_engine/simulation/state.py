@@ -18,6 +18,7 @@ from backtest_engine.simulation.pnl import calculate_pnl, calculate_commission, 
 from backtest_engine.simulation.risk import calculate_lot_size
 from backtest_engine.simulation.indicators import calculate_atr, is_bearish_pin_bar, is_bullish_pin_bar
 from backtest_engine.simulation.strategy_context import build_signal_context
+from backtest_engine.simulation.portfolio import PortfolioTradeCtx
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +295,15 @@ async def simulate_strategy(
     
     bars_scanned = 0
     zone_touched = False
-    
+
+    # EA-01 mirror: max-distance entry guard. The EA refuses to enter when live price is
+    # more than MaxEntryDistanceATR * ATR (+ entry buffer) away from the AI's `level`, so a
+    # condition that only fires after price has run far past the level does not get chased.
+    max_entry_distance_atr = float(ea_config.get("max_entry_distance_atr", 1.5) or 0.0)
+    guard_level = float(sig.get("entry_level") or sig.get("level") or 0.0)
+    guard_buffer_price = float(sig.get("entry_spread_buffer_pips", 0.0)) * 10.0 * broker_spec.point
+    entry_distance_blocked = False
+
     for ts, bar in sim_m1_df.iterrows():
         bars_scanned += 1
         # Expiry Enforcement
@@ -328,6 +337,19 @@ async def simulate_strategy(
                 continue
                 
             if entry_func(hist_df, tick_price, sig, broker_spec.point, atr_val):
+                # EA-01 mirror: reject (skip) an entry that fires too far from the AI's level.
+                # The signal stays active so it can still trigger if price returns within range,
+                # exactly like EntryWithinMaxDistance in TradeExecutor(updated).mq5.
+                if (
+                    max_entry_distance_atr > 0
+                    and guard_level > 0
+                    and not pd.isna(atr_val)
+                    and atr_val > 0
+                ):
+                    max_entry_distance = max_entry_distance_atr * atr_val + guard_buffer_price
+                    if abs(tick_price - guard_level) > max_entry_distance:
+                        entry_distance_blocked = True
+                        continue
                 triggered = True
                 entry_time = ts
                 entry_price = tick_price
@@ -347,8 +369,12 @@ async def simulate_strategy(
         return res
         
     if not triggered:
-        res.outcome = "expired_without_entry"
-        res.outcome_reason = "Did not trigger before expiry"
+        if entry_distance_blocked:
+            res.outcome = "blocked_max_distance"
+            res.outcome_reason = "Entry condition met but price was beyond MaxEntryDistanceATR from level (EA-01)"
+        else:
+            res.outcome = "expired_without_entry"
+            res.outcome_reason = "Did not trigger before expiry"
         res.bars_scanned = bars_scanned
         _forward_test_missed_trade(res, sig, sim_m1_df, direction, take_profit, stop_loss, entry_level)
         return res
@@ -439,10 +465,19 @@ async def simulate_strategy(
     theo_exit_price = None
     theo_hit_tp = False
     theo_hit_sl = False
-    
+
+    # Portfolio runs capture a per-position M1 mark-path (entry->exit) so the portfolio
+    # walker can value floating equity at any decision timestamp (EA-16 equity-based sizing).
+    record_mark = bool(ea_config.get("record_mark_path", False))
+    mark_times: list = []
+    mark_prices: list = []
+
     for ts, bar in m1_trade_df.iterrows():
         bars_scanned += 1
- 
+        if record_mark:
+            mark_times.append(ts)
+            mark_prices.append(float(bar['close']))
+
         while cagg_idx < cagg_len - 1 and cagg_times[cagg_idx + 1] + tf_delta <= ts:
             cagg_idx += 1
         
@@ -670,5 +705,12 @@ async def simulate_strategy(
     else:
         res.theoretical_fixed_tp_net_pnl = 0.0
         res.theoretical_fixed_tp_win = False
-        
+
+    # Transient context for the portfolio walker (not persisted to DB).
+    res.pf_ctx = PortfolioTradeCtx(
+        confidence=confidence,
+        risk_reward_ratio=risk_reward_ratio,
+        mark_times=mark_times,
+        mark_prices=mark_prices,
+    )
     return res
