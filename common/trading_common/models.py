@@ -207,6 +207,7 @@ class RegimeData(Base, ToDictMixin):
     macro_counterforce_note: Mapped[str | None] = mapped_column(Text)
     regime_fragility: Mapped[str | None] = mapped_column(String(20))
     regime_break_probability: Mapped[int | None] = mapped_column(Integer)
+    asset_group: Mapped[str | None] = mapped_column(String(30))
 
 
 class WeeklyMacroPlaybook(Base, ToDictMixin):
@@ -223,6 +224,7 @@ class WeeklyMacroPlaybook(Base, ToDictMixin):
     pair_bias: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     playbook_hash: Mapped[str | None] = mapped_column(Text)
+    usd_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class LiveTradeState(Base, ToDictMixin):
