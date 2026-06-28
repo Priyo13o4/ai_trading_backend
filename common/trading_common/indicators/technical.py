@@ -175,7 +175,9 @@ def calculate_ema_momentum_slope(df: pd.DataFrame, period: int = 21) -> Optional
         if ema_series is not None and not ema_series.empty and len(ema_series) > 5 and not pd.isna(ema_series.iloc[-1]):
             y = ema_series.tail(5).values
             x = np.arange(len(y))
-            slope, _ = np.polyfit(x, y, 1)
+            x_mean = np.mean(x)
+            y_mean = np.mean(y)
+            slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean)**2)
             return round(slope, 5)
         return None
     except Exception as e:
@@ -206,7 +208,9 @@ def calculate_obv_slope(df: pd.DataFrame, period: int = 10) -> Optional[float]:
         if obv_series is not None and not obv_series.empty and len(obv_series) > period:
             y = obv_series.tail(period).values
             x = np.arange(len(y))
-            slope, _ = np.polyfit(x, y, 1)
+            x_mean = np.mean(x)
+            y_mean = np.mean(y)
+            slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean)**2)
             return round(slope, 2)
         return None
     except Exception as e:
