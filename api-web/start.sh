@@ -70,9 +70,11 @@ echo "Starting FastAPI server (web only)..."
 # We default to 4 which is safe on a 2-core machine.
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-4}"
 GUNICORN_LOG_LEVEL="${GUNICORN_LOG_LEVEL:-info}"
+GUNICORN_TIMEOUT="${GUNICORN_TIMEOUT:-120}"
 
 exec gunicorn -w "$GUNICORN_WORKERS" -k uvicorn.workers.UvicornWorker \
 	--bind 0.0.0.0:8080 \
+	--timeout "$GUNICORN_TIMEOUT" \
 	--log-level "$GUNICORN_LOG_LEVEL" \
 	--access-logfile - \
 	--error-logfile - \
